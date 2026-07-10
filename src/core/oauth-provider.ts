@@ -193,6 +193,12 @@ interface GBrainOAuthProviderOptions {
    * (operator-trusted, registers grants directly).
    */
   allowClientCredentialsDcr?: boolean;
+  /**
+   * Per-read timeout (ms) for the token-lookup reads in verifyAccessToken.
+   * Defaults to resolveAuthDbTimeoutMs(GBRAIN_AUTH_DB_TIMEOUT_MS) → 2500.
+   * See readWithAuthDbTimeout for the rationale.
+   */
+  authDbTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +372,91 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
 }
 
 // ---------------------------------------------------------------------------
+// Auth DB read resilience (2026-07-10 diagnosis)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default per-read bound for the token-lookup SELECTs in verifyAccessToken.
+ * A single indexed lookup on token_hash answers in <100ms on a healthy brain;
+ * 2.5s is generous headroom for pool queueing without letting one read hold
+ * the client's MCP `initialize` connect window open for the full driver
+ * timeout (~10s observed under commit pressure). Override with
+ * GBRAIN_AUTH_DB_TIMEOUT_MS.
+ */
+export const DEFAULT_AUTH_DB_TIMEOUT_MS = 2500;
+
+/** Parse GBRAIN_AUTH_DB_TIMEOUT_MS; fall back to the default on unset/invalid. */
+export function resolveAuthDbTimeoutMs(env: string | undefined): number {
+  if (!env) return DEFAULT_AUTH_DB_TIMEOUT_MS;
+  const n = parseInt(env, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_AUTH_DB_TIMEOUT_MS;
+}
+
+/**
+ * Thrown when a token-lookup read exceeds its timeout on BOTH the initial
+ * attempt and the single retry — reached in ~2×timeout instead of the ~10s
+ * driver hang, and only after a retry has had a chance to absorb a momentary
+ * pool-saturation blip. `requireBearerAuthRetryable` (retryable-bearer-auth.ts)
+ * classifies this as transient and returns HTTP 503 + Retry-After so the
+ * client backs off and retries rather than treating it as a hard failure.
+ * (Under the stock SDK requireBearerAuth it would instead map to a 500
+ * server_error, since it is deliberately not an OAuthError subclass.)
+ */
+export class AuthDbTimeoutError extends Error {
+  constructor(message = 'auth token lookup timed out') {
+    super(message);
+    this.name = 'AuthDbTimeoutError';
+  }
+}
+
+/**
+ * Race a token-lookup read against `timeoutMs`; on timeout, abandon and retry
+ * ONCE, then throw AuthDbTimeoutError.
+ *
+ * Motivation (2026-07-10 diagnosis): every POST /mcp — including the MCP
+ * `initialize` handshake — is gated by requireBearerAuth → verifyAccessToken,
+ * which reads the token row from Postgres. Under DB/commit pressure that read
+ * hung ~10s before the driver threw; the raw throw became an SDK ServerError
+ * 500 (bearerAuth.js maps any non-OAuthError → server_error), and a 500 on
+ * `initialize` makes Claude Code abort tool discovery for the WHOLE session
+ * (no in-session retry) — the server shows "Connected" but exposes zero tools.
+ * The 10s hang also burned the client's own connect-retry budget.
+ *
+ * Design notes:
+ *  - Only TIMEOUTS are retried. A timeout means "no deterministic answer yet",
+ *    so a second attempt is safe and often succeeds once a transient blip
+ *    clears (matches the observed "500 twice then 200 on retry" read pattern).
+ *  - Non-timeout rejections propagate UNCHANGED and are NOT retried. This
+ *    preserves verifyAccessToken's isUndefinedColumnError column-probe fallback
+ *    (a deterministic schema error must not be retried or masked) and every
+ *    existing auth-logic path.
+ *  - Promise.race cannot cancel the abandoned query; it keeps running on its
+ *    pool connection. These are single-row indexed SELECTs, so the residual
+ *    load is negligible versus holding the caller (and a connection) ~10s.
+ */
+export async function readWithAuthDbTimeout<T>(
+  run: () => Promise<T>,
+  timeoutMs: number = DEFAULT_AUTH_DB_TIMEOUT_MS,
+): Promise<T> {
+  const TIMED_OUT = Symbol('auth_db_timed_out');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const result = await Promise.race<T | typeof TIMED_OUT>([
+        run(),
+        new Promise<typeof TIMED_OUT>((resolve) => {
+          timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+        }),
+      ]);
+      if (result !== TIMED_OUT) return result as T;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+  throw new AuthDbTimeoutError();
+}
+
+// ---------------------------------------------------------------------------
 // OAuth Provider
 // ---------------------------------------------------------------------------
 
@@ -375,6 +466,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
+  private readonly authDbTimeoutMs: number;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -382,6 +474,8 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     this.dcrDisabled = options.dcrDisabled === true;
     this.tokenTtl = options.tokenTtl || 3600;
     this.refreshTtl = options.refreshTtl || 30 * 24 * 3600;
+    this.authDbTimeoutMs = options.authDbTimeoutMs
+      ?? resolveAuthDbTimeoutMs(process.env.GBRAIN_AUTH_DB_TIMEOUT_MS);
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -594,13 +688,18 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     // every token verification.
     let oauthRows: Record<string, unknown>[];
     try {
-      oauthRows = await this.sql`
+      // Bounded + retry-once so a hung read fails fast (~2×timeout) instead of
+      // holding the client's MCP `initialize` connect window for the full
+      // ~10s driver timeout under DB pressure. A genuine undefined-column
+      // error still propagates unchanged into the catch below (non-timeout →
+      // not retried), preserving the pre-v60/v61 column-probe fallbacks.
+      oauthRows = await readWithAuthDbTimeout(() => this.sql`
         SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
                c.source_id, c.federated_read
         FROM oauth_tokens t
         LEFT JOIN oauth_clients c ON c.client_id = t.client_id
         WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
-      `;
+      `, this.authDbTimeoutMs);
     } catch (err) {
       // v0.34.1: pre-v60 brain → source_id column missing. Pre-v61 brain →
       // federated_read column missing. Both classes degrade to legacy
@@ -676,10 +775,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     // pinning every legacy token to `default`.
     let legacyRows: Record<string, unknown>[];
     try {
-      legacyRows = await this.sql`
+      legacyRows = await readWithAuthDbTimeout(() => this.sql`
         SELECT name, permissions FROM access_tokens
         WHERE token_hash = ${tokenHash} AND revoked_at IS NULL
-      `;
+      `, this.authDbTimeoutMs);
     } catch (err) {
       if (isUndefinedColumnError(err, 'permissions')) {
         legacyRows = await this.sql`
