@@ -165,6 +165,65 @@ describe('parseSkillFrontmatter', () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseSkillFrontmatter — CRLF frontmatter (Windows SKILL.md)
+// ---------------------------------------------------------------------------
+//
+// On Windows, ~/gbrain/skills/*/SKILL.md are 100% CRLF. The LF-only fence
+// regex (`/^---\n.../`) never matched the `---\r\n` fence, so the parser
+// returned null and every frontmatter field (name, triggers, brain_first)
+// came back undefined — globally killing the frontmatter-trigger reachability
+// arm of `gbrain doctor` (surfaced 2026-07-09 as skill-optimizer unreachable).
+
+describe('parseSkillFrontmatter — CRLF frontmatter', () => {
+  const crlf = (lines: string[]) => lines.join('\r\n');
+
+  test('CRLF fence parses name + block-list triggers (LF-only regex regression)', () => {
+    const content = crlf([
+      '---',
+      'name: skill-optimizer',
+      'triggers:',
+      '  - optimize skill',
+      '  - improve skill',
+      '---',
+      '',
+      '# skill-optimizer',
+    ]);
+    const fm = parseSkillFrontmatter(content);
+    expect(fm).not.toBeNull();
+    expect(fm!.name).toBe('skill-optimizer');
+    expect(fm!.triggers).toEqual(['optimize skill', 'improve skill']);
+  });
+
+  test('CRLF canonical brain_first: exempt still populates the typed field', () => {
+    const content = crlf(['---', 'name: x', 'brain_first: exempt', '---', '']);
+    const fm = parseSkillFrontmatter(content);
+    expect(fm).not.toBeNull();
+    expect(fm!.brain_first).toBe('exempt');
+    expect(fm!.brain_first_typo).toBeUndefined();
+  });
+
+  test('CRLF inline array fields parse without a trailing carriage return', () => {
+    const content = crlf(['---', 'name: x', 'tools: [search, query, put_page]', '---', '']);
+    const fm = parseSkillFrontmatter(content);
+    expect(fm!.tools).toEqual(['search', 'query', 'put_page']);
+  });
+
+  test('CRLF quoted block-list values are unquoted (no dangling quote+CR)', () => {
+    const content = crlf([
+      '---',
+      'name: x',
+      'writes_to:',
+      '  - "people/"',
+      "  - 'companies/'",
+      '---',
+      '',
+    ]);
+    const fm = parseSkillFrontmatter(content);
+    expect(fm!.writes_to).toEqual(['people/', 'companies/']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // stripFrontmatter + offset helpers
 // ---------------------------------------------------------------------------
 

@@ -82,7 +82,10 @@ export interface ParsedFrontmatter {
  * `readFileSync(path, 'utf-8')` at the boundary.
  */
 export function parseSkillFrontmatter(content: string): ParsedFrontmatter | null {
-  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  // CRLF-tolerant fence: Windows SKILL.md files use `---\r\n`. An LF-only
+  // fence (`\n`) silently returns null for every CRLF file, which globally
+  // dead-ends the doctor frontmatter-reachability arm on Windows.
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fmMatch) return null;
   const raw = fmMatch[1];
   const out: ParsedFrontmatter = { raw };
@@ -144,7 +147,10 @@ function parseArrayField(raw: string, field: string): string[] | undefined {
   if (blockMatch) {
     return blockMatch[1]
       .split('\n')
-      .map(l => l.replace(/^[ \t]+-[ \t]+/, '').replace(/^["']|["']$/g, '').trim())
+      // Trim BEFORE stripping quotes so a CRLF line (`  - "people/"\r`) has
+      // its trailing `\r` removed first; otherwise `["']$` can't reach the
+      // closing quote (the `\r` sits between it and end-of-string).
+      .map(l => l.replace(/^[ \t]+-[ \t]+/, '').trim().replace(/^["']|["']$/g, ''))
       .filter(Boolean);
   }
   return undefined;
