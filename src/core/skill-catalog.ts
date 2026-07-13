@@ -337,7 +337,12 @@ function availableBrainTools(ctx: OperationContext): string[] {
  * showed a literal "|" in the catalog instead of their text.
  */
 function parseDescriptionField(raw: string): string | undefined {
-  const lines = raw.split('\n');
+  // Normalize CRLF / lone CR before splitting: Windows SKILL.md frontmatter is
+  // `\r\n`, which otherwise leaves a trailing `\r` on every line. The
+  // `/^description:[ \t]*(.*)$/` match below has no `m` flag, and neither `.`
+  // nor `$` spans/anchors across a `\r` — so a `description: …\r` line never
+  // matched and the field was silently dropped for every CRLF skill.
+  const lines = raw.replace(/\r\n?/g, '\n').split('\n');
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^description:[ \t]*(.*)$/);
     if (!m) continue;
@@ -371,8 +376,12 @@ function parseDescriptionField(raw: string): string | undefined {
 }
 
 /** Strip the leading `---\n...\n---` fence; return the prose body. */
-function stripFrontmatterFence(content: string): string {
-  const m = content.match(/^---\n[\s\S]*?\n---\n?/);
+export function stripFrontmatterFence(content: string): string {
+  // CRLF-tolerant fence: Windows SKILL.md files use `---\r\n`. An LF-only fence
+  // never matched, so the whole file was returned as "body" — collapsing the
+  // first-prose-line description fallback to "" and leaking the fence into
+  // `get_skill`'s body. Body bytes are otherwise preserved as authored.
+  const m = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
   return m ? content.slice(m[0].length) : content;
 }
 
