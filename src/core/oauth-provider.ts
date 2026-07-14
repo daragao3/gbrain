@@ -793,10 +793,31 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     if (legacyRows.length > 0) {
       // Legacy tokens get full admin access (grandfather in).
       // For legacy tokens, name = clientId = clientName (single identifier).
-      // Update last_used_at
-      await this.sql`
-        UPDATE access_tokens SET last_used_at = now() WHERE token_hash = ${tokenHash}
-      `;
+      //
+      // last_used_at refresh — debounced + fire-and-forget (2026-07-13 wedge).
+      // This is soft telemetry and MUST NOT gate the auth decision. The shared
+      // static loopback token (~/.gbrain/http-mcp-token) is a legacy
+      // access_tokens row (oauth_tokens is empty), so EVERY POST /mcp from every
+      // consumer reaches this branch. The prior blocking, un-debounced
+      // `await UPDATE ... WHERE token_hash` targeted that SINGLE hot row, so all
+      // concurrent requests serialized on one row-write lock; under commit
+      // pressure the lock was held across each slow commit and the whole /mcp
+      // auth gate hung zero-byte — while /health (SELECT 1, no row lock) stayed
+      // fast. That is the exact wedge signature the auth-503 read-bounding fix
+      // (readWithAuthDbTimeout) did NOT cover: the hang was in this WRITE, after
+      // the bounded reads. The 60s debounce makes ~every call a no-op UPDATE
+      // (predicate fails → no row write, no WAL, no lock convoy), and
+      // `void … .catch()` removes it from the awaited critical path entirely.
+      // Mirrors the legacy transport's identical treatment of this same column
+      // (src/mcp/http-transport.ts). readWithAuthDbTimeout is deliberately NOT
+      // reused here — it is a READ helper (Promise.race abandons but cannot
+      // cancel the query); the right fix for a soft-telemetry write is to never
+      // block on it.
+      void this.sql`
+        UPDATE access_tokens SET last_used_at = now()
+        WHERE token_hash = ${tokenHash}
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds')
+      `.catch(() => { /* best-effort telemetry; never fail auth on it */ });
       const name = legacyRows[0].name as string;
       const permissionsRaw = legacyRows[0].permissions;
       let permissions: unknown = permissionsRaw;
