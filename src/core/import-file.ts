@@ -316,6 +316,31 @@ export async function importFromContent(
 
   const parsed = parseMarkdown(content, slug + '.md', { activePack: opts.activePack });
 
+  // Frontmatter parse-failure guard (2026-07-23 KB audit; 34 pages damaged).
+  //
+  // A delimited `---` block whose YAML doesn't parse used to fall through to
+  // gray-matter's forgiving fallback: empty frontmatter, whole raw payload as
+  // the body. The write then landed with title <- slug-derived,
+  // type <- 'concept', tags <- [] and reported success, silently destroying
+  // the page's real metadata. Refuse instead — the caller keeps whatever the
+  // page already had, and the error names the YAML problem so the agent can
+  // fix the payload and retry.
+  //
+  // Only unparseable-but-delimited blocks are rejected. Content with no
+  // frontmatter, or an unterminated fence, still imports as before (inference
+  // owns those cases).
+  if (parsed.frontmatterError) {
+    return {
+      slug,
+      status: 'error',
+      chunks: 0,
+      error:
+        `FRONTMATTER_PARSE: the --- block is not valid YAML, so title/type/tags ` +
+        `could not be read. Refusing the write to avoid resetting existing page ` +
+        `metadata. Fix the frontmatter and retry. YAML error: ${parsed.frontmatterError}`,
+    };
+  }
+
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
   // input. parseMarkdown preserves every frontmatter key except type/title/
   // tags/slug, so a remote MCP put_page (ctx.remote !== false, threaded as

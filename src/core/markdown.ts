@@ -48,6 +48,24 @@ export interface ParsedMarkdown {
   tags: string[];
   /** Present iff opts.validate. Empty array means no errors. */
   errors?: ParseValidationError[];
+  /**
+   * Set (unconditionally — no opt-in) when the content HAS a delimited
+   * frontmatter block (`---` open + `---` close) whose YAML failed to parse.
+   * Carries the js-yaml message.
+   *
+   * Why this exists (2026-07-23 KB audit, 34 pages silently damaged): when the
+   * YAML throws, gray-matter's fallback below yields empty frontmatter and the
+   * WHOLE raw content as the body — so `type`/`title`/`slug` fall through to
+   * inference and `tags` to `[]`. Callers that persist the result (put_page →
+   * importFromContent) then overwrite good metadata with slug-derived defaults
+   * and report success. Any caller that WRITES must check this field and
+   * refuse; the two field-observed triggers are a leading space before a
+   * mapping key (` type: theme`) and an unquoted colon in a scalar
+   * (`title: Fed regime: no guidance`).
+   *
+   * Undefined when there is no frontmatter block at all, or when it parsed.
+   */
+  frontmatterError?: string;
 }
 
 /**
@@ -155,7 +173,69 @@ export function parseMarkdown(
     tags,
   };
   if (opts?.validate) result.errors = errors;
+  const fmError = detectFrontmatterParseFailure(content, frontmatter, yamlParseError);
+  if (fmError) result.frontmatterError = fmError;
   return result;
+}
+
+/**
+ * Detect "there IS a `---` block but its YAML is broken" — the condition that
+ * silently reset 34 pages' metadata (2026-07-23 audit).
+ *
+ * Deliberately does NOT rely on gray-matter throwing. gray-matter writes
+ * `matter.cache[file.content] = file` BEFORE it parses, so the FIRST call on a
+ * broken payload throws while leaving an unparsed entry behind, and every
+ * subsequent call on identical content returns `data: {}` + the raw body with
+ * no throw at all. Inside a long-lived process (the shared HTTP MCP) that made
+ * the damage look nondeterministic. Re-parsing the block ourselves is
+ * cache-immune.
+ *
+ * Fires only when gray-matter produced ZERO frontmatter keys, so a block it
+ * parsed successfully can never be second-guessed by our own scan; the extra
+ * js-yaml parse is therefore paid only on already-suspect input.
+ */
+function detectFrontmatterParseFailure(
+  content: string,
+  frontmatter: Record<string, unknown>,
+  yamlParseError: Error | null,
+): string | undefined {
+  const block = extractFrontmatterBlock(content);
+  if (block === null) return undefined;
+  if (yamlParseError) return yamlParseError.message;
+  // gray-matter got fields out of it → the block parsed. Nothing to report.
+  if (Object.keys(frontmatter).length > 0) return undefined;
+  // Empty/comment-only blocks are legal YAML and yield no keys; only a genuine
+  // parse failure is reported.
+  if (block.trim().length === 0) return undefined;
+  try {
+    yamlSafeLoad(block);
+    return undefined;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
+/**
+ * Return the text BETWEEN the opening `---` fence (first non-empty line) and
+ * the next `---` fence, or null when the content has no delimited frontmatter
+ * block. Mirrors the MISSING_OPEN / MISSING_CLOSE structural checks in
+ * collectValidationErrors, so a bare `---` horizontal rule in body text or a
+ * file with no frontmatter can never be mistaken for one.
+ */
+export function extractFrontmatterBlock(content: string): string | null {
+  const lines = content.split('\n');
+  let open = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().length > 0) {
+      open = i;
+      break;
+    }
+  }
+  if (open === -1 || lines[open].trim() !== '---') return null;
+  for (let i = open + 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') return lines.slice(open + 1, i).join('\n');
+  }
+  return null;
 }
 
 /**

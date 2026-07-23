@@ -772,7 +772,16 @@ const put_page: Operation = {
   description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug' },
-    content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
+    content: {
+      type: 'string',
+      required: true,
+      description:
+        'Full markdown content with YAML frontmatter. The `---` block MUST be valid YAML — ' +
+        'if it is not, the write is REFUSED (status "error", frontmatter.error "unparseable") and ' +
+        'the page is left untouched. Two mistakes cause nearly all failures: (1) a leading space ' +
+        'before a key (" type: theme" instead of "type: theme"); (2) an unquoted colon inside a ' +
+        'value (title: Fed regime: no guidance) — wrap the whole value in quotes.',
+    },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -869,6 +878,30 @@ const put_page: Operation = {
       source_uri: provenanceUri,
       ingested_via: provenanceVia,
     });
+
+    // Frontmatter parse-failure short-circuit (2026-07-23 KB audit).
+    // importFromContent refuses the write when the `---` block exists but its
+    // YAML doesn't parse (pre-fix: silent reset to slug-derived title /
+    // type=concept / tags=[]). Return immediately with an explicit
+    // `frontmatter` field so the agent sees WHY nothing was written, instead
+    // of a normal-looking `created_or_updated`. Nothing downstream (write-
+    // through, auto-link, backstops, lint) should run for a refused write.
+    if (result.status === 'error' && result.error?.startsWith('FRONTMATTER_PARSE:')) {
+      return {
+        slug,
+        status: 'error',
+        chunks: 0,
+        error: result.error,
+        frontmatter: {
+          error: 'unparseable',
+          detail: result.error.replace(/^FRONTMATTER_PARSE:\s*/, ''),
+          page_unchanged: true,
+          hint:
+            'Common causes: a leading space before a key (" type: theme"), or an ' +
+            'unquoted colon inside a value (title: A: B) — quote the whole value.',
+        },
+      };
+    }
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
