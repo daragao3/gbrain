@@ -30,6 +30,12 @@ export interface ToolResult {
 export interface DispatchOpts {
   /** Defaults to true (remote/untrusted). Local CLI callers (`gbrain call`) pass false. */
   remote?: boolean;
+  /**
+   * #1061: transport marker for auth-less remote surfaces. The stdio MCP
+   * server passes 'stdio' so identity ops (whoami) can report the transport
+   * instead of throwing unknown_transport. Never used for trust decisions.
+   */
+  transport?: OperationContext['transport'];
   /** Override the default stderr logger (e.g. CLI uses console.* directly). */
   logger?: OperationContext['logger'];
   /**
@@ -203,6 +209,7 @@ export function buildOperationContext(
     logger: opts.logger || stderrLogger,
     dryRun: !!params.dry_run,
     remote: opts.remote ?? true,
+    transport: opts.transport,
     takesHoldersAllowList: opts.takesHoldersAllowList,
     // v0.34 D4: sourceId is REQUIRED at the type level. Auto-fill 'default'
     // for single-source brains and any caller who didn't resolve a sourceId.

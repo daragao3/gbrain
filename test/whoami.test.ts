@@ -107,6 +107,24 @@ describe('whoami op contract', () => {
     }
   });
 
+  // #1061: stdio MCP is remote/untrusted by design but auth-less (local pipe).
+  // It is a KNOWN transport, so whoami reports it instead of throwing.
+  test('stdio transport returns empty scopes when remote=true AND transport=stdio (no auth)', async () => {
+    const result = (await whoami.handler(
+      ctxWith({ remote: true, auth: undefined, transport: 'stdio' }),
+      {},
+    )) as any;
+    expect(result.transport).toBe('stdio');
+    expect(result.scopes).toEqual([]);
+  });
+
+  test('stdio marker does NOT grant trust — remote stays true (trust keys off remote only)', async () => {
+    // Guard: the transport tag is for identity reporting, never trust. A
+    // stdio ctx is still remote/untrusted; only ctx.remote === false trusts.
+    const ctx = ctxWith({ remote: true, auth: undefined, transport: 'stdio' });
+    expect(ctx.remote).toBe(true);
+  });
+
   test('unknown_transport throws when remote is undefined (cast bypass guard)', async () => {
     // F7b contract: ctx.remote is REQUIRED. If a caller widens the type to
     // Partial<> and passes through undefined, whoami should treat it as
