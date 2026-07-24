@@ -2,6 +2,31 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.66.0] - 2026-07-24
+
+**The frontmatter linter now agrees with the write path: a page with unparseable YAML frontmatter is reported broken every time it is checked, not just the first.**
+
+`gbrain lint` / `gbrain frontmatter` detected a malformed-YAML page by watching the parser throw. The parser only throws on the first parse of a given payload and then serves a cached result, so a repeat check — the common case inside the long-lived MCP server — could report an already-broken page as clean. The lint check now uses the same cache-immune detection the write path already refuses on, so lint and write-refusal always give the same verdict.
+
+### How to use it
+
+Upgrade, then lint as usual:
+
+```bash
+gbrain upgrade
+gbrain lint
+```
+
+No schema migrations.
+
+### Itemized changes
+
+#### Fixed
+- **Frontmatter YAML_PARSE lint check is cache-immune.** Lint check 6 now calls the same detector the disk-side import refusal uses instead of gating on the YAML parser throwing, so a broken-frontmatter page is flagged on every check, including repeat parses inside a persistent process.
+
+#### Tests
+- **Disk-path refusal-by-inheritance is pinned.** New `test/frontmatter-parse-guard-disk-path.test.ts` (9 tests) covers the `importFromFile` disk-side refusal and drives the lint fix.
+
 ## [0.42.64.0] - 2026-07-20
 
 ### Fixed
