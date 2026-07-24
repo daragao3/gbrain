@@ -377,11 +377,26 @@ function collectValidationErrors(
     }
   }
 
-  // 6. YAML_PARSE — gray-matter threw.
-  if (ctx.yamlParseError) {
+  // 6. YAML_PARSE — the `---` block exists but its YAML does not parse.
+  //
+  // Deliberately NOT gated on `ctx.yamlParseError` (i.e. on gray-matter
+  // throwing). gray-matter writes `matter.cache[content] = file` BEFORE it
+  // parses, so only the FIRST parse of a given payload throws; every
+  // byte-identical repeat afterwards returns `data: {}` with no throw at all.
+  // Gating on the throw meant `gbrain lint` / `gbrain frontmatter` reported a
+  // broken file as CLEAN on the second look — and inside the long-lived HTTP
+  // MCP, where some other call has usually parsed the content already, on the
+  // first look too. detectFrontmatterParseFailure re-parses the block itself,
+  // so it is cache-immune.
+  //
+  // This is the SAME detector behind `ParsedMarkdown.frontmatterError` (the
+  // write-refusal in importFromContent), so the lint surface and the refusal
+  // can never disagree about whether a file is broken.
+  const yamlError = detectFrontmatterParseFailure(content, ctx.parsedFrontmatter, ctx.yamlParseError);
+  if (yamlError) {
     errors.push({
       code: 'YAML_PARSE',
-      message: `YAML parse failed: ${ctx.yamlParseError.message}`,
+      message: `YAML parse failed: ${yamlError}`,
       line: firstNonEmpty + 1,
     });
   }
