@@ -83,7 +83,43 @@ export type LinkResolutionType = 'qualified' | 'unqualified';
  *   - Our domain extensions: tech, finance, personal, openclaw (domain-organized wikis)
  *   - Our entity prefix: entities (we kept some legacy entities/projects/ pages)
  */
-const DIR_PATTERN = '(?:people|companies|meetings|concepts|deal|civic|project|projects|source|media|yc|tech|finance|personal|openclaw|entities)';
+export const DEFAULT_ENTITY_DIRS = [
+  'people', 'companies', 'meetings', 'concepts', 'deal', 'civic', 'project',
+  'projects', 'source', 'media', 'yc', 'tech', 'finance', 'personal',
+  'openclaw', 'entities',
+] as const;
+
+const DIR_PATTERN = `(?:${DEFAULT_ENTITY_DIRS.join('|')})`;
+
+/**
+ * Only `[a-z0-9]`-led, dash/underscore-separated segments are accepted as
+ * entity dirs. These strings come from operator config and are interpolated
+ * straight into a RegExp, so anything that could carry regex metacharacters
+ * (or an alternation escape) has to be rejected rather than escaped — a
+ * silently-dropped bad dir is a missing edge, an accepted one is arbitrary
+ * pattern injection into every extraction on the brain.
+ */
+const ENTITY_DIR_RE = /^[a-z0-9][a-z0-9_-]*$/;
+
+export function normalizeEntityDirs(dirs: readonly string[] | undefined): string[] {
+  if (!dirs || dirs.length === 0) return [];
+  const defaults = new Set<string>(DEFAULT_ENTITY_DIRS);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of dirs) {
+    const d = String(raw).trim().toLowerCase();
+    if (!ENTITY_DIR_RE.test(d)) continue;
+    if (defaults.has(d) || seen.has(d)) continue;
+    seen.add(d);
+    out.push(d);
+  }
+  // Longest-first, and stable for a given config so the regex cache key is
+  // deterministic. Every arm is followed by a literal `/` in the patterns
+  // below, so backtracking already resolves prefix pairs (`project` vs
+  // `projects`) correctly — this ordering just avoids depending on it.
+  out.sort((a, b) => b.length - a.length || a.localeCompare(b));
+  return out;
+}
 
 /**
  * Match `[Name](path)` markdown links pointing to entity directories.
@@ -161,6 +197,91 @@ const WIKILINK_GENERIC_RE = /\[\[([^|\]#\n[]+?)(?:#[^|\]]*?)?(?:\|([^\]]+?))?\]\
  * span out of the 2c scan so a wikilink inside a markdown label is inert.
  */
 const MARKDOWN_LABEL_WIKILINK_RE = /\[[^\]\n]*\[\[[^\]\n]+\]\][^\]\n]*\]\([^)\n]+\)/g;
+
+/**
+ * The three dir-gated patterns, rebuilt for a brain whose top-level slug
+ * dirs differ from the canonical set.
+ *
+ * DIR_PATTERN is gbrain's opinion about what a brain's namespaces look like
+ * (`people/`, `companies/`, `meetings/`…). A brain organized around other
+ * roots — `sessions/`, `systems/`, `markets/` — matches none of them, so
+ * every `[[sessions/foo]]` falls through the dir-gated passes into the
+ * generic 2c pass, gets tagged `needsResolution`, and is then DROPPED unless
+ * `link_resolution.global_basename` is on. The page renders a wikilink, the
+ * graph gets no edge, and nothing reports an error. `link_resolution.entity_dirs`
+ * lets an operator name those roots so the normal typed-edge path applies to
+ * them, rather than forcing the fuzzier basename resolver on the whole brain.
+ */
+export interface EntityRegexSet {
+  entityRef: RegExp;
+  wikilink: RegExp;
+  qualifiedWikilink: RegExp;
+}
+
+const DEFAULT_REGEX_SET: EntityRegexSet = {
+  entityRef: ENTITY_REF_RE,
+  wikilink: WIKILINK_RE,
+  qualifiedWikilink: QUALIFIED_WIKILINK_RE,
+};
+
+const regexSetCache = new Map<string, EntityRegexSet>();
+
+/**
+ * The bare `(?:a|b|c)` dir alternation for the default dirs plus `extraDirs`.
+ * Used by the bare-slug scan, which builds its own pattern rather than
+ * reusing one of the three EntityRegexSet members.
+ */
+export function buildDirPattern(extraDirs?: readonly string[]): string {
+  const extra = normalizeEntityDirs(extraDirs);
+  if (extra.length === 0) return DIR_PATTERN;
+  return `(?:${extra.join('|')}|${DEFAULT_ENTITY_DIRS.join('|')})`;
+}
+
+/**
+ * Build (and memoize) the dir-gated patterns for `DEFAULT_ENTITY_DIRS` plus
+ * `extraDirs`. Returns the module-level set unchanged when there is nothing
+ * to add, so the default path keeps its existing regex identities.
+ */
+export function buildEntityRegexSet(extraDirs?: readonly string[]): EntityRegexSet {
+  const extra = normalizeEntityDirs(extraDirs);
+  if (extra.length === 0) return DEFAULT_REGEX_SET;
+  const key = extra.join('|');
+  const cached = regexSetCache.get(key);
+  if (cached) return cached;
+  const dirPattern = `(?:${extra.join('|')}|${DEFAULT_ENTITY_DIRS.join('|')})`;
+  const set: EntityRegexSet = {
+    entityRef: new RegExp(
+      `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${dirPattern}\\/[^)\\s]+?)(?:\\.md)?\\)`,
+      'g',
+    ),
+    wikilink: new RegExp(
+      `\\[\\[(${dirPattern}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+      'g',
+    ),
+    qualifiedWikilink: new RegExp(
+      `\\[\\[([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(${dirPattern}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+      'g',
+    ),
+  };
+  regexSetCache.set(key, set);
+  return set;
+}
+
+/**
+ * Read `link_resolution.entity_dirs` — a comma-separated list of extra
+ * top-level slug dirs the extractor should treat as entity namespaces.
+ *
+ * Resolution order matches isGlobalBasenameEnabled:
+ *   1. Env var `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS`
+ *   2. DB plane via `engine.getConfig('link_resolution.entity_dirs')`
+ *   3. Default [] (canonical dirs only — existing brains are unaffected)
+ */
+export async function getExtraEntityDirs(engine: BrainEngine): Promise<string[]> {
+  const envVal = process.env.GBRAIN_LINK_RESOLUTION_ENTITY_DIRS;
+  const raw = envVal != null ? envVal : await engine.getConfig('link_resolution.entity_dirs');
+  if (raw == null) return [];
+  return normalizeEntityDirs(String(raw).split(','));
+}
 
 /**
  * Strip fenced code blocks (```...```) and inline code (`...`) from markdown,
@@ -298,23 +419,31 @@ export function extractCodeRefs(content: string): CodeRef[] {
  * here; caller dedups). Slugs appearing inside fenced or inline code blocks
  * are excluded — those are typically code samples, not real entity references.
  */
-export function extractEntityRefs(content: string): EntityRef[] {
+export function extractEntityRefs(
+  content: string,
+  opts: { entityDirs?: readonly string[]; wikilinkOnly?: boolean } = {},
+): EntityRef[] {
   const stripped = stripCodeBlocks(content);
   const refs: EntityRef[] = [];
+  const res = buildEntityRegexSet(opts.entityDirs);
   let match: RegExpExecArray | null;
 
   // 1. Markdown links: [Name](path)
   //    Markdown links have no source-qualification syntax — they're
   //    always unqualified. Omit sourceId so the shape stays compatible
   //    with pre-v0.17 consumers doing strict equality.
+  //
+  //    Under wikilinkOnly the matched RANGES are still collected (pass 2c
+  //    masks against them) but no refs are emitted — dropping the ranges
+  //    too would let a wikilink nested in a markdown label leak through.
   const markdownRanges: Array<[number, number]> = [];
-  const mdPattern = new RegExp(ENTITY_REF_RE.source, ENTITY_REF_RE.flags);
+  const mdPattern = new RegExp(res.entityRef.source, res.entityRef.flags);
   while ((match = mdPattern.exec(stripped)) !== null) {
     const name = match[1];
     const fullPath = match[2];
     const slug = fullPath;
     const dir = fullPath.split('/')[0];
-    refs.push({ name, slug, dir });
+    if (!opts.wikilinkOnly) refs.push({ name, slug, dir });
     markdownRanges.push([match.index, match.index + match[0].length]);
   }
 
@@ -322,7 +451,7 @@ export function extractEntityRefs(content: string): EntityRef[] {
   //     Must run BEFORE the unqualified pass or we'd double-emit. We also
   //     mask out the matched spans so pass 2b can't grab them.
   const qualifiedRanges: Array<[number, number]> = [];
-  const qualPattern = new RegExp(QUALIFIED_WIKILINK_RE.source, QUALIFIED_WIKILINK_RE.flags);
+  const qualPattern = new RegExp(res.qualifiedWikilink.source, res.qualifiedWikilink.flags);
   while ((match = qualPattern.exec(stripped)) !== null) {
     const sourceId = match[1];
     let slug = match[2].trim();
@@ -339,7 +468,7 @@ export function extractEntityRefs(content: string): EntityRef[] {
   //     Same shape rule: omit sourceId when unqualified.
   const unqualifiedRanges: Array<[number, number]> = [];
   const unmasked = maskRanges(stripped, qualifiedRanges);
-  const wikiPattern = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
+  const wikiPattern = new RegExp(res.wikilink.source, res.wikilink.flags);
   while ((match = wikiPattern.exec(unmasked)) !== null) {
     let slug = match[1].trim();
     if (!slug) continue;
@@ -468,12 +597,34 @@ export async function extractPageLinks(
   frontmatter: Record<string, unknown>,
   pageType: PageType,
   resolver: SlugResolver,
-  opts: { globalBasename?: boolean; skipFrontmatter?: boolean } = {},
+  opts: {
+    globalBasename?: boolean;
+    skipFrontmatter?: boolean;
+    entityDirs?: readonly string[];
+    /**
+     * Restrict extraction to EXPLICIT `[[wikilink]]` syntax: drop markdown
+     * `[Name](people/x)` links, the bare-slug scan (pass 2), and
+     * frontmatter-derived edges (pass 3).
+     *
+     * This is the subset that is safe to run for untrusted (remote) callers.
+     * The bare-slug scan is the actual injection surface the trust gate was
+     * built for — it matches `people/x` anywhere in prose, so any quoted or
+     * pasted text can plant outbound edges, and the backlink boost in
+     * hybridSearch then rewards the planted target in search. A wikilink is
+     * deliberate authoring syntax, and code spans are stripped before any
+     * pass runs, so restoring only that arm closes the reconciliation gap
+     * without reopening the hole.
+     */
+    wikilinkOnly?: boolean;
+  } = {},
 ): Promise<PageLinksResult> {
   const candidates: LinkCandidate[] = [];
 
   // 1. Markdown entity refs.
-  for (const ref of extractEntityRefs(content)) {
+  for (const ref of extractEntityRefs(content, {
+    entityDirs: opts.entityDirs,
+    wikilinkOnly: opts.wikilinkOnly,
+  })) {
     // Issue #972: refs from the generic `[[bare-name]]` pass carry the
     // literal wikilink text, not a real page slug. When global_basename
     // mode is on AND the resolver implements basename lookup, resolve
@@ -538,23 +689,28 @@ export async function extractPageLinks(
   // 2. Bare slug references (e.g. "see people/alice-chen for context").
   // Limited to the same entity directories ENTITY_REF_RE covers.
   // Code blocks are stripped first — slugs in code samples are not real refs.
+  // Skipped entirely under wikilinkOnly: this scan is the injection surface
+  // (any prose mentioning `people/x` plants an edge), which is precisely what
+  // untrusted callers must not reach.
   const strippedContent = stripCodeBlocks(content);
-  const bareRe = new RegExp(
-    `\\b(${DIR_PATTERN}\\/[a-z0-9][a-z0-9/-]*[a-z0-9])\\b`,
-    'g',
-  );
-  let m: RegExpExecArray | null;
-  while ((m = bareRe.exec(strippedContent)) !== null) {
-    // Skip matches that are part of a markdown link (already handled above).
-    const charBefore = m.index > 0 ? strippedContent[m.index - 1] : '';
-    if (charBefore === '/' || charBefore === '(') continue;
-    const context = excerpt(strippedContent, m.index, 240);
-    candidates.push({
-      targetSlug: m[1],
-      linkType: inferLinkType(pageType, context, content, m[1]),
-      context,
-      linkSource: 'markdown',
-    });
+  if (!opts.wikilinkOnly) {
+    const bareRe = new RegExp(
+      `\\b(${buildDirPattern(opts.entityDirs)}\\/[a-z0-9][a-z0-9/-]*[a-z0-9])\\b`,
+      'g',
+    );
+    let m: RegExpExecArray | null;
+    while ((m = bareRe.exec(strippedContent)) !== null) {
+      // Skip matches that are part of a markdown link (already handled above).
+      const charBefore = m.index > 0 ? strippedContent[m.index - 1] : '';
+      if (charBefore === '/' || charBefore === '(') continue;
+      const context = excerpt(strippedContent, m.index, 240);
+      candidates.push({
+        targetSlug: m[1],
+        linkType: inferLinkType(pageType, context, content, m[1]),
+        context,
+        linkSource: 'markdown',
+      });
+    }
   }
 
   // 3. Frontmatter-derived edges (v0.13). Includes the legacy `source:`
@@ -566,7 +722,7 @@ export async function extractPageLinks(
   // synthetic `nullResolver`; that pattern broke once the bare-wikilink
   // path needed `resolveBasenameMatches` on the real resolver.
   let fmUnresolved: UnresolvedFrontmatterRef[] = [];
-  if (!opts.skipFrontmatter) {
+  if (!opts.skipFrontmatter && !opts.wikilinkOnly) {
     const fm = await extractFrontmatterLinks(slug, pageType, frontmatter, resolver);
     candidates.push(...fm.candidates);
     fmUnresolved = fm.unresolved;
@@ -1120,6 +1276,54 @@ export interface TimelineCandidate {
 const TIMELINE_LINE_RE = /^\s*-?\s*\*\*(\d{4}-\d{2}-\d{2})\*\*\s*[|\-–—]+\s*(.+?)\s*$/;
 
 /**
+ * Plain (un-bolded) date rows: `- YYYY-MM-DD — summary`.
+ *
+ * TIMELINE_LINE_RE requires the date to be bold, which is gbrain's own
+ * house style. Brains authored by agents writing an append-only
+ * `## Timeline` section overwhelmingly use the plain form instead, so a
+ * bold-only parser reports zero coverage on a page that visibly renders a
+ * full history. This regex covers the plain form without loosening the
+ * bold one.
+ *
+ * Shape, and why each piece is tight:
+ *   - A list bullet is REQUIRED and the date must be the first token after
+ *     it. Prose almost never opens a bullet with a bare ISO date unless the
+ *     bullet IS a dated entry, and that requirement is what keeps this pass
+ *     from eating ordinary sentences that merely contain a date.
+ *   - An optional QUALIFIER may sit between the date and the separator
+ *     (`- 2026-07-11 late — …`, `- 2026-07-16 ~16:45 ET — …`). Real pages
+ *     use these constantly. Without an explicit slot for it, the row fails
+ *     to match and the detail-collection loop below swallows it into the
+ *     PREVIOUS entry's detail — silently producing a corrupted double-length
+ *     row rather than an obvious miss. Bounded to 24 chars so it cannot run
+ *     away across a sentence.
+ *   - The separator alternation is ordered and each arm is anchored on
+ *     whitespace so a hyphen only separates when spaced (`a - b`, never
+ *     `well-known`). The `:` arm requires TRAILING whitespace, which is what
+ *     distinguishes a separator colon from a clock time: `16:45` has a digit
+ *     after the colon, so a time inside the qualifier (`~16:45 ET`) can never
+ *     be mistaken for the separator — the engine backtracks and extends the
+ *     qualifier instead, which is exactly the desired parse. A leading
+ *     lookbehind would not work here, since the date itself ends in a digit
+ *     and `- 2026-07-27: summary` is a legitimate row.
+ */
+const TIMELINE_PLAIN_LINE_RE =
+  /^\s*[-*]\s+(\d{4}-\d{2}-\d{2})(?:\s+([^|–—\n]{1,24}?))?(?:\s*[|–—]+\s*|\s+-+\s+|:\s+)(.+?)\s*$/;
+
+/**
+ * True when a line opens a timeline entry in EITHER supported form.
+ * Both the entry scan and the detail-collection terminator must agree on
+ * this, or a plain row would be absorbed as detail of the row above it.
+ */
+function matchTimelineLine(line: string): { date: string; summary: string } | null {
+  const bold = TIMELINE_LINE_RE.exec(line);
+  if (bold) return { date: bold[1], summary: bold[2].trim() };
+  const plain = TIMELINE_PLAIN_LINE_RE.exec(line);
+  if (plain) return { date: plain[1], summary: plain[3].trim() };
+  return null;
+}
+
+/**
  * Parse timeline entries from content. Looks at:
  *   - The full content (most pages have a top-level "## Timeline" heading).
  *   - Free-form `- **DATE** | text` lines anywhere.
@@ -1134,13 +1338,13 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
 
   let i = 0;
   while (i < lines.length) {
-    const m = TIMELINE_LINE_RE.exec(lines[i]);
+    const m = matchTimelineLine(lines[i]);
     if (!m) {
       i++;
       continue;
     }
-    const date = m[1];
-    const summary = m[2].trim();
+    const date = m.date;
+    const summary = m.summary;
     if (!isValidDate(date) || summary.length === 0) {
       i++;
       continue;
@@ -1151,7 +1355,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
     let j = i + 1;
     while (j < lines.length) {
       const next = lines[j];
-      if (TIMELINE_LINE_RE.test(next)) break;
+      if (matchTimelineLine(next)) break;
       if (/^#{1,6}\s/.test(next)) break;
       if (next.trim().length === 0 && detailLines.length === 0) {
         // skip leading blank line; if we hit a blank after detail content
@@ -1181,7 +1385,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
   // bullet pass are skipped (a bullet often carries its own citation).
   const citationRe = /\[Source:\s*([^\]]+?),\s*(\d{4}-\d{2}-\d{2})\s*\]/g;
   for (const line of lines) {
-    if (TIMELINE_LINE_RE.test(line)) continue;
+    if (matchTimelineLine(line)) continue;
     const matches = [...line.matchAll(citationRe)];
     if (matches.length === 0) continue;
     const summary = line
@@ -1256,6 +1460,42 @@ export async function isAutoTimelineEnabled(engine: BrainEngine): Promise<boolea
  *
  * Closes https://github.com/garrytan/gbrain/issues/972.
  */
+/**
+ * Read the `link_resolution.remote_reconcile` flag. Defaults to FALSE.
+ *
+ * When TRUE, a put_page from an untrusted (remote/MCP) caller runs a
+ * REDUCED reconciliation instead of skipping it outright:
+ *   - auto-timeline runs in full. Gating it on trust bought nothing: the
+ *     same caller can already write the same rows through the
+ *     `add_timeline_entry` MCP op, and the rows attach to the page it just
+ *     wrote — no cross-page authority is involved.
+ *   - auto-link runs in wikilink-only, ADD-ONLY mode. Explicit `[[...]]`
+ *     syntax becomes edges; the bare-slug prose scan and frontmatter edges
+ *     stay local-only, and no stale-edge removal happens (a remote writer
+ *     must not be able to prune edges another writer authored).
+ *   - the chronicle backstop stays fully gated — it enqueues LLM jobs, so
+ *     it is a cost decision as much as a trust one.
+ *
+ * Off by default so existing deployments keep today's exact behavior; this
+ * is opt-in per brain, consistent with the fail-closed trust rule.
+ *
+ * Resolution order (highest → lowest):
+ *   1. Env var `GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE=1`
+ *   2. DB plane via `engine.getConfig('link_resolution.remote_reconcile')`
+ *   3. Default false
+ */
+export async function isRemoteReconcileEnabled(engine: BrainEngine): Promise<boolean> {
+  const envVal = process.env.GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE;
+  if (envVal != null) {
+    const normalized = envVal.trim().toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(normalized);
+  }
+  const val = await engine.getConfig('link_resolution.remote_reconcile');
+  if (val == null) return false;
+  const normalized = val.trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
 export async function isGlobalBasenameEnabled(engine: BrainEngine): Promise<boolean> {
   const envVal = process.env.GBRAIN_LINK_RESOLUTION_GLOBAL_BASENAME;
   if (envVal != null) {
