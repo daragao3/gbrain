@@ -55,6 +55,46 @@ Nothing to run, and no schema migrations. If you work on GBrain itself, stop a t
 1. **If you detach test runs on purpose**, for example under `nohup` or `setsid`, set `GBRAIN_TEST_NO_PARENT_WATCH=1` so the missing parent is not read as a stopped run.
 2. **If you have collected orphans from earlier runs**, they are from before this change and will not clear themselves. Select them by command line rather than by program name, since other processes share the same name, and check that the parent is actually gone before ending anything.
 
+## [0.42.68.1] - 2026-07-28
+
+**On Windows, GBrain now reads the settings block at the top of your skill files instead of acting like it isn't there.**
+
+Every skill file starts with a small settings block fenced by `---` lines. That block holds the skill's name, its one-line description, and the list of phrases that route work to it. GBrain found that block by looking for a very specific character sequence at the start of the file. Windows saves text files with a slightly different line ending than macOS and Linux do, and Git converts files to the Windows form automatically when you check them out. So on Windows the sequence never matched, and GBrain concluded the file had no settings block at all. Not an error, not a warning: it just treated a fully configured skill as an unconfigured one.
+
+The results looked like unrelated bugs. `gbrain check-resolvable` reported that 49 skills declared no routing phrases, when every one of them did. `gbrain skillpack list --json` returned an empty description for every skill in the bundle. The derived skill manifest labelled each skill by its folder name instead of its real name. And the skill optimizer, which is supposed to treat the settings block as off-limits, saw no block to protect and would happily edit inside it. Four sites, one cause. All four now read both line-ending styles.
+
+This only ever affected Windows. If you are on macOS or Linux, nothing changes for you.
+
+### How to use it
+
+```bash
+gbrain upgrade
+gbrain check-resolvable
+```
+
+On Windows, skills that declare routing phrases now report as configured. No schema migrations, no config changes, nothing to re-run.
+
+### Things to watch
+
+- If `check-resolvable` previously showed a long list of skills missing routing phrases and you were about to add them by hand, re-run it first. Most of that list should be gone.
+- The skill optimizer's rule that it must never edit your settings block is now actually enforced on Windows. If you have a saved optimizer run from before this release that edited a settings block, discard it.
+
+### Itemized changes
+
+- `src/core/check-resolvable.ts` — `extractTriggers` normalizes line endings before matching the frontmatter fence, so `triggers:` is read from a CRLF `SKILL.md`. Clears the false `mece_gap` warnings and lets the repo's own skills pass `checkResolvable` cleanly.
+- `src/commands/skillpack.ts` — description parsing extracted into `parseSkillDescription`, now line-ending tolerant, so `skillpack list --json` returns a real description per skill instead of `null`. Normalizing also keeps a stray carriage return out of the JSON payload.
+- `src/core/skill-manifest.ts` — `parseSkillName` reads `name:` from a CRLF `SKILL.md` instead of falling back to the directory name.
+- `src/core/skillopt/apply-edits.ts` — `splitFrontmatter` matches a CRLF fence. Previously the whole file, frontmatter included, became the editable body, defeating the frontmatter-is-immutable guarantee. The fence is relaxed rather than normalized on purpose: the returned offset indexes the original text, so rewriting line endings there would corrupt every edit position.
+- `test/check-resolvable.test.ts`, `test/skill-manifest.test.ts`, `test/skillopt/apply-edits.test.ts`, `test/skillpack-list-description.test.ts` — 17 regression tests. Each site gets a CRLF fixture asserted at parity with its LF twin, plus a negative case pinning that a file with genuinely no settings block is still reported as having none.
+
+## To take advantage of v0.42.68.1
+
+`gbrain upgrade`. No new schema migrations.
+
+1. **On Windows:** run `gbrain check-resolvable` once. Skills that declare routing phrases should no longer be reported as missing them.
+2. **On Windows:** run `gbrain skillpack list --json` and confirm each entry carries a description rather than `null`.
+3. **If you contribute to GBrain:** when you parse YAML frontmatter, match the fence with `/^---\r?\n/`, or normalize with `content.replace(/\r\n/g, '\n')` first. `src/core/skill-frontmatter.ts` is the reference. Normalize when the parsed values flow downstream; relax only the fence when a byte offset into the original text is returned.
+
 ## [0.42.68.0] - 2026-07-28
 
 **On Windows, the bundled schema packs load instead of coming back empty, and a new build check stops the underlying path bug from returning.**

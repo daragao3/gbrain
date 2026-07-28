@@ -219,7 +219,14 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
 
 /** Simple YAML frontmatter parser — extracts triggers array if present. */
 function extractTriggers(skillContent: string): string[] {
-  const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
+  // Normalize line endings BEFORE matching. An LF-only fence (`^---\n`)
+  // cannot match a file that starts `---\r\n`, so every SKILL.md checked out
+  // on Windows (`core.autocrlf=true` is the Git-for-Windows default) parsed
+  // as "no frontmatter" and reported a missing `triggers:` array even though
+  // it declared one. Normalizing also keeps a trailing `\r` off each trigger
+  // value, which the block-list `.+` would otherwise capture.
+  const normalized = skillContent.replace(/\r\n/g, '\n');
+  const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---/);
   if (!fmMatch) return [];
   const fm = fmMatch[1];
   const triggersMatch = fm.match(/^triggers:\s*\n((?:\s+-\s+.+\n?)*)/m);
