@@ -46,6 +46,25 @@ If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the
 - `tests/heavy/*.sh` → ops-shape shell scripts. Cost minutes per run; NOT in default `bun test`. Run via `bun run test:heavy` or scheduled nightly via `.github/workflows/heavy-tests.yml`. Examples: pg_upgrade matrix (boot legacy brain → walk to head), RSS budget gate (measure peak worker RSS vs committed baseline), read-latency-under-sync (p50/p95/p99 under concurrent writer load), sync lock regression (N concurrent syncs assert 1 winner + N-1 lock-busy + zero leaked `gbrain_cycle_locks` rows). See `tests/heavy/README.md` for when to add a script here vs `*.slow.test.ts`. Files prefixed with `_` (e.g. `tests/heavy/_build_legacy_fixtures.sh`) are helpers/libs invoked by sibling tests — the runner skips them.
 - `test/fuzz/*.test.ts` → property-based fuzz harness. Pure-validator targets in `pure-validators.test.ts` are guarded by `scripts/check-fuzz-purity.sh` (in `bun run verify`), which `bun build --target=bun` bundles each target and greps the resulting bundle for banned transitive imports (`node:fs`, `node:child_process`, engine modules). Anything that fails the guard moves to `mixed-validators.test.ts` (still property-tested, but no purity guarantee) or `filesystem-validators.test.ts` (fs-backed, uses temp dirs). Fuzz tests run in the default `bun test` loop because they're fast (~3s for ~12 properties × 1000 runs each).
 
+### Tests that shell out (`spawnSync`)
+
+A few suites run the repo's own shell checks and assert on what they report:
+`test/scripts/check-test-isolation.test.ts`, `test/scripts/run-verify-parallel.test.ts`,
+and `test/privacy-script-wired.test.ts`. Two conventions apply to any test in this class.
+
+- **Raise the per-test limit: `setDefaultTimeout(120_000)` at module scope.** Process
+  creation costs ~1.5-2.5s per child on Windows (MSYS/MINGW64 fork emulation plus
+  on-access AV scanning), and these scripts spawn `git`, `find` and several `grep`s of
+  their own. One check against a one-file fixture measures 15-23s there, against bun's
+  5s default, so the test gets cut off and reports `status: -1` while the script itself
+  returned the correct answer. The limit is a ceiling, not a delay: the same spawns cost
+  ~10ms on Linux, so CI wallclock does not move.
+- **Assert file modes through git, not the filesystem.** NTFS has no POSIX executable
+  bit, so `fs.statSync().mode` reports `100666` for a file that is committed `100755`.
+  Use `git ls-files -s -- <path>` and assert the index mode. That is the mode which
+  decides whether a script is executable when CI checks the tree out, and it also
+  catches a script committed without the bit when the author's own filesystem has it set.
+
 ### Test-isolation lint and helpers
 
 The cross-file flake class is enforced statically by `scripts/check-test-isolation.sh`, wired into `bun run verify` and `bun run check:all`. Rules (non-serial unit files only; `*.serial.test.ts` and `test/e2e/*` are skipped):
