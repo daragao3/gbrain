@@ -2,23 +2,44 @@
 
 ## v0.42.69.0 follow-ups (Windows bun test crash)
 
-- [ ] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
-  instance is live.** v0.42.69.0 fixed exactly one (`mergeOntologyFact` in both
-  engines), which was enough to take `test/chronicle-context.test.ts` from
-  crashing the run to 2 pass. The crash class is not closed: a dynamic import
-  issued from an async method while the PGLite WASM instance is live can still
-  take the whole `bun test` process down on Windows with error 127
-  (`ERROR_PROC_NOT_FOUND`) before it prints a summary, discarding pass/fail for
-  every file in that invocation. Chunking in `scripts/run-unit-shard.sh` bounds
-  the damage; it does not cure it. Enumerate the `await import(` sites in
-  `src/core/` that an engine method can reach and hoist the ones that are not
-  load-bearing for startup cost. The full unit suite cannot be a Windows ship
-  gate until this is done.
-- [ ] **P3 — consider a guard for dynamic imports on the engine hot path.** Once
-  the sweep above establishes which sites are legitimately lazy, a
-  `scripts/check-*.sh` in the repo's usual shape could keep a new
-  `await import()` from landing inside an engine method. Only worth writing after
-  the sweep, since the allowlist is the hard part, not the grep.
+- [x] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
+  instance is live.** DONE. Enumerated the engine-reachable sites and hoisted 11
+  of 13 to static top-level imports:
+  - `src/core/migrate.ts` (2) — `retry-matcher.ts`, `timeline-dedup-repair.ts`.
+    The highest-value pair: `runMigrations()` is called from `initSchema()`, so
+    these fired on **every PGLite boot** with WASM already live. Both are runtime
+    leaves (one has no imports, the other only a type), so the hoist is free.
+  - `src/core/pglite-engine.ts` (2) — `retry.ts`, `search/recency-decay.ts`.
+  - `src/core/postgres-engine.ts` (7) — `retry.ts`, `retry-matcher.ts`,
+    `search/recency-decay.ts`, `audit/db-disconnect-audit.ts`, and
+    `audit/pool-recovery-audit.ts` (×3). Engine parity per CLAUDE.md.
+
+  Most cost literally nothing: `retry.ts` was **already statically imported at
+  the top of both engines**, so those were pure redundancy, and the audit modules'
+  dependencies were already in the graph via `audit/batch-retry-audit.ts`. After
+  the sweep the engines' depth-1 static closure contains no dynamic imports at all.
+- [x] **P3 — guard for dynamic imports on the engine hot path.** DONE:
+  `scripts/check-engine-dynamic-import.sh`, wired into `check:all` and
+  `run-verify-parallel.sh`. Scans the two engines + `migrate.ts`, ignores comment
+  lines, and takes an `engine-dynamic-import-ok` opt-out marker. Verified in both
+  directions against a fixture (fires on a real violation, silent on commented-out
+  and opted-out lines) and on a CRLF copy.
+
+- [ ] **P1 (NEW) — the full unit suite still cannot gate a Windows ship, and the
+  remaining blocker is NOT dynamic imports.** The sweep closed the enumerable
+  dynamic-import class, but the definition of done ("a full `bun run test` prints
+  a totals line") is blocked by a separate, memory-shaped ceiling that no source
+  edit fixes: roughly **146 MB is retained per PGLite test file** and never
+  reclaimed within a single `bun test` invocation, so a 253-file shard needs
+  ~37 GB of commit charge. This box shares a 79 GB commit limit across ~10
+  concurrent agent worktrees. Measured directly during this work: free commit fell
+  from 6.0 GB → 1.9 GB while other sessions ran, and `bash` itself then failed to
+  fork with **`0xC000012D` (`STATUS_COMMITMENT_LIMIT`)**, killing a 12-file run
+  mid-flight. Any single-run rc=127 / exit-3 verdict on this box is uninterpretable
+  unless `Win32_OperatingSystem.FreeVirtualMemory` and the `bun.exe` count are
+  sampled alongside it. Next lever is per-invocation memory (chunk size in
+  `scripts/run-unit-shard.sh`, or a fresh process per chunk so PGLite instances are
+  actually reclaimed), not further import hoisting.
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)
 
