@@ -444,6 +444,66 @@ describe("v0.22.4 regression — actual repo skills/ has 0 errors", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// CRLF tolerance — extractTriggers frontmatter fence
+//
+// Windows checkouts with core.autocrlf=true smudge every SKILL.md to CRLF.
+// An LF-only fence (`/^---\n/`) returns null for all of them, so every skill
+// looks like it declares no `triggers:` and the MECE-gap arm fires once per
+// skill. CI runs on Ubuntu, so this only ever surfaced in user environments.
+// ---------------------------------------------------------------------------
+
+/** Same shape as makeSkillsFixture, but every file is written with CRLF. */
+function makeCrlfSkillsFixture(skills: Record<string, string[]>): string {
+  const dir = mkdtempSync(join(tmpdir(), "gbrain-crlf-"));
+  const crlf = (s: string) => s.replace(/\n/g, "\r\n");
+  const names = Object.keys(skills);
+  const rows = names.map(n => `| "${n}" | \`skills/${n}/SKILL.md\` |`).join("\n");
+  writeFileSync(
+    join(dir, "RESOLVER.md"),
+    crlf(`## Test\n| Trigger | Skill |\n|-----|-----|\n${rows}\n`)
+  );
+  writeFileSync(
+    join(dir, "manifest.json"),
+    crlf(JSON.stringify({ skills: names.map(n => ({ name: n, path: `${n}/SKILL.md` })) }, null, 2))
+  );
+  for (const [name, triggers] of Object.entries(skills)) {
+    mkdirSync(join(dir, name), { recursive: true });
+    const rows = triggers.map(t => `  - "${t}"`).join("\n");
+    writeFileSync(
+      join(dir, name, "SKILL.md"),
+      crlf(`---\nname: ${name}\ndescription: test\ntriggers:\n${rows}\n---\n\nBody.\n`)
+    );
+  }
+  return dir;
+}
+
+describe("CRLF tolerance — extractTriggers", () => {
+  let dir: string;
+  afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
+
+  test("CRLF SKILL.md with triggers: does NOT report a mece_gap", () => {
+    dir = makeCrlfSkillsFixture({ alpha: ["do the alpha thing"] });
+    const report = checkResolvable(dir);
+    const gaps = report.issues.filter(i => i.type === "mece_gap");
+    expect(gaps).toEqual([]);
+  });
+
+  test("CRLF triggers are parsed with surrounding quotes stripped", () => {
+    // Two skills sharing a trigger produce a mece_overlap whose message
+    // echoes the parsed trigger text. A trailing `\r` left in place blocks
+    // the closing-quote strip, so the echo would read `shared trigger"`.
+    dir = makeCrlfSkillsFixture({
+      alpha: ["shared trigger"],
+      beta: ["shared trigger"],
+    });
+    const report = checkResolvable(dir);
+    const overlap = report.issues.find(i => i.type === "mece_overlap");
+    expect(overlap).toBeDefined();
+    expect(overlap!.message).toContain("Trigger 'shared trigger'");
+  });
+});
+
 // bun:test has no beforeEach/afterEach at module scope cleanly interacting
 // with closures; a small helper keeps cleanup readable and per-test.
 function afterEachCleanup(fn: () => void) {
