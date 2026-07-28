@@ -236,6 +236,17 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   — it also keeps a trailing `\r` out of them. Relax only the fence when the function returns
   a byte offset into the original text (`splitFrontmatter` in `src/core/skillopt/apply-edits.ts`),
   since normalizing would corrupt every offset.
+- **The repo's own shell scripts: LF-pinned, and invoked through `bash`.** Complementary to
+  the rule above, and the case `.gitattributes` CAN fix — these are files the repo owns, not
+  a runtime `skillsDir`. Two halves, and each hides the other: (1) `.gitattributes` sets
+  `*.sh text eol=lf`, without which `core.autocrlf=true` checks every script out CRLF and a
+  strict bash dies on the trailing `\r`; (2) every `package.json` script that runs a `.sh`
+  MUST be written `bash scripts/foo.sh`, never the bare path — bun on Windows will not start
+  a file from its shebang, so a bare path exits instantly with "command not found" and the
+  check reports failure without having read a line. A bare path works on Linux and macOS, so
+  CI can never catch it. When you add a check, prefix it. Note `.gitattributes` only changes
+  what a FUTURE checkout materializes; an existing clone keeps its CRLF copies until you
+  replace them (`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`).
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
