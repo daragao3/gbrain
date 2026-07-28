@@ -339,43 +339,6 @@ function makeCrlfSkillsFixture(files: Record<string, string>): string {
   return lf;
 }
 
-describe("CRLF frontmatter — checkResolvable", () => {
-  let dir: string;
-  afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
-
-  test("does not report mece_gap for CRLF skills that declare triggers:", () => {
-    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody.\n" });
-    const gaps = checkResolvable(dir).issues.filter(i => i.type === "mece_gap");
-    expect(gaps).toHaveLength(0);
-  });
-
-  test("CRLF and LF fixtures produce identical mece_gap counts", () => {
-    const files = { alpha: "# Alpha\n\nBody.\n", beta: "# Beta\n\nBody.\n" };
-    const lfDir = makeSkillsFixture(files);
-    dir = makeCrlfSkillsFixture(files);
-    try {
-      const count = (d: string) =>
-        checkResolvable(d).issues.filter(i => i.type === "mece_gap").length;
-      expect(count(dir)).toBe(count(lfDir));
-    } finally {
-      rmSync(lfDir, { recursive: true, force: true });
-    }
-  });
-
-  test("still reports mece_gap when a CRLF skill genuinely omits triggers:", () => {
-    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody.\n" });
-    const skillPath = join(dir, "alpha", "SKILL.md");
-    // Strip only the triggers: block, leaving the rest of the frontmatter.
-    writeFileSync(
-      skillPath,
-      readFileSync(skillPath, "utf8").replace(/triggers:\r\n( *- .*\r\n)+/, "")
-    );
-    const gaps = checkResolvable(dir).issues.filter(i => i.type === "mece_gap");
-    expect(gaps).toHaveLength(1);
-    expect(gaps[0].skill).toBe("alpha");
-  });
-});
-
 describe("DRY detection — checkResolvable", () => {
   let dir: string;
   afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
@@ -436,6 +399,88 @@ describe("DRY detection — checkResolvable", () => {
     const report = checkResolvable(dir);
     const dry = report.issues.filter(i => i.type === "dry_violation");
     expect(dry.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CRLF tolerance
+//
+// An LF-only frontmatter fence (`/^---\n/`) cannot match a file that starts
+// `---\r\n`, so a CRLF SKILL.md parsed as having NO frontmatter — silently,
+// with no error — and every skill was reported as missing its `triggers:`
+// array even though it declared one. On Windows `core.autocrlf=true` (the
+// Git-for-Windows installer default) makes EVERY checked-out SKILL.md CRLF,
+// so this fired for the whole skills tree.
+// ---------------------------------------------------------------------------
+
+/** Same shape as makeSkillsFixture, but writes SKILL.md with CRLF endings. */
+function makeCrlfSkillsFixture(files: Record<string, string>, opts?: { omitFrontmatter?: boolean }): string {
+  const dir = mkdtempSync(join(tmpdir(), "gbrain-crlf-"));
+  const skillNames = Object.keys(files);
+  const resolverRows = skillNames.map(n => `| "${n}" | \`skills/${n}/SKILL.md\` |`).join("\n");
+  writeFileSync(join(dir, "RESOLVER.md"), `## Test\n| Trigger | Skill |\n|-----|-----|\n${resolverRows}\n`);
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({ skills: skillNames.map(n => ({ name: n, path: `${n}/SKILL.md` })) }, null, 2)
+  );
+  for (const [name, body] of Object.entries(files)) {
+    mkdirSync(join(dir, name), { recursive: true });
+    const frontmatter = opts?.omitFrontmatter
+      ? ""
+      : `---\nname: ${name}\ndescription: test\ntriggers:\n  - "${name}"\n---\n`;
+    writeFileSync(join(dir, name, "SKILL.md"), (frontmatter + body).replace(/\n/g, "\r\n"));
+  }
+  return dir;
+}
+
+describe("checkResolvable — CRLF frontmatter", () => {
+  let dir: string;
+  afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
+
+  test("reads triggers: from a CRLF SKILL.md instead of reporting a gap", () => {
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" });
+    const report = checkResolvable(dir);
+    const gaps = report.issues.filter(i => i.type === "mece_gap");
+    // The bug: a mece_gap warning claiming 'alpha' declares no triggers,
+    // when the frontmatter declares exactly one.
+    expect(gaps).toEqual([]);
+  });
+
+  test("CRLF and LF fixtures produce identical issue sets", () => {
+    const body = { alpha: "# Alpha\n\nBody text.\n" };
+    const lfDir = makeSkillsFixture(body);
+    dir = makeCrlfSkillsFixture(body);
+    const norm = (d: string) =>
+      checkResolvable(d).issues.map(i => ({ type: i.type, severity: i.severity, skill: i.skill }));
+    try {
+      expect(norm(dir)).toEqual(norm(lfDir));
+    } finally {
+      rmSync(lfDir, { recursive: true, force: true });
+    }
+  });
+
+  test("still reports a gap when a CRLF SKILL.md genuinely has no frontmatter", () => {
+    // No fence at all — the checker MUST report absence, not invent triggers.
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" }, { omitFrontmatter: true });
+    const report = checkResolvable(dir);
+    const gaps = report.issues.filter(i => i.type === "mece_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].skill).toBe("alpha");
+  });
+
+  test("still reports a gap when CRLF frontmatter parses but omits triggers:", () => {
+    // Distinct from the case above: the fence IS present and parses, so the
+    // normalize step succeeds and the absence has to be caught by the
+    // triggers: lookup rather than by the frontmatter match failing.
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" });
+    const skillPath = join(dir, "alpha", "SKILL.md");
+    writeFileSync(
+      skillPath,
+      readFileSync(skillPath, "utf8").replace(/triggers:\r\n( *- .*\r\n)+/, "")
+    );
+    const gaps = checkResolvable(dir).issues.filter(i => i.type === "mece_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].skill).toBe("alpha");
   });
 });
 
