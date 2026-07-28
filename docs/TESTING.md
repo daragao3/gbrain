@@ -174,6 +174,10 @@ Bun.spawnSync([process.execPath, repoPath('src', 'cli.ts')], { cwd: REPO_ROOT })
 
 Same class, same fix: build expected paths with `join()` rather than a hardcoded forward-slash literal when the code under test joins them, or the assertion can only pass on POSIX.
 
+**Never match a YAML frontmatter fence with an LF-only `---\n`.** `content.match(/^---\n…/)` has no `m` flag, so `^` anchors at offset 0 only and a file starting `---\r\n` matches nowhere. Nothing throws: the parser returns null or an empty array, and every caller concludes the file has no frontmatter. On Windows `core.autocrlf=true` makes every checked-out `SKILL.md` CRLF, so it fires for the whole skills tree at once, and it is an identity transform on POSIX, so Linux CI cannot catch it. `.gitattributes` cannot fix it either, because `skillsDir` is a runtime parameter and gbrain parses `SKILL.md` files it does not own.
+
+`scripts/check-frontmatter-fence.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on the two shapes that read from offset 0: an LF-only fence in a regex literal, and `.startsWith('---\n')`. It leaves alone the far more common case of *building* content — fixture bodies, page builders, markdown-HR joins — which carry neither a `^` anchor nor `startsWith`. Fix by relaxing the fence to `/^---\r?\n…/`, or by normalizing once up front (`content.replace(/\r\n/g, '\n')`), which is preferred when the parsed values flow downstream because it also strips a trailing `\r` off each one. Do not normalize when the function returns a byte offset into the original text, since that shifts every offset. A `frontmatter-fence-guard-ok` comment opts out a line that genuinely wants LF only — in tests that means asserting on gbrain's own emitted markdown, where LF is the property under test and relaxing the fence would stop the assertion catching a CRLF regression in the writer.
+
 ### Unit test inventory
 
 `bun test` runs all tests without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
