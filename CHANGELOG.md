@@ -2,6 +2,45 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.1] - 2026-07-28
+
+**If the job supervisor is ever pointed at a worker binary it cannot start, it now retries and eventually gives up loudly instead of going silent forever.**
+
+Until this release, a worker that failed to *launch* — a missing or moved `gbrain` binary, a bad path in config, a file the OS refuses to execute, a permissions problem — stopped the supervisor dead on the very first attempt. It logged one line about the failed spawn and then did nothing at all: no retry, no backoff, no crash count, no give-up, no further output. `gbrain jobs supervisor` stayed running as a process, so from the outside it looked alive and healthy, while in reality nothing would ever be processed again. The only recovery was noticing the silence yourself and restarting it by hand.
+
+This happened because of the difference between a worker that *starts and then dies* and one that *never starts at all*. The supervisor was written to wait for a child process to exit, which is the right thing to wait for when the child actually ran. A process that never launches never exits, so that wait never ended. The retry-and-give-up logic the supervisor already had sat just past that wait and never got the chance to run.
+
+A worker that cannot start is now treated as a crash, which means it flows through the machinery that was already there: the same exponential backoff between attempts, the same crash budget, and the same permanent give-up ceiling that bounds every other misconfiguration. A run that ends this way is recorded with a `spawn_failed` cause, so `gbrain doctor` and `gbrain jobs supervisor status` count it and show it to you rather than leaving you to infer it from an absence of activity.
+
+This affects every platform.
+
+## To take advantage of v0.42.67.1
+
+Nothing to migrate, and no configuration to change. The new behavior applies to the next supervisor you start.
+
+1. **Restart any long-running supervisor** so it picks up the fix:
+   ```bash
+   gbrain jobs supervisor restart
+   ```
+2. **Confirm it is processing:**
+   ```bash
+   gbrain jobs supervisor status
+   ```
+   If a worker cannot start, you will now see repeated attempts with a `spawn_failed` cause and a rising crash count, instead of a single line followed by silence.
+3. **If the count climbs to the give-up ceiling,** the worker path is genuinely wrong. Check the binary the supervisor is invoking:
+   ```bash
+   which gbrain
+   gbrain doctor
+   ```
+
+### Itemized changes
+
+- `spawnOnce()` in `src/core/minions/child-worker-supervisor.ts` now settles on the spawn-failure path as well as the exit path. A launch failure surfaces as `'error'` (and `'close'`) with no `'exit'`, so the exit-only wait could never complete and `run()` awaited a promise that never settled.
+- The failure is counted as a crash, so it pays the existing exponential backoff and is bounded by `hardStopMaxCrashes` like any other permanent misconfiguration.
+- Runs that end this way emit `worker_exited` with `code: null` and `likelyCause: 'spawn_failed'`. The audit summarizer classifies unrecognized causes as crashes by design, so `gbrain doctor` and supervisor status count them with no change on their side.
+- A settle-once guard keeps the exit path and the failure path from double-counting. The `'close'` fallback is gated so it cannot pre-empt a healthy run's classified exit, since `'close'` and `'exit'` ordering is not guaranteed.
+- `test/child-worker-supervisor.test.ts` gains two regression tests that point the worker path at a target that cannot be executed. This is the same failure on every platform, so CI covers it. The file's internal safety net is now wall-clock based rather than counting emitted events — a counter that only advances when the supervisor emits cannot detect a fault whose symptom is that it stops emitting.
+
 ## [0.42.67.0] - 2026-07-28
 
 **If you develop GBrain on Windows, the test and check commands now actually run. Until this release they were quietly doing almost nothing.**
