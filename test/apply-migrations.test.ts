@@ -10,7 +10,7 @@ import { describe, test, expect } from 'bun:test';
 import { __testing } from '../src/commands/apply-migrations.ts';
 import type { CompletedMigrationEntry } from '../src/core/preferences.ts';
 
-const { parseArgs, indexCompleted, buildPlan, statusForVersion } = __testing;
+const { parseArgs, indexCompleted, buildPlan, statusForVersion, formatFailedPhases } = __testing;
 
 describe('parseArgs', () => {
   test('default flags', () => {
@@ -178,5 +178,79 @@ describe('runApplyMigrations exit codes (v0.36.1.x #1062)', () => {
     expect(src).toMatch(/cli\.list\s*\)\s*\{\s*printList\(plan,\s*installed\);\s*process\.exit\(0\);/);
     expect(src).toMatch(/cli\.dryRun\s*\)\s*\{\s*printDryRun\(plan,\s*installed\);\s*process\.exit\(0\);/);
     expect(src).toMatch(/All migrations up to date[\s\S]{0,80}process\.exit\(0\)/);
+  });
+});
+
+// A PARTIAL banner used to name the migration and nothing else. The phase that
+// actually failed (and its detail) went straight to completed.jsonl, so the
+// only way to learn WHICH phase broke was to re-run every subprocess the
+// orchestrator shells out to by hand. formatFailedPhases surfaces it.
+describe('formatFailedPhases', () => {
+  test('no phases → null (caller prints no header)', () => {
+    expect(formatFailedPhases(undefined)).toBeNull();
+    expect(formatFailedPhases([])).toBeNull();
+  });
+
+  test('all phases complete/skipped → null', () => {
+    expect(formatFailedPhases([
+      { name: 'schema', status: 'complete' },
+      { name: 'backfill_links', status: 'skipped', detail: 'auto_link disabled' },
+    ])).toBeNull();
+  });
+
+  test('one failed phase → name and detail', () => {
+    expect(formatFailedPhases([
+      { name: 'schema', status: 'complete' },
+      { name: 'verify', status: 'failed', detail: 'could not read gbrain stats' },
+    ])).toBe('Failed phase(s):\n  - verify — could not read gbrain stats');
+  });
+
+  test('only failed phases are listed, complete/skipped are dropped', () => {
+    const out = formatFailedPhases([
+      { name: 'schema', status: 'complete', detail: 'already applied' },
+      { name: 'backfill_links', status: 'failed', detail: 'timed out after 600000ms' },
+      { name: 'backfill_timeline', status: 'skipped', detail: 'dry-run' },
+      { name: 'verify', status: 'failed', detail: 'could not read gbrain stats' },
+    ]);
+    expect(out).toBe(
+      'Failed phase(s):\n' +
+      '  - backfill_links — timed out after 600000ms\n' +
+      '  - verify — could not read gbrain stats',
+    );
+    expect(out).not.toContain('schema');
+    expect(out).not.toContain('backfill_timeline');
+  });
+
+  test('missing or blank detail → bare phase name, no dangling separator', () => {
+    expect(formatFailedPhases([{ name: 'verify', status: 'failed' }]))
+      .toBe('Failed phase(s):\n  - verify');
+    expect(formatFailedPhases([{ name: 'verify', status: 'failed', detail: '   ' }]))
+      .toBe('Failed phase(s):\n  - verify');
+  });
+
+  test('detail is trimmed (subprocess errors arrive with trailing newlines)', () => {
+    expect(formatFailedPhases([
+      { name: 'backfill_links', status: 'failed', detail: '  command failed: exit 1\n' },
+    ])).toBe('Failed phase(s):\n  - backfill_links — command failed: exit 1');
+  });
+});
+
+// The formatter is only useful if the runner actually calls it. These pin the
+// wiring at all three terminal paths, which a unit test of the pure function
+// cannot reach (the loop lives inside runApplyMigrations, behind a real
+// orchestrator + ledger writes).
+describe('runApplyMigrations surfaces failed phases', () => {
+  test('partial, status=failed, and throw paths all report the failed phases', async () => {
+    const { readFileSync } = await import('fs');
+    const src = readFileSync('src/commands/apply-migrations.ts', 'utf8');
+
+    // PARTIAL banner is followed by the failed-phase report.
+    expect(src).toMatch(/finished as PARTIAL[\s\S]{0,200}formatFailedPhases\(result\.phases\)/);
+    // The existing #921 status=failed diagnostics now share the formatter.
+    expect(src).toMatch(/reported status=failed[\s\S]{0,200}formatFailedPhases\(result\.phases\)/);
+    // Throw path has no result object, so it synthesizes a phase and persists
+    // it — the ledger entry used to be a bare `partial` with no reason at all.
+    expect(src).toMatch(/threw:[\s\S]{0,600}name: 'orchestrator', status: 'failed', detail: msg/);
+    expect(src).toMatch(/status: 'partial', phases: thrownPhases/);
   });
 });

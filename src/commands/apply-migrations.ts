@@ -15,7 +15,7 @@
 import { VERSION } from '../version.ts';
 import { loadConfig } from '../core/config.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
-import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
+import { migrations, compareVersions, type Migration, type OrchestratorOpts, type OrchestratorPhaseResult } from './migrations/index.ts';
 
 /** Bug 3 — max consecutive partials before we wedge a migration. */
 const MAX_CONSECUTIVE_PARTIALS = 3;
@@ -201,6 +201,29 @@ function buildPlan(idx: CompletedIndex, installed: string, filterVersion?: strin
     else plan.pending.push(m);
   }
   return plan;
+}
+
+/**
+ * Render the failed phases of an orchestrator result for the terminal.
+ *
+ * The runner used to print "finished as PARTIAL" and nothing else, so the one
+ * fact an operator needs — WHICH phase failed and why — went straight into
+ * ~/.gbrain/migrations/completed.jsonl without ever reaching the console.
+ * Diagnosing a partial meant re-running every phase by hand to find the one
+ * that broke. The phase array already carries the answer; this surfaces it.
+ *
+ * Only failed phases are listed (complete/skipped ones are noise here).
+ * Returns null when nothing failed or no phases were reported, so callers can
+ * skip the line entirely rather than print an empty header.
+ */
+function formatFailedPhases(phases: OrchestratorPhaseResult[] | undefined): string | null {
+  const failedPhases = (phases ?? []).filter(p => p.status === 'failed');
+  if (failedPhases.length === 0) return null;
+  const lines = failedPhases.map(p => {
+    const detail = p.detail?.trim();
+    return `  - ${p.name}${detail ? ` — ${detail}` : ''}`;
+  });
+  return `Failed phase(s):\n${lines.join('\n')}`;
 }
 
 function printList(plan: Plan, installed: string): void {
@@ -438,6 +461,8 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
       const result = await m.orchestrator(orchestratorOptsFrom(cli));
       if (result.status === 'failed') {
         console.error(`Migration v${m.version} reported status=failed.`);
+        const failedPhaseReport = formatFailedPhases(result.phases);
+        if (failedPhaseReport) console.error(failedPhaseReport);
         // Record the attempt as 'partial' (not 'complete') so the cap counts
         // it. Don't let a failed orchestrator look like it never ran.
         try {
@@ -478,16 +503,24 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
       }
 
       if (result.status === 'partial') {
-        console.log(`Migration v${m.version} finished as PARTIAL. Re-run \`gbrain apply-migrations --yes\` after resolving any pending host-work items.`);
+        console.log(`Migration v${m.version} finished as PARTIAL.`);
+        const failedPhaseReport = formatFailedPhases(result.phases);
+        if (failedPhaseReport) console.log(failedPhaseReport);
+        console.log(`Re-run \`gbrain apply-migrations --yes\` after resolving any pending host-work items.`);
       } else {
         console.log(`Migration v${m.version} complete.`);
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`Migration v${m.version} threw: ${msg}`);
+      // A throw means the orchestrator never returned a result, so there is no
+      // phase array to report. Synthesize one from the error so the console and
+      // the ledger carry the same reason the returned-result paths do — the
+      // ledger entry used to record `partial` with no explanation at all.
+      const thrownPhases: OrchestratorPhaseResult[] = [{ name: 'orchestrator', status: 'failed', detail: msg }];
       // Same partial-on-throw treatment so the cap counts runaway failures.
       try {
-        appendCompletedMigration({ version: m.version, status: 'partial' });
+        appendCompletedMigration({ version: m.version, status: 'partial', phases: thrownPhases });
       } catch { /* swallow ledger-write failure on throw path */ }
       failed = true;
       break;
@@ -503,4 +536,5 @@ export const __testing = {
   buildPlan,
   indexCompleted,
   statusForVersion,
+  formatFailedPhases,
 };
