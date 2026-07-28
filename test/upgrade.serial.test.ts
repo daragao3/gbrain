@@ -150,7 +150,10 @@ describe('resolveBunGlobalRoot', () => {
     try {
       process.env.BUN_INSTALL = '/custom/bun';
       process.env.HOME = '/ignored/home';
-      expect(resolveBunGlobalRoot()).toBe('/custom/bun/install/global');
+      // Build the expectation with join() so it carries native separators —
+      // resolveBunGlobalRoot joins too, and win32 emits '\'. A hardcoded
+      // POSIX literal here fails on Windows.
+      expect(resolveBunGlobalRoot()).toBe(join('/custom/bun', 'install', 'global'));
     } finally {
       restoreEnv();
     }
