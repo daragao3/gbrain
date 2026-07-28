@@ -221,7 +221,7 @@ function formatFailedPhases(phases: OrchestratorPhaseResult[] | undefined): stri
   if (failedPhases.length === 0) return null;
   const lines = failedPhases.map(p => {
     const detail = p.detail?.trim();
-    return `  - ${p.name}${detail ? ` — ${detail}` : ''}`;
+    return `  - ${p.name}${detail ? `: ${detail}` : ''}`;
   });
   return `Failed phase(s):\n${lines.join('\n')}`;
 }

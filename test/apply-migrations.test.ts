@@ -202,7 +202,7 @@ describe('formatFailedPhases', () => {
     expect(formatFailedPhases([
       { name: 'schema', status: 'complete' },
       { name: 'verify', status: 'failed', detail: 'could not read gbrain stats' },
-    ])).toBe('Failed phase(s):\n  - verify — could not read gbrain stats');
+    ])).toBe('Failed phase(s):\n  - verify: could not read gbrain stats');
   });
 
   test('only failed phases are listed, complete/skipped are dropped', () => {
@@ -214,8 +214,8 @@ describe('formatFailedPhases', () => {
     ]);
     expect(out).toBe(
       'Failed phase(s):\n' +
-      '  - backfill_links — timed out after 600000ms\n' +
-      '  - verify — could not read gbrain stats',
+      '  - backfill_links: timed out after 600000ms\n' +
+      '  - verify: could not read gbrain stats',
     );
     expect(out).not.toContain('schema');
     expect(out).not.toContain('backfill_timeline');
@@ -231,7 +231,7 @@ describe('formatFailedPhases', () => {
   test('detail is trimmed (subprocess errors arrive with trailing newlines)', () => {
     expect(formatFailedPhases([
       { name: 'backfill_links', status: 'failed', detail: '  command failed: exit 1\n' },
-    ])).toBe('Failed phase(s):\n  - backfill_links — command failed: exit 1');
+    ])).toBe('Failed phase(s):\n  - backfill_links: command failed: exit 1');
   });
 });
 
