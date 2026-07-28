@@ -235,7 +235,11 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   normalizing once (`content.replace(/\r\n/g, '\n')`) when the parsed VALUES flow downstream
   — it also keeps a trailing `\r` out of them. Relax only the fence when the function returns
   a byte offset into the original text (`splitFrontmatter` in `src/core/skillopt/apply-edits.ts`),
-  since normalizing would corrupt every offset.
+  since normalizing would corrupt every offset. When the offset contract forbids normalizing
+  the HAYSTACK, normalize the NEEDLE: `findTarget` in that file matches an edit target by
+  trying it as authored, then retrying it rewritten in the body's detected ending, so the body
+  and every offset into it stay untouched. A raw `indexOf` there silently rejected every
+  multi-line `replace`/`delete` as `target_not_found` on CRLF.
 - **The repo's own shell scripts: LF-pinned, and invoked through `bash`.** Complementary to
   the rule above, and the case `.gitattributes` CAN fix — these are files the repo owns, not
   a runtime `skillsDir`. Two halves, and each hides the other: (1) `.gitattributes` sets

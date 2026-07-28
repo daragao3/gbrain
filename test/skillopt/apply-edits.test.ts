@@ -186,6 +186,128 @@ describe('applyEdit (delete)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// CRLF multi-line targets
+//
+// `replace`/`delete` locate their target with a raw `indexOf`, so a multi-line
+// target authored with LF never matched a CRLF SKILL.md (and vice versa). The
+// edit was then rejected as `target_not_found` — silently, from the caller's
+// view, since rejection is a normal tagged outcome rather than an error.
+// Single-line targets were unaffected. On Windows `core.autocrlf=true` makes
+// every checked-out SKILL.md CRLF, so this was the common case there.
+// ---------------------------------------------------------------------------
+
+describe('applyEdit — CRLF multi-line targets', () => {
+  const MULTI_LF = '1. First, do X.\n2. Then, do Y.';
+  const MULTI_CRLF = MULTI_LF.replace(/\n/g, '\r\n');
+  const strip = (s: string) => s.replace(/\r\n/g, '\n');
+
+  test('multi-line replace applies to a CRLF skill with an LF-authored target', () => {
+    const r = applyEdit(CRLF_SKILL, {
+      op: 'replace',
+      target: MULTI_LF,
+      replacement: '1. First, do Z.',
+    });
+    expect(r.outcome).toBe('applied');
+    if (r.outcome === 'applied') {
+      expect(r.newText).toContain('do Z.');
+      expect(r.newText).not.toContain('do X.');
+      expect(r.newText).not.toContain('do Y.');
+    }
+  });
+
+  test('multi-line delete applies to a CRLF skill with an LF-authored target', () => {
+    const r = applyEdit(CRLF_SKILL, { op: 'delete', target: MULTI_LF });
+    expect(r.outcome).toBe('applied');
+    if (r.outcome === 'applied') {
+      expect(r.newText).not.toContain('do X.');
+      expect(r.newText).not.toContain('do Y.');
+      // Frontmatter untouched (D5).
+      expect(r.newText).toContain('name: example-skill');
+    }
+  });
+
+  test('CRLF replace lands byte-identical to the LF replace, modulo line endings', () => {
+    const edit = { op: 'replace' as const, target: MULTI_LF, replacement: '1. First, do Z.' };
+    const crlf = applyEdit(CRLF_SKILL, edit);
+    const lf = applyEdit(SAMPLE_SKILL, edit);
+    expect(crlf.outcome).toBe('applied');
+    expect(lf.outcome).toBe('applied');
+    if (crlf.outcome === 'applied' && lf.outcome === 'applied') {
+      expect(strip(crlf.newText)).toBe(lf.newText);
+    }
+  });
+
+  test('CRLF delete lands byte-identical to the LF delete, modulo line endings', () => {
+    // Guards the trailing-newline cut specifically: `\r\n` is ONE newline, so
+    // trimming only the `\n` would strand a bare `\r` and leave a phantom
+    // blank line the LF path never produces.
+    const edit = { op: 'delete' as const, target: MULTI_LF };
+    const crlf = applyEdit(CRLF_SKILL, edit);
+    const lf = applyEdit(SAMPLE_SKILL, edit);
+    expect(crlf.outcome).toBe('applied');
+    expect(lf.outcome).toBe('applied');
+    if (crlf.outcome === 'applied' && lf.outcome === 'applied') {
+      expect(strip(crlf.newText)).toBe(lf.newText);
+    }
+  });
+
+  test('a multi-line replacement is rewritten in the file\'s own line ending', () => {
+    const r = applyEdit(CRLF_SKILL, {
+      op: 'replace',
+      target: MULTI_LF,
+      replacement: '1. First, do Z.\n2. Then, do W.',
+    });
+    expect(r.outcome).toBe('applied');
+    if (r.outcome === 'applied') {
+      expect(r.newText).toContain('do Z.\r\n2. Then, do W.');
+      // No lone LF anywhere: the edit must not splice mixed endings into the file.
+      expect(r.newText.match(/(?<!\r)\n/g)).toBeNull();
+    }
+  });
+
+  test('a CRLF-authored target still matches an LF skill (reverse direction)', () => {
+    const r = applyEdit(SAMPLE_SKILL, {
+      op: 'replace',
+      target: MULTI_CRLF,
+      replacement: '1. First, do Z.',
+    });
+    expect(r.outcome).toBe('applied');
+    if (r.outcome === 'applied') {
+      expect(r.newText).toContain('do Z.');
+      expect(r.newText.includes('\r')).toBe(false);
+    }
+  });
+
+  test('a genuinely absent multi-line target still rejects as target_not_found', () => {
+    const r = applyEdit(CRLF_SKILL, {
+      op: 'replace',
+      target: 'Not in this file.\nNot on any line.',
+      replacement: 'X',
+    });
+    expect(r.outcome).toBe('rejected');
+    if (r.outcome === 'rejected') expect(r.reason).toBe('target_not_found');
+  });
+
+  test('an absent multi-line delete target still rejects as target_not_found', () => {
+    const r = applyEdit(CRLF_SKILL, { op: 'delete', target: 'Nope.\nStill nope.' });
+    expect(r.outcome).toBe('rejected');
+    if (r.outcome === 'rejected') expect(r.reason).toBe('target_not_found');
+  });
+
+  test('an ambiguous multi-line target rejects as ambiguous, not not-found', () => {
+    // Proves the line-ending retry counts ALL matches rather than stopping at
+    // the first — a retry that returned 1 would silently edit one of two.
+    const dup = SAMPLE_SKILL.replace('Don\'t break the rule.', MULTI_LF).replace(/\n/g, '\r\n');
+    const r = applyEdit(dup, { op: 'replace', target: MULTI_LF, replacement: 'X' });
+    expect(r.outcome).toBe('rejected');
+    if (r.outcome === 'rejected') {
+      expect(r.reason).toBe('target_ambiguous');
+      expect(r.detail).toBe('2 matches');
+    }
+  });
+});
+
 describe('D5: frontmatter mutation forbidden', () => {
   test('replace cannot target a frontmatter line', () => {
     // The optimizer tries to mutate `brain_first: exempt`. Body slice
