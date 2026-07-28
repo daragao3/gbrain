@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
+import { sep } from 'node:path';
 import { repoPath } from './helpers/repo-root.ts';
 import {
   parseRecipe,
@@ -633,8 +634,9 @@ describe('getRecipeDirs (B1 trust boundary)', () => {
       expect(typeof d.dir).toBe('string');
     }
     // In this repo, the source recipes dir must be trusted
-    // Normalize separators: `dir` is native-format (`...\recipes` on Windows).
-    const source = dirs.find(d => d.dir.replace(/\\/g, '/').endsWith('/recipes') && d.trusted);
+    // `dir` is native-format (`...\recipes` on Windows). Only the separator
+    // comes from `path`; the directory name stays hand-written.
+    const source = dirs.find(d => d.dir.endsWith(`${sep}recipes`) && d.trusted);
     expect(source).toBeDefined();
   });
 
