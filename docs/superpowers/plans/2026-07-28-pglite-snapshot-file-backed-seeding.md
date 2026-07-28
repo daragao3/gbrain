@@ -515,55 +515,64 @@ async function migrationHead(engine: PGLiteEngine): Promise<number> {
   return r.rows[0]?.v ?? -1;
 }
 
-async function bootstrap(dataDir: string, seed: boolean): Promise<number> {
-  const prevSnap = process.env.GBRAIN_PGLITE_SNAPSHOT;
-  const prevSeed = process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE;
-  if (seed) {
-    process.env.GBRAIN_PGLITE_SNAPSHOT = SNAPSHOT;
-    process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE = '1';
-  } else {
-    delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-    delete process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE;
+type EnvPatch = Record<string, string | undefined>;
+
+/** Apply an env patch for the duration of `fn`, restoring exactly on exit. */
+async function withEnv<T>(patch: EnvPatch, fn: () => Promise<T>): Promise<T> {
+  const prev: EnvPatch = {};
+  for (const k of Object.keys(patch)) prev[k] = process.env[k];
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
   }
-  const engine = new PGLiteEngine();
   try {
-    await engine.connect({ database_path: dataDir } as never);
-    await engine.initSchema();
-    return await migrationHead(engine);
+    return await fn();
   } finally {
-    await engine.disconnect();
-    if (prevSnap === undefined) delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-    else process.env.GBRAIN_PGLITE_SNAPSHOT = prevSnap;
-    if (prevSeed === undefined) delete process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE;
-    else process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE = prevSeed;
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 }
 
+/** Boot a brain at `dataDir` under `patch`, return its migration head. */
+async function headUnder(dataDir: string, patch: EnvPatch): Promise<number> {
+  return withEnv(patch, async () => {
+    const engine = new PGLiteEngine();
+    try {
+      await engine.connect({ database_path: dataDir });
+      await engine.initSchema();
+      return await migrationHead(engine);
+    } finally {
+      await engine.disconnect();
+    }
+  });
+}
+
+const SEEDED: EnvPatch = {
+  GBRAIN_PGLITE_SNAPSHOT: SNAPSHOT,
+  GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: '1',
+};
+const COLD: EnvPatch = {
+  GBRAIN_PGLITE_SNAPSHOT: undefined,
+  GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: undefined,
+};
+/** Base var set, seed flag absent — the ci:local blast-radius guard. */
+const BASE_ONLY: EnvPatch = {
+  GBRAIN_PGLITE_SNAPSHOT: SNAPSHOT,
+  GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: undefined,
+};
+
 describe.if(HAVE_FIXTURE)('file-backed snapshot seeding', () => {
   test('seeded dataDir reaches the same migration head as cold init', async () => {
-    const seeded = await bootstrap(freshDataDir(), true);
-    const cold = await bootstrap(freshDataDir(), false);
+    const seeded = await headUnder(freshDataDir(), SEEDED);
+    const cold = await headUnder(freshDataDir(), COLD);
     expect(seeded).toBeGreaterThan(0);
     expect(seeded).toBe(cold);
   }, 900_000);
 
   test('seeding is skipped when the opt-in flag is absent', async () => {
-    // Base var set, seed flag NOT set -> must take the cold path and still
-    // land on a correct schema. This is the ci:local blast-radius guard.
-    const dataDir = freshDataDir();
-    const prev = process.env.GBRAIN_PGLITE_SNAPSHOT;
-    process.env.GBRAIN_PGLITE_SNAPSHOT = SNAPSHOT;
-    delete process.env.GBRAIN_PGLITE_SNAPSHOT_SEED_FILE;
-    const engine = new PGLiteEngine();
-    try {
-      await engine.connect({ database_path: dataDir } as never);
-      await engine.initSchema();
-      expect(await migrationHead(engine)).toBeGreaterThan(0);
-    } finally {
-      await engine.disconnect();
-      if (prev === undefined) delete process.env.GBRAIN_PGLITE_SNAPSHOT;
-      else process.env.GBRAIN_PGLITE_SNAPSHOT = prev;
-    }
+    expect(await headUnder(freshDataDir(), BASE_ONLY)).toBeGreaterThan(0);
   }, 900_000);
 });
 ```
@@ -744,4 +753,4 @@ git commit -m "bench(pglite): A/B snapshot-seeding harness and measured result"
 
 - **Do not enable the flag in `scripts/ci-local.sh`.** It exports `GBRAIN_PGLITE_SNAPSHOT` across all 4 unit shards; adding the seed flag there would switch every file-backed test at once, which is exactly the blast radius option B was chosen to avoid. Opting a specific test file in is a separate, deliberate change.
 - **`test/helpers/pglite-spawn-budget.ts` does not exist on this branch.** It lives on `claude/agitated-davinci-5876bb`. Do not import it, and do not try to shrink budgets that aren't here.
-- The `as never` casts on `engine.connect({ database_path })` in Task 4 sidestep the full `EngineConfig` shape. If typecheck objects, import the real `EngineConfig` type from `src/core/engine.ts` and build a complete object instead of widening the cast.
+- `EngineConfig` (`src/core/types.ts:1654`) is `{ database_url?, database_path?, engine? }` — every field optional — so `engine.connect({ database_path })` typechecks with no cast. Do not add one.
