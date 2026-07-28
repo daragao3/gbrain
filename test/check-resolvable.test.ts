@@ -319,26 +319,6 @@ describe("extractDelegationTargets", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// CRLF tolerance — frontmatter `triggers:` must parse regardless of line
-// endings. The delimiter match used to anchor on `---\n`, which cannot match
-// a `---\r\n` file, so a CRLF SKILL.md parsed as having NO frontmatter and
-// every skill was reported as a mece_gap ("add a triggers: array") even
-// though the array was right there. That is the state of any Windows
-// checkout with core.autocrlf=true, and of any Windows user's own skills
-// dir. LF cases are covered throughout; these pin the CRLF half.
-// ---------------------------------------------------------------------------
-
-/** Same shape as makeSkillsFixture, but every file written with CRLF. */
-function makeCrlfSkillsFixture(files: Record<string, string>): string {
-  const lf = makeSkillsFixture(files);
-  for (const rel of ["RESOLVER.md", ...Object.keys(files).map(n => join(n, "SKILL.md"))]) {
-    const p = join(lf, rel);
-    writeFileSync(p, readFileSync(p, "utf8").replace(/\r?\n/g, "\r\n"));
-  }
-  return lf;
-}
-
 describe("DRY detection — checkResolvable", () => {
   let dir: string;
   afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
