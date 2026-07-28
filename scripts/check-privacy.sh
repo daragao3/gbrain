@@ -170,42 +170,89 @@ ALLOW_LIST=(
   'test/eval-replay-gate.test.ts'
 )
 
+# Newline-delimited allow-list for a pure-bash whole-line `case` match. This
+# deliberately avoids `declare -A`, which is bash 4+ and would break the
+# macOS system bash (3.2) this repo's scripts still target. Same idiom as
+# is_allowlisted() in scripts/check-test-isolation.sh.
+ALLOW_SET="$(printf '%s\n' "${ALLOW_LIST[@]}")"
+
 is_allowed() {
-  local f="$1"
-  for a in "${ALLOW_LIST[@]}"; do
-    if [ "$f" = "$a" ]; then
-      return 0
-    fi
-  done
+  case $'\n'"$ALLOW_SET"$'\n' in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
   return 1
 }
 
-FOUND=0
+# ---------------------------------------------------------------------------
+# Build the scan list, then grep it in BATCHES.
+#
+# This loop used to spawn `grep` per file per pattern — 3 processes x ~2.5k
+# tracked files ≈ 7.7k spawns. On Linux that is merely wasteful; on Windows,
+# where process creation is orders of magnitude more expensive, it pushed the
+# check past 400s and made it the slowest item in `bun run verify` by far.
+#
+# Filtering (allow-list + extension) is now done with shell builtins only —
+# no subprocess — and the surviving files are handed to a single `grep`
+# invocation per pattern via `xargs -0`. NUL delimiting keeps paths with
+# spaces intact and lets xargs re-batch safely under ARG_MAX; `-H` forces the
+# filename prefix even when a batch ends up holding a single file.
+#
+# Semantics are unchanged: same patterns, same allow-list, same exit codes,
+# same "file, then indented matching lines" report grouping.
+# ---------------------------------------------------------------------------
+SCAN_FILES=()
 while IFS= read -r file; do
   [ -z "$file" ] && continue
+  is_allowed "$file" && continue
   [ ! -f "$file" ] && continue
-  if is_allowed "$file"; then
-    continue
-  fi
-  # Case-insensitive grep; only specific extensions + known docs.
+  # Only specific extensions + known docs.
   case "$file" in
     *.md|*.ts|*.mjs|*.js|*.py|*.sh|*.json|*.yaml|*.yml|*.txt|README*|CHANGELOG*|CLAUDE*|AGENTS*)
-      if grep -in "$BANNED_NAME" "$file" >/dev/null 2>&1; then
-        echo "[check-privacy] BANNED NAME in $file:" >&2
-        grep -in "$BANNED_NAME" "$file" | sed 's|^|  |' >&2
-        FOUND=1
-      fi
-      # Banned wintermute-specific filesystem paths (codex T7).
-      for path in "${BANNED_PATHS[@]}"; do
-        if grep -nF "$path" "$file" >/dev/null 2>&1; then
-          echo "[check-privacy] BANNED PATH '$path' in $file:" >&2
-          grep -nF "$path" "$file" | sed 's|^|  |' >&2
-          FOUND=1
-        fi
-      done
+      SCAN_FILES+=("$file")
       ;;
   esac
 done <<< "$FILES"
+
+if [ "${#SCAN_FILES[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+# Run one grep across every scanned file. Trailing `|| true` absorbs grep's
+# exit 1 (no match) and xargs' 123 (a child exited nonzero) under `set -e`.
+grep_all() {
+  printf '%s\0' "${SCAN_FILES[@]}" | xargs -0 grep "$@" 2>/dev/null || true
+}
+
+# Reprint batched `file:line:content` hits in the original grouped format.
+report_hits() {
+  local label="$1" hits="$2" current="" f rest
+  [ -z "$hits" ] && return 1
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    f="${line%%:*}"
+    rest="${line#*:}"
+    if [ "$f" != "$current" ]; then
+      echo "[check-privacy] $label in $f:" >&2
+      current="$f"
+    fi
+    echo "  $rest" >&2
+  done <<< "$hits"
+  return 0
+}
+
+FOUND=0
+
+if report_hits "BANNED NAME" "$(grep_all -inH -e "$BANNED_NAME")"; then
+  FOUND=1
+fi
+
+# Banned wintermute-specific filesystem paths (codex T7). Looped per path so
+# the report still names which path matched — 2 batched greps, not 2 per file.
+for path in "${BANNED_PATHS[@]}"; do
+  if report_hits "BANNED PATH '$path'" "$(grep_all -nHF -e "$path")"; then
+    FOUND=1
+  fi
+done
 
 if [ "$FOUND" -eq 1 ]; then
   echo "" >&2

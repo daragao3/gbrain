@@ -53,6 +53,19 @@ A trap alone can't cover the orphan case (parent dies without signalling, so not
 
 **Teardown order matters for a reason:** known pids get the `kill` builtin *first*, and only then does a single shared `ps` snapshot sweep for grandchildren. One `ps -e` measured 9-12 seconds on a loaded Windows box, long enough for the child to finish the work being cancelled. The snapshot is skipped entirely when a builtin-only liveness check says nothing is alive, so a normal run never pays for it.
 
+### Chunking a shard's file list (`GBRAIN_TEST_CHUNK_SIZE`)
+
+`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for **every file in that invocation** are lost, so a 253-file shard reports `pass=0 fail=0 rc=127` and the run cannot gate anything.
+
+`scripts/run-unit-shard.sh` therefore splits its file list into bounded chunks and runs one `bun test` per chunk, so a crash costs one chunk instead of the shard. A chunk that exits non-zero is reported with its file list named on stderr rather than silently under-reporting, and the shard exits with the worst chunk's code. `run-unit-parallel.sh`'s `bun_summary_count()` already sums Bun's summary block across multiple invocations per shard, so chunking needs no aggregator change.
+
+| Platform | Default | Why |
+|---|---|---|
+| POSIX (Linux, macOS) | `0` (off) | One invocation per shard, byte-identical to prior CI behavior. |
+| MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
+
+`GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
+
 ### File taxonomy
 
 - `*.test.ts` → fast loop (parallel 8-shard fan-out).

@@ -22,6 +22,12 @@ import { execFileSync } from 'child_process';
  * Resolved once at startup so we don't shell out on every respawn.
  */
 export function detectTini(): string {
+  // tini is a POSIX container init — there is no Windows build, and wrapping a
+  // Windows spawn in it would produce a broken invocation. Skip the probe
+  // entirely rather than shelling out to `which`, which is not a Windows
+  // command: under a Git-Bash-flavoured PATH it resolves to a POSIX `which`
+  // that prints "no tini in (...)" to stderr and can block on a stripped PATH.
+  if (process.platform === 'win32') return '';
   try {
     // Pass `env: process.env` explicitly: Bun's execFileSync does NOT
     // inherit the current process env by default (Bun snapshots env at
@@ -31,6 +37,9 @@ export function detectTini(): string {
       encoding: 'utf8',
       timeout: 2000,
       env: process.env,
+      // Silence `which`'s "no tini in (...)" chatter; absence is signalled by
+      // the throw, not by stderr. Without this it leaks into test output.
+      stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
   } catch {
     return '';

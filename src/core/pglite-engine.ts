@@ -18,6 +18,12 @@ import type {
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
+// Static (not `await import(...)` inside mergeOntologyFact): a dynamic import
+// issued from an async method while the PGLite WASM instance is live
+// deadlocks the bun test runner on Windows — the file then either times out or
+// takes the whole `bun test` process down with exit 127, so an entire shard
+// reports no totals. No cycle risk: ontology.ts only pulls ingestion/types.ts.
+import { valueHash, normalizeDimension, isNovelDimension } from './chronicle/ontology.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
@@ -3721,7 +3727,6 @@ export class PGLiteEngine implements BrainEngine {
 
   async mergeOntologyFact(obs: OntologyObservationInput): Promise<OntologyMergeResult> {
     const sourceId = obs.sourceId ?? 'default';
-    const { valueHash, normalizeDimension, isNovelDimension } = await import('./chronicle/ontology.ts');
     const dimension = normalizeDimension(obs.dimension);
     const vh = valueHash(obs.value);
     const conf = obs.confidence ?? 0.7;

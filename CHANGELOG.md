@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.42.69.0] - 2026-07-28
+## [0.42.71.0] - 2026-07-28
 
 **Stopping a test run now stops all of it, instead of leaving processes behind that keep working for hours.**
 
@@ -48,12 +48,109 @@ On Windows the parent of a test run started by `bun run` cannot be observed from
 - **`test/scripts/run-serial-tests-teardown.serial.test.ts`** (5 tests) covers the orphaned parent, a direct `SIGTERM`, and the full chain where the parallel runner is orphaned while the serial pass is in flight, plus two that pin the serial pass exit code and its report of which files failed. Assertions use marker files on a timeline rather than process ids, so they are portable. The marker written by the grandchild `bun` process is the one that proves the whole tree stopped, not just the shell.
 - **`test/scripts/run-unit-parallel.test.ts`** copies the new helper into its temporary fixture, which the runners now require.
 
-## To take advantage of v0.42.69.0
+## To take advantage of v0.42.71.0
 
 Nothing to run, and no schema migrations. If you work on GBrain itself, stop a test run the way you always have and it will clean up after itself.
 
 1. **If you detach test runs on purpose**, for example under `nohup` or `setsid`, set `GBRAIN_TEST_NO_PARENT_WATCH=1` so the missing parent is not read as a stopped run.
 2. **If you have collected orphans from earlier runs**, they are from before this change and will not clear themselves. Select them by command line rather than by program name, since other processes share the same name, and check that the parent is actually gone before ending anything.
+
+## [0.42.70.0] - 2026-07-28
+
+**On Windows, `bun run verify` now actually runs. All 32 build checks start, instead of quitting before they read a single file.**
+
+GBrain's build checks are shell scripts, and `package.json` invoked them by path. A Unix shell starts a file like that by reading the `#!` line at the top; bun on Windows does not, so every check exited right away saying the command was not found. The gate reported the same failure count no matter what the code underneath looked like, which made it useless for anyone developing on Windows. A second problem sat underneath that one: Git for Windows installs with `core.autocrlf=true`, which rewrites shell scripts to Windows line endings when you check them out, and a strict bash then fails on the carriage return at the end of every line. Both are fixed. Checks now run through `bash` explicitly, and a new line-ending rule pins shell scripts to Unix endings on every platform. Six checks that failed only because of Windows text and process handling were corrected as well.
+
+### How to use it
+
+```bash
+bun run verify
+```
+
+On Windows that now dispatches all 32 checks and reports `pass=32 fail=0`.
+
+A clone that already exists still has the old line endings on disk. The rule applies on checkout, so replace the working copies once:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .
+```
+
+### Things to watch
+
+This release is for people working on GBrain itself. Nothing changes for running GBrain, and there are no schema migrations.
+
+The checks are spawned in parallel, one process per check. On a busy machine that can exhaust the process table and report failures that have nothing to do with your code. The signature is `fork: retry: Resource temporarily unavailable` in the output. Re-run when the machine is quieter, or run the one check on its own:
+
+```bash
+bash scripts/check-privacy.sh
+```
+
+### Itemized changes
+
+#### Fixed
+- **Shell script checks start on Windows.** 32 script entries in `package.json` now invoke their script through `bash` rather than by bare path. Without this each one exits immediately and never reads a file, so the check result carries no information about the code.
+- **Shell scripts check out with Unix line endings everywhere.** A new root `.gitattributes` sets `*.sh text eol=lf`, so `core.autocrlf=true` no longer rewrites them. All 59 tracked shell scripts now land the same way on every platform.
+- **`check:eval-glossary` no longer reports a fresh document as stale.** `scripts/check-eval-glossary-fresh.sh` compares with trailing carriage returns stripped. The committed document and the generator both use Unix endings, but a Windows working copy has Windows endings, so a byte comparison flagged all 176 lines as drifted while CI stayed green. Real content drift still fails.
+- **`check:wasm` no longer reports a false embedding regression on Windows.** `scripts/check-wasm-embedded.sh` builds into a temp directory instead of a temp file. `bun build --compile` appends `.exe` on Windows, so the pre-created extension-less file was left at 0 bytes and running it produced empty output, which the script read as missing symbols.
+- **`check:skill-brain-first` no longer reports `parse_error` when the check is green.** `scripts/check-skill-brain-first.sh` feeds the report to python on standard input instead of interpolating a path into the source. A native Windows python cannot open the POSIX-style temp path the shell produces, so the open failed and the guard blamed the parse.
+- **`check:privacy` and `check:test-isolation` finish inside the time limit.** Both used to spawn a `grep` or `awk` per file per pattern, roughly 7,700 and 6,000 processes. Process creation is expensive on Windows, and that alone pushed them past the harness timeout. `check-privacy.sh` filters with shell builtins and batches the survivors into one `grep` per pattern through `xargs -0`; `check-test-isolation.sh` evaluates all four rules in a single `awk` pass that reads the file list itself rather than taking it as arguments. Same patterns, same allow-lists, same exit codes, same report format.
+- **`check:test-names` drops about 400 process spawns.** `scripts/check-test-real-names.sh` matches its needles with `shopt -s nocasematch` and a `case` statement instead of piping each line into `grep -qi`. The needles are literal words, so the substring match is equivalent.
+- **`typecheck` gets its own time budget inside `verify`.** `scripts/run-verify-parallel.sh` reads a separate `GBRAIN_VERIFY_TIMEOUT_TYPECHECK`, default 600 seconds. A full `tsc --noEmit` over this codebase is legitimately longer than the 120 second cap the grep-style guards share, so it was reported as a failure when nothing was wrong. The tight default still applies to every other check, which is what makes a hung one fail fast.
+
+#### Tests
+- **A gap that survives frontmatter parsing is pinned.** `test/check-resolvable.test.ts` adds a case where a Windows-line-ending skill file has a settings block that parses but declares no triggers. The neighbouring case covers a file with no settings block at all, which fails earlier and by a different route.
+
+## To take advantage of v0.42.70.0
+
+`gbrain upgrade`. No new schema migrations, and nothing changes for running GBrain.
+
+1. **If you contribute to GBrain from Windows:** `bun run verify` now works. Replace the shell scripts in an existing clone once so they pick up the new line endings: `git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`
+2. **If you add a check:** put `bash ` in front of the script path in `package.json`. A bare path works on Linux and macOS and silently fails on Windows.
+
+## [0.42.69.0] - 2026-07-28
+
+**On Windows, a test run now reports its results instead of coming back blank, and the background job supervisor stops looking for a program that has no Windows build.**
+
+Two Windows problems, both invisible on macOS and Linux. The first: a test run could stop partway through and report nothing at all. Not a list of failures, a blank report for every file in the batch, because the process died before it could print its summary. A batch of 253 files would come back as zero passed and zero failed, which meant the suite could not be used to tell whether a change was safe. The cause was a module being fetched on demand while the embedded database was running. That is fine on every other platform and wedges the test runner on Windows. The second: every time the background job supervisor started, it went looking for `tini`, a Linux container helper with no Windows build, by running a command that does not exist on Windows either. It printed noise on the way to concluding what it could have known immediately.
+
+### How to use it
+
+```bash
+gbrain upgrade
+```
+
+No schema migrations. Nothing to reconfigure.
+
+### Things to watch
+
+If you work on GBrain on Windows, a crashed batch no longer takes the surrounding results down with it. The unit runner now splits its file list into groups of 25 there, so a crash costs you one group instead of the whole shard, and the files in that group are named so you know what went unmeasured. On macOS and Linux the behavior is unchanged, with splitting off by default. Set the group size yourself if you want:
+
+```bash
+GBRAIN_TEST_CHUNK_SIZE=50 bash scripts/run-unit-shard.sh
+```
+
+`0` turns splitting off.
+
+The underlying crash has more triggers than the one fixed here. Splitting the file list is what keeps a remaining trigger from erasing an entire shard's results.
+
+### Itemized changes
+
+#### Fixed
+- **A test run on Windows reports its results.** `mergeOntologyFact` in `src/core/pglite-engine.ts` and `src/core/postgres-engine.ts` loaded `chronicle/ontology.ts` on demand from inside an async method. Issued while the embedded database instance was live, that load took the whole test process down before it could print a summary, discarding the pass and fail counts for every file in the run. Both engines now load the module up front, in step with each other. `test/chronicle-context.test.ts` went from crashing the run to 2 passing.
+- **The job supervisor stops probing for a Linux-only program on Windows.** `detectTini` in `src/core/minions/spawn-helpers.ts` shelled out to `which`, which is not a Windows command, to find `tini`, which has no Windows build. It now answers immediately on Windows, and elsewhere the probe no longer leaks its own "not found" chatter into output.
+
+#### Changed
+- **A crashed batch no longer erases a whole shard's results.** `scripts/run-unit-shard.sh` splits its file list into bounded groups on Windows and names the files in a group that crashed, instead of letting one crash silently report the entire shard as zero passed and zero failed. Off by default elsewhere, so existing behavior is unchanged. `GBRAIN_TEST_CHUNK_SIZE` overrides the group size.
+
+#### Tests
+- **The supervisor's `tini` tests skip where they cannot apply.** `test/supervisor-tini.test.ts` builds a shell script with no file extension and finds it through a colon separated search path. None of that means anything on Windows, where the probe is answered without looking, so the block now skips there rather than failing on fixtures the platform cannot represent.
+
+## To take advantage of v0.42.69.0
+
+`gbrain upgrade`. No new schema migrations.
+
+1. **If you run background jobs on Windows:** nothing to do. The startup probe is gone.
+2. **If you contribute to GBrain on Windows:** `bash scripts/run-unit-shard.sh` now splits its file list so one crashed batch cannot zero out a shard. Read the group numbers in the output to see what was measured.
 
 ## [0.42.68.1] - 2026-07-28
 
