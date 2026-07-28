@@ -21,7 +21,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -237,7 +237,11 @@ describe('sync monorepo subdir-source support (#753/#774)', () => {
       await expect(
         performSync(engine, {
           repoPath,
-          srcSubpath: '../' + outsideDir.split('/').pop(),
+          // basename(), not split('/').pop(): mkdtempSync returns a native
+          // path, so on win32 the split finds no '/' and yields the WHOLE
+          // absolute path — the subpath under test then stops being the
+          // `../escape` shape this traversal guard is meant to reject.
+          srcSubpath: '../' + basename(outsideDir),
           noPull: true,
           noEmbed: true,
           full: true,

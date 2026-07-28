@@ -12,10 +12,20 @@
 
 import { describe, expect, it, afterEach } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { tmpdir } from 'os';
 
 import { CopyError, copyArtifacts, walkSourceDir } from '../src/core/skillpack/copy.ts';
+
+// walkSourceDir mirrors targets with join(), which emits native separators —
+// correct, since `target` is fed straight to mkdirSync/writeFileSync. A shared
+// POSIX literal cannot express that: on win32 join('/some/dst','a.txt') is
+// '\some\dst\a.txt'. So the destination-root FIXTURE is platform-selected and
+// only the separator comes from `path`; the directory structure in each
+// expectation stays hand-written.
+const WIN = process.platform === 'win32';
+const DST = WIN ? 'C:\\some\\dst' : '/some/dst';
+const DST2 = WIN ? 'C:\\dst' : '/dst';
 
 const created: string[] = [];
 afterEach(() => {
@@ -39,9 +49,9 @@ describe('walkSourceDir', () => {
     writeFileSync(join(src, 'a.txt'), 'hello a');
     writeFileSync(join(src, 'b.txt'), 'hello b');
 
-    const items = walkSourceDir(src, '/some/dst');
+    const items = walkSourceDir(src, DST);
     expect(items).toHaveLength(2);
-    expect(items.map(i => i.target).sort()).toEqual(['/some/dst/a.txt', '/some/dst/b.txt']);
+    expect(items.map(i => i.target).sort()).toEqual([`${DST}${sep}a.txt`, `${DST}${sep}b.txt`]);
   });
 
   it('walks nested directories recursively, mirroring structure', () => {
@@ -51,10 +61,14 @@ describe('walkSourceDir', () => {
     writeFileSync(join(src, 'sub', 'mid.txt'), 'm');
     writeFileSync(join(src, 'sub', 'deeper', 'low.txt'), 'l');
 
-    const items = walkSourceDir(src, '/dst');
+    const items = walkSourceDir(src, DST2);
     expect(items).toHaveLength(3);
     const targets = items.map(i => i.target).sort();
-    expect(targets).toEqual(['/dst/sub/deeper/low.txt', '/dst/sub/mid.txt', '/dst/top.txt']);
+    expect(targets).toEqual([
+      `${DST2}${sep}sub${sep}deeper${sep}low.txt`,
+      `${DST2}${sep}sub${sep}mid.txt`,
+      `${DST2}${sep}top.txt`,
+    ]);
   });
 
   it('returns empty array for a non-existent source directory', () => {
@@ -215,6 +229,37 @@ describe('copyArtifacts — canonical-path containment (harvest path)', () => {
     const dst = scratch('copy-dst-');
     const result = copyArtifacts(walkSourceDir(skillDir, dst), { confineRealpath: skillDir });
     expect(result.summary.wroteNew).toBe(1);
+  });
+
+  // Both sides of the containment check are realpathSync() output, so the
+  // prefix separator has to be the native one. A hardcoded '/' never matches
+  // a win32 realpath, which rejected EVERY source as path_traversal and made
+  // harvest a dead feature there. These two pin the fix from both directions:
+  // an in-root source is accepted, and the sibling-prefix guard the separator
+  // exists to provide still holds. Asserting only the first would pass equally
+  // well with the containment check deleted.
+  it('containment boundary holds with native separators (foo does not match foobar)', () => {
+    const harvestRoot = scratch('copy-harvest-');
+    const skillDir = join(harvestRoot, 'skills', 'foo');
+    const siblingDir = join(harvestRoot, 'skills', 'foobar');
+    mkdirSync(skillDir, { recursive: true });
+    mkdirSync(siblingDir, { recursive: true });
+    writeFileSync(join(siblingDir, 'SKILL.md'), 'sibling');
+
+    const dst = scratch('copy-dst-');
+    // Sources live in `skills/foobar`, confinement root is `skills/foo`.
+    // Rejected only because the prefix carries a trailing separator.
+    const items = walkSourceDir(siblingDir, dst);
+
+    try {
+      copyArtifacts(items, { confineRealpath: skillDir });
+      throw new Error('expected copyArtifacts to reject the sibling-prefix source');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CopyError);
+      expect((err as CopyError).code).toBe('path_traversal');
+    }
+
+    expect(existsSync(join(dst, 'SKILL.md'))).toBe(false);
   });
 });
 
