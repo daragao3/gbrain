@@ -2,6 +2,56 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.68.0] - 2026-07-28
+
+**On Windows, the bundled schema packs load instead of coming back empty, and a new build check stops the underlying path bug from returning.**
+
+GBrain built a few filesystem paths out of a URL object. On macOS and Linux that happens to produce exactly the right string, so nothing ever looked wrong there. On Windows it produces `/C:/Users/...`, which is a URL path and not something any Windows file operation accepts. The visible symptom was `gbrain schema` finding none of the packs that ship with GBrain. The same expression in the test suite produced an error that named the wrong thing entirely: it reported that `bun` could not be found, when the real problem was a directory the process could not enter. Both are fixed. A new build check now fails if the expression comes back, which matters because the bug is invisible everywhere except Windows.
+
+### How to use it
+
+```bash
+gbrain upgrade
+gbrain schema list
+```
+
+On Windows the bundled packs now appear in that list. No schema migrations.
+
+### Things to watch
+
+The new check is for people working on GBrain itself, not for running it. It runs inside `bun run verify`, and on its own:
+
+```bash
+bun run check:url-pathname
+```
+
+It leaves alone the places where `.pathname` is the right accessor, such as reading a database name out of a connection string or routing an HTTP request. If it ever flags a line that genuinely wants a URL path, add a `url-pathname-guard-ok` comment to that line with the reason.
+
+### Itemized changes
+
+#### Fixed
+- **Bundled schema packs resolve on Windows.** `packPathByName` in `src/commands/schema.ts` converts the module URL with `fileURLToPath` instead of reading `.pathname`, so the candidate paths are real filesystem paths. Every bundled pack previously resolved to null on Windows.
+- **Test spawns get a real working directory.** Twenty three call sites across ten test files now resolve the repository root through a shared helper. The old expression handed the spawn a directory it could not enter, and the resulting error named the program being launched rather than the missing directory, which sent debugging in the wrong direction for a long time.
+
+#### Added
+- **New build check: `check:url-pathname`.** `scripts/check-url-pathname-fs.sh` fails the build when a filesystem path is derived from a file URL's `.pathname`. It catches the single expression form including calls the formatter split across lines, a `file:` literal or a `pathToFileURL` result, and the two step form where a variable holds the URL and is read later. Comments are stripped so documentation of the rule does not trip it, and a `url-pathname-guard-ok` marker opts a line out. Candidate files are narrowed with `git grep` first, so a full tree scan reads only the files that could match. Wired into `bun run verify` and `bun run check:all`.
+- **Shared repository root helper for tests.** `test/helpers/repo-root.ts` exports `REPO_ROOT` and `repoPath()`, absolute and in the platform's own format, with no trailing separator.
+
+#### Tests
+- **The build check is pinned.** `test/check-url-pathname-fs.test.ts` (3 tests) runs it against six bad shapes and seven good ones written to a temp directory, and confirms it stays wired into `bun run verify`.
+- **The helper's invariants are pinned.** `test/helpers/repo-root.test.ts` (4 tests) covers absolute, existing, no drive letter URL prefix, no percent encoding, no trailing separator, and usable as a spawn working directory. Each one fails against the old expression on Windows and passes on POSIX.
+- **A test assertion no longer hardcodes a POSIX separator.** `test/upgrade.serial.test.ts` compared a joined path against a literal written with forward slashes, so it could never pass on Windows while staying invisible on Linux. The expectation is now built the same way the code under test builds its result, which is byte identical off Windows.
+
+#### Docs
+- CLAUDE.md gains a cross-cutting invariant for filesystem paths built from module URLs. `docs/architecture/KEY_FILES.md` documents the check and the helper.
+
+## To take advantage of v0.42.68.0
+
+`gbrain upgrade`. No new schema migrations.
+
+1. **On Windows:** run `gbrain schema list` once and confirm the bundled packs appear.
+2. **If you contribute to GBrain:** `bun run verify` now includes `check:url-pathname`. Use `fileURLToPath()` from `node:url` or `import.meta.dir` for filesystem paths, and `REPO_ROOT` / `repoPath()` from `test/helpers/repo-root.ts` in tests.
+
 ## [0.42.66.0] - 2026-07-24
 
 **The frontmatter linter now agrees with the write path: a page with unparseable YAML frontmatter is reported broken every time it is checked, not just the first.**
