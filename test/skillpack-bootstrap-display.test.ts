@@ -54,6 +54,7 @@ describe('buildBootstrapDisplay', () => {
       workspace: '/ws',
     });
     expect(r.shown).toBe(false);
+    // bootstrapPath is join(packRoot, relPath), so it carries '\' on win32.
     expect(r.bootstrapPath).toContain(join('runbooks', 'bootstrap.md'));
   });
 
