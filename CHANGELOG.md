@@ -2,6 +2,43 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.71.0] - 2026-07-28
+
+**The skill optimizer's multi-line edits now apply on Windows, instead of being quietly dropped.**
+
+`gbrain skillopt` improves a `SKILL.md` file by finding an exact block of text and replacing or deleting it. Windows ends every line with a carriage return and a newline; other platforms use the newline alone. The optimizer compared the block it wanted against the file byte for byte, so any edit covering more than one line never matched, and the run recorded it as "target not found" and moved on. That is a normal result the optimizer reports for an edit that no longer fits the file, not an error, so a run could discard most of its work and still look like it finished. Single-line edits were never affected. Git for Windows rewrites files to Windows line endings when you check them out, so on Windows this was the usual case rather than a corner one.
+
+### How to use it
+
+```bash
+gbrain upgrade
+gbrain skillopt <skill-name>
+```
+
+Nothing to reconfigure, and no schema migrations.
+
+### Things to watch
+
+If you ran the optimizer on Windows before this release, its multi-line edits were skipped. The run left a record of what it tried, and re-running now picks up what was dropped.
+
+An edit that genuinely does not fit the file is still refused, and one that matches the file in two places is still refused as ambiguous rather than applied to a guess. The fix changes which edits are found, not which edits are allowed.
+
+### Itemized changes
+
+#### Fixed
+- **Multi-line replace and delete targets match a file with either line ending.** `applyReplace` and `applyDelete` in `src/core/skillopt/apply-edits.ts` resolve their target through a new `findTarget`, which tries the target as written and, only if that finds nothing, retries it once rewritten in the line ending the file actually uses. Trying the original first means a file that already matched behaves exactly as before. The retry counts every occurrence, so a target that appears twice is still refused as ambiguous instead of being applied to the first one.
+- **Replacement text is written in the file's own line ending.** A multi-line replacement used to keep whatever endings it was authored with, which left one file holding both kinds. It is now converted to match the file it lands in.
+- **Deleting a block no longer leaves a blank line behind on Windows.** The trailing newline that `delete` trims counts a carriage return and newline as one ending. Trimming only the newline stranded the carriage return and left an extra empty line that the same edit never produced on other platforms.
+
+#### Tests
+- **The line-ending gap is pinned from both directions.** `test/skillopt/apply-edits.test.ts` adds nine cases covering a multi-line replace and delete against a Windows-line-ending skill, a target authored the other way round against a Unix-line-ending skill, and byte-for-byte agreement between the two once endings are set aside. Three of them guard the parts that a passing outcome alone would not catch: the blank line left by the newline trim, the mixed endings left by an unconverted replacement, and an ambiguous target still being reported as ambiguous rather than missing. Two more are negative cases holding the line that a target which really is absent is still refused.
+
+## To take advantage of v0.42.71.0
+
+`gbrain upgrade`. No new schema migrations.
+
+1. **If you have run `gbrain skillopt` on Windows:** run it again on those skills. Edits spanning more than one line were skipped, and they apply now.
+
 ## [0.42.70.0] - 2026-07-28
 
 **On Windows, `bun run verify` now actually runs. All 32 build checks start, instead of quitting before they read a single file.**

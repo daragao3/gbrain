@@ -52,13 +52,23 @@
   a `---\n` fence literal in `src/` and `test/` that is not preceded by `\r?`, with an
   opt-out comment for a genuine LF-only case. Wire it into `bun run verify`. The bug is
   invisible on Linux CI (LF checkouts), so only a static guard catches site number six.
-- [ ] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
-  `replace`/`delete` edits match their `target` with a raw `indexOf` against the body, so a
-  multi-line target authored with LF never matches a CRLF `SKILL.md` (and vice versa).
-  Out of scope for v0.42.68.1, which fixed only the frontmatter fence. Decide whether to
-  match line-ending agnostically or to normalize the target against the file's detected
-  ending before searching. Note that `splitFrontmatter` returns an offset into the original
-  text, so any fix must not normalize the body in place.
+- [x] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
+  DONE. `replace`/`delete` now resolve their `target` through `findTarget`, which tries the
+  raw target first (so nothing changes when it already matches) and retries once against the
+  body's detected line ending. The body is never normalized in place, preserving the
+  `splitFrontmatter` `bodyStart` offset contract. The `replacement` is rewritten in the
+  body's ending too, and `delete`'s trailing-newline trim now counts `\r\n` as one newline
+  instead of stranding a bare `\r`.
+- [ ] **P3 — `applyAdd`'s insertion is LF-only, so `add` edits leave mixed endings in a
+  CRLF `SKILL.md`.** Filed as a follow-up from v0.42.71.0, which fixed the `replace`/`delete`
+  target matching in the same file. Unlike those, this is cosmetic rather than silent-failure:
+  the anchor still matches and the output is structurally correct markdown, only the
+  inserted lines carry `\n` in an otherwise `\r\n` file. The fix is NOT simply making the
+  insertion `\r\n` — `findHeadingMatches`'s greedy `\s*$` consumes the anchor's trailing
+  `\r` (and any blank line after it), so `endOfLine` points mid-`\r\n` and the insertion's
+  leading `\n` is what completes the anchor's line ending. Emitting `\r\n` there would
+  produce `\r\r\n`. A real fix has to make `endOfLine` line-ending aware first, which is why
+  it was left out of the `countOccurrences` fix above.
 
 ## community fix-wave follow-ups (filed v0.42.60.0)
 

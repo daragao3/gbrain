@@ -176,10 +176,10 @@ function applyAdd(body: string, edit: EditOp & { op: 'add' }, bodyStartOffset: n
 function applyReplace(body: string, edit: EditOp & { op: 'replace' }, bodyStartOffset: number):
   | { outcome: 'applied'; newText: string }
   | { outcome: 'rejected'; edit: EditOp; reason: EditRejectionReason; detail?: string } {
-  const target = edit.target;
-  if (!target) return { outcome: 'rejected', edit, reason: 'target_not_found', detail: 'empty target' };
+  if (!edit.target) return { outcome: 'rejected', edit, reason: 'target_not_found', detail: 'empty target' };
 
-  const occurrences = countOccurrences(body, target);
+  const eol = detectEol(body);
+  const { target, count: occurrences } = findTarget(body, edit.target, eol);
   if (occurrences === 0) return { outcome: 'rejected', edit, reason: 'target_not_found' };
   if (occurrences > 1) {
     return { outcome: 'rejected', edit, reason: 'target_ambiguous', detail: `${occurrences} matches` };
@@ -189,7 +189,10 @@ function applyReplace(body: string, edit: EditOp & { op: 'replace' }, bodyStartO
     return { outcome: 'rejected', edit, reason: 'inside_code_fence' };
   }
   void bodyStartOffset;
-  const newBody = body.slice(0, matchIdx) + edit.replacement + body.slice(matchIdx + target.length);
+  // Rewrite the replacement in the body's own line ending too, so a
+  // multi-line replacement can't splice LF lines into a CRLF file.
+  const replacement = toEol(edit.replacement, eol);
+  const newBody = body.slice(0, matchIdx) + replacement + body.slice(matchIdx + target.length);
   if (newBody === body) {
     return { outcome: 'rejected', edit, reason: 'no_change' };
   }
@@ -199,10 +202,10 @@ function applyReplace(body: string, edit: EditOp & { op: 'replace' }, bodyStartO
 function applyDelete(body: string, edit: EditOp & { op: 'delete' }, bodyStartOffset: number):
   | { outcome: 'applied'; newText: string }
   | { outcome: 'rejected'; edit: EditOp; reason: EditRejectionReason; detail?: string } {
-  const target = edit.target;
-  if (!target) return { outcome: 'rejected', edit, reason: 'target_not_found', detail: 'empty target' };
+  if (!edit.target) return { outcome: 'rejected', edit, reason: 'target_not_found', detail: 'empty target' };
 
-  const occurrences = countOccurrences(body, target);
+  const eol = detectEol(body);
+  const { target, count: occurrences } = findTarget(body, edit.target, eol);
   if (occurrences === 0) return { outcome: 'rejected', edit, reason: 'target_not_found' };
   if (occurrences > 1) {
     return { outcome: 'rejected', edit, reason: 'target_ambiguous', detail: `${occurrences} matches` };
@@ -213,9 +216,11 @@ function applyDelete(body: string, edit: EditOp & { op: 'delete' }, bodyStartOff
   }
   void bodyStartOffset;
   // Delete the target plus a trailing newline if present (keep markdown tidy).
+  // `\r\n` counts as ONE newline — cutting only the `\n` would strand a bare
+  // `\r` and leave a phantom blank line the LF path never produces.
   const after = matchIdx + target.length;
-  const hasTrailingNl = body[after] === '\n';
-  const cutEnd = hasTrailingNl ? after + 1 : after;
+  const trailingNl = body.startsWith('\r\n', after) ? 2 : body[after] === '\n' ? 1 : 0;
+  const cutEnd = after + trailingNl;
   const newBody = body.slice(0, matchIdx) + body.slice(cutEnd);
   if (newBody === body) {
     return { outcome: 'rejected', edit, reason: 'no_change' };
@@ -267,6 +272,52 @@ function countOccurrences(haystack: string, needle: string): number {
     pos += needle.length;
   }
   return count;
+}
+
+type Eol = '\r\n' | '\n';
+
+/**
+ * Dominant line ending of `text`. CRLF only when it actually outnumbers the
+ * lone LFs, so a mostly-LF file with one stray `\r\n` still reads as LF.
+ */
+function detectEol(text: string): Eol {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  if (crlf === 0) return '\n';
+  const nl = (text.match(/\n/g) ?? []).length;
+  return crlf > nl - crlf ? '\r\n' : '\n';
+}
+
+/** Rewrite every line ending in `s` as `eol`. Identity on single-line input. */
+function toEol(s: string, eol: Eol): string {
+  const lf = s.replace(/\r\n/g, '\n');
+  return eol === '\n' ? lf : lf.replace(/\n/g, '\r\n');
+}
+
+/**
+ * Locate `rawTarget` in `body`, tolerating a line-ending mismatch between the
+ * two. `replace`/`delete` match their target with a raw `indexOf`, so a
+ * multi-line target authored with LF never matches a CRLF SKILL.md (and vice
+ * versa) — and the edit is then rejected as `target_not_found`, silently from
+ * the caller's view since rejection is a normal tagged outcome. On Windows
+ * `core.autocrlf=true` makes every checked-out SKILL.md CRLF, so that is the
+ * common case there, not an edge case.
+ *
+ * The raw target is tried FIRST, so nothing changes whenever it already
+ * matches; the normalized retry only rescues a miss. Normalizing the target
+ * rather than the body is deliberate: `splitFrontmatter` returns `bodyStart` as
+ * an offset into the ORIGINAL text and `applyEdit` reassembles with
+ * `text.slice(0, bodyStart) + newText`, so rewriting the body in place would
+ * desynchronize the offset and corrupt the reassembly.
+ *
+ * Returns the target variant that actually matched, so the caller can slice
+ * with the right length.
+ */
+function findTarget(body: string, rawTarget: string, eol: Eol): { target: string; count: number } {
+  const count = countOccurrences(body, rawTarget);
+  if (count > 0) return { target: rawTarget, count };
+  const normalized = toEol(rawTarget, eol);
+  if (normalized === rawTarget) return { target: rawTarget, count: 0 };
+  return { target: normalized, count: countOccurrences(body, normalized) };
 }
 
 /**
