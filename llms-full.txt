@@ -216,6 +216,19 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   text, the cast parses it). Guarded by `scripts/check-jsonb-pattern.sh` (template grep) +
   `scripts/check-jsonb-params.mjs` (positional AST scanner); the real backstop is the DATABASE_URL-gated
   e2e parity tests, since PGLite can't surface the bug. Full rule in `docs/ENGINES.md`.
+- **Engine path: no `await import()` while the PGLite WASM instance is live.** A dynamic
+  import issued from an engine method with PGLite running can take the whole `bun test`
+  process down on Windows. Bun dies before printing its summary, so ONE crash discards
+  pass/fail totals for EVERY file in that invocation — a large shard reports no totals at
+  all and the suite is ungateable. It is a no-op on Linux, so CI can never catch it, and
+  scale is the trigger: 1- and 5-file runs stay green with a live trigger; it took ~12
+  database-backed files in one invocation to crash. Helpers on the engine path are
+  statically imported in BOTH engines. Two exceptions stay lazy deliberately and say so at
+  the call site: `ai/gateway.ts` (closure ~51 modules, the whole AI SDK) and the
+  postgres-only audit writers. Before reaching for a lazy import here, check whether the
+  module is already in the engine's static graph — if it is, the `await import()` buys
+  nothing and is pure risk. Note `git log -S` cannot find a dynamic-to-static change (the
+  pickaxe counts occurrences, which do not change); use `git log -G`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
