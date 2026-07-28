@@ -1,5 +1,65 @@
 # TODOS
 
+## v0.42.70.0 follow-ups (Windows verify dispatch)
+
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
+  checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
+  bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
+  `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
+  a spurious timeout. Observed repeatedly on a box running several concurrent agent
+  sessions: the same commit produced `pass=26 fail=6`, then `pass=32 fail=0` minutes later
+  with no code change, and each of the 6 passed when run alone. `check:privacy` measured
+  12s standalone against its 120s cap, so the cap is not the problem — contention is.
+  A `GBRAIN_VERIFY_JOBS` cap (default something like `nproc`) with a simple wait-for-slot
+  loop would make the gate deterministic. Today a red `verify` on a busy machine has to be
+  re-run before it can be believed, which is the opposite of what a gate is for.
+  Where: `scripts/run-verify-parallel.sh`.
+- [ ] **P3 — `check:privacy` and `check:test-isolation` are still the two slowest guards.**
+  v0.42.70.0 took them from per-file `grep`/`awk` spawns (~7.7k and ~6k processes) to
+  batched `xargs -0` and a single `awk` pass, which is what brought them inside the 120s
+  cap on Windows. They remain the ones closest to it. If either creeps back toward the cap,
+  the next step is narrowing the candidate set with `git grep` first, the way
+  `check-url-pathname-fs.sh` already does.
+
+## v0.42.69.0 follow-ups (Windows bun test crash)
+
+- [ ] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
+  instance is live.** v0.42.69.0 fixed exactly one (`mergeOntologyFact` in both
+  engines), which was enough to take `test/chronicle-context.test.ts` from
+  crashing the run to 2 pass. The crash class is not closed: a dynamic import
+  issued from an async method while the PGLite WASM instance is live can still
+  take the whole `bun test` process down on Windows with error 127
+  (`ERROR_PROC_NOT_FOUND`) before it prints a summary, discarding pass/fail for
+  every file in that invocation. Chunking in `scripts/run-unit-shard.sh` bounds
+  the damage; it does not cure it. Enumerate the `await import(` sites in
+  `src/core/` that an engine method can reach and hoist the ones that are not
+  load-bearing for startup cost. The full unit suite cannot be a Windows ship
+  gate until this is done.
+- [ ] **P3 — consider a guard for dynamic imports on the engine hot path.** Once
+  the sweep above establishes which sites are legitimately lazy, a
+  `scripts/check-*.sh` in the repo's usual shape could keep a new
+  `await import()` from landing inside an engine method. Only worth writing after
+  the sweep, since the allowlist is the hard part, not the grep.
+
+## v0.42.68.1 follow-ups (CRLF frontmatter fence)
+
+- [ ] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.**
+  v0.42.68.1 fixed the fourth and fifth recurrence of the same defect: a frontmatter
+  matcher written `/^---\n/` instead of `/^---\r?\n/`, which silently parses every CRLF
+  `SKILL.md` as having no frontmatter. The repo's own convention is that a guard cures
+  what prose cannot (see `scripts/check-jsonb-pattern.sh`,
+  `scripts/check-url-pathname-fs.sh`). Add `scripts/check-frontmatter-fence.sh`: fail on
+  a `---\n` fence literal in `src/` and `test/` that is not preceded by `\r?`, with an
+  opt-out comment for a genuine LF-only case. Wire it into `bun run verify`. The bug is
+  invisible on Linux CI (LF checkouts), so only a static guard catches site number six.
+- [ ] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
+  `replace`/`delete` edits match their `target` with a raw `indexOf` against the body, so a
+  multi-line target authored with LF never matches a CRLF `SKILL.md` (and vice versa).
+  Out of scope for v0.42.68.1, which fixed only the frontmatter fence. Decide whether to
+  match line-ending agnostically or to normalize the target against the file's detected
+  ending before searching. Note that `splitFrontmatter` returns an offset into the original
+  text, so any fix must not normalize the body in place.
+
 ## community fix-wave follow-ups (filed v0.42.60.0)
 
 - [ ] **P1 — take-writes source scoping fails open when source resolution errors (#2684 residual).**

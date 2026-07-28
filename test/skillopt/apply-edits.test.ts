@@ -49,6 +49,74 @@ describe('splitFrontmatter', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// CRLF tolerance
+//
+// An LF-only fence (`/^---\n[\s\S]*?\n---\n/`) cannot match a file that starts
+// `---\r\n`, so a CRLF SKILL.md split as "no frontmatter": bodyStart stayed 0
+// and the WHOLE file — frontmatter included — became the mutable body. That
+// defeats D5 (frontmatter is immutable). On Windows `core.autocrlf=true` makes
+// every checked-out SKILL.md CRLF, so this fired for the entire skills tree.
+// ---------------------------------------------------------------------------
+
+const CRLF_SKILL = SAMPLE_SKILL.replace(/\n/g, '\r\n');
+
+describe('splitFrontmatter — CRLF', () => {
+  test('splits a CRLF SKILL.md at the closing fence', () => {
+    const split = splitFrontmatter(CRLF_SKILL);
+    expect(split.body).toContain('# Example Skill');
+    // The bug: frontmatter leaked into the mutable body.
+    expect(split.body).not.toContain('name: example-skill');
+    expect(split.body).not.toContain('brain_first: exempt');
+    expect(split.bodyStart).toBeGreaterThan(0);
+  });
+
+  test('CRLF and LF split to the same body, modulo line endings', () => {
+    const crlf = splitFrontmatter(CRLF_SKILL);
+    const lf = splitFrontmatter(SAMPLE_SKILL);
+    expect(crlf.body.replace(/\r\n/g, '\n')).toBe(lf.body);
+    // bodyStart is an offset into the ORIGINAL text, so it must account for
+    // the extra \r on each frontmatter line — proof we did not normalize.
+    const crlfLinesConsumed = SAMPLE_SKILL.slice(0, lf.bodyStart).split('\n').length - 1;
+    expect(crlf.bodyStart).toBe(lf.bodyStart + crlfLinesConsumed);
+  });
+
+  test('CRLF text with no frontmatter still returns the whole text as body', () => {
+    const noFence = '# heading\r\n\r\nnot frontmatter\r\n';
+    const split = splitFrontmatter(noFence);
+    expect(split.body).toBe(noFence);
+    expect(split.bodyStart).toBe(0);
+  });
+
+  test('applyEdit on a CRLF skill refuses an anchor inside the frontmatter (D5)', () => {
+    // `brain_first: exempt` is a frontmatter line. With the frontmatter
+    // wrongly folded into the body, this resolves as an exact-line anchor and
+    // the optimizer happily writes INTO the frontmatter. Rejection is the
+    // whole point of the split.
+    const r = applyEdit(CRLF_SKILL, {
+      op: 'add',
+      anchor: 'brain_first: exempt',
+      content: 'INJECTED',
+    });
+    expect(r.outcome).toBe('rejected');
+    if (r.outcome === 'rejected') expect(r.reason).toBe('anchor_not_found');
+  });
+
+  test('applyEdit on a CRLF skill still edits the body and preserves the frontmatter', () => {
+    const r = applyEdit(CRLF_SKILL, {
+      op: 'add',
+      anchor: '## Anti-patterns',
+      content: '> **Convention:** see [conventions/foo.md](../conventions/foo.md).',
+    });
+    expect(r.outcome).toBe('applied');
+    if (r.outcome === 'applied') {
+      const fenceEnd = CRLF_SKILL.indexOf('\r\n---\r\n') + '\r\n---\r\n'.length;
+      expect(r.newText.slice(0, fenceEnd)).toBe(CRLF_SKILL.slice(0, fenceEnd));
+      expect(r.newText).toContain('conventions/foo.md');
+    }
+  });
+});
+
 describe('applyEdit (add)', () => {
   test('inserts content after a unique heading anchor', () => {
     const r = applyEdit(SAMPLE_SKILL, {
