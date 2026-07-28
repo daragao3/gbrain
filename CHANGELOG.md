@@ -2,6 +2,40 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.69.0] - 2026-07-28
+
+**If you develop GBrain on Windows, the settings block at the top of a Markdown file is now read correctly. Until this release it was often ignored, with nothing to tell you.**
+
+A lot of files in this project open with a small settings block fenced by `---` lines. Skills keep their name and description there. Generated documents keep their metadata there. The code that reads that block looks for a `---` followed by a Unix line ending. Git for Windows installs with `core.autocrlf=true`, which hands you those files with Windows line endings instead, so the fence does not match and the block is treated as missing.
+
+Nothing raises an error when that happens. The settings just come back empty, and whatever needed them quietly does the wrong thing. Skill descriptions turn up blank. A fixer puts its notice above the settings block instead of below it. A resolver drops entries it should have collected. A freshness check reports every line of a generated document as changed when nothing changed at all. Four visible symptoms, one cause.
+
+`.gitattributes` now pins every `.md` file to Unix line endings at checkout, the same way v0.42.67.0 pinned `.sh` files. All 349 Markdown files stored in the repository already use Unix line endings, so nothing stored moves and no file content changes.
+
+Nothing changes for macOS and Linux.
+
+## To take advantage of v0.42.69.0
+
+Only Windows contributors need to do anything, and only once. `.gitattributes` applies at checkout time, so Markdown files already sitting on your disk keep their old line endings until you refresh them.
+
+1. **Refresh the working copy** from the repository root:
+   ```bash
+   git rm --cached -r . -q
+   git reset --hard
+   ```
+2. **Confirm the Markdown on disk is clean:**
+   ```bash
+   git ls-files --eol -- '*.md' | grep -c 'w/crlf'
+   ```
+   `0` means it worked. Any other number means step 1 did not take effect.
+
+### Itemized changes
+
+- Root `.gitattributes` gains `*.md text eol=lf` next to the existing `*.sh` entry, so Markdown checks out with Unix line endings regardless of the contributor's `core.autocrlf` setting.
+- The entry uses an explicit `text` attribute rather than `text=auto`. `text=auto` leaves the decision to Git's own guess about whether a file is text. The explicit form always applies.
+- All 349 tracked `.md` files are already stored with Unix line endings, so there is nothing to renormalize and no stored content changes.
+- Readers of the settings block keep tolerating a stray carriage return on their own. GBrain also reads Markdown from directories it does not control, so that tolerance still earns its keep. This change removes the problem for this repository's own files.
+
 ## [0.42.67.0] - 2026-07-28
 
 **If you develop GBrain on Windows, the test and check commands now actually run. Until this release they were quietly doing almost nothing.**
