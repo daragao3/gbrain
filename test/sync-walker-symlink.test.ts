@@ -28,14 +28,17 @@ import { withEnv } from './helpers/with-env.ts';
  * returns the WHOLE path instead of a basename, and `replace(tmp, '')` leaves
  * a '\'-prefixed tail. Both turn the `startsWith('/.git')` style negative
  * assertions below into vacuous passes, so the skip-list regressions this file
- * exists to pin would stop being tested at all. Fold the separator once, here.
+ * exists to pin would stop being tested at all.
+ *
+ * Expectations therefore stay NATIVE: only the separator comes from `path`,
+ * the directory structure in each one stays hand-written. Byte-identical to
+ * the old POSIX literals when sep is '/'.
  */
-const norm = (p: string): string => (sep === '/' ? p : p.split(sep).join('/'));
 
 let tmp: string;
 
-/** Path relative to `tmp`, separator-folded, leading '/' preserved. */
-const relToTmp = (p: string): string => norm(p).slice(norm(tmp).length);
+/** Path relative to `tmp`, native separators, leading separator preserved. */
+const relToTmp = (p: string): string => p.slice(tmp.length);
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-walker-'));
@@ -58,7 +61,7 @@ describe('collectSyncableFiles symlink + cycle hardening', () => {
 
       expect(ms).toBeLessThan(1000); // would hang if walker followed the loop
       expect(files).toContain(join(tmp, 'notes.md'));
-      expect(files.every(f => !norm(f).includes('/loop/'))).toBe(true);
+      expect(files.every(f => !f.includes(`${sep}loop${sep}`))).toBe(true);
     });
   });
 
@@ -96,7 +99,7 @@ describe('collectSyncableFiles symlink + cycle hardening', () => {
       const files = collectSyncableFiles(tmp, { strategy: 'markdown' });
 
       expect(files).toContain(join(tmp, 'shallow.md'));
-      expect(files.every(f => !norm(f).includes('/d35/'))).toBe(true); // past depth 32
+      expect(files.every(f => !f.includes(`${sep}d35${sep}`))).toBe(true); // past depth 32
     });
   });
 
@@ -129,10 +132,10 @@ describe('collectSyncableFiles symlink + cycle hardening', () => {
       const files = collectSyncableFiles(tmp, { strategy: 'markdown' });
       const names = files.map(f => relToTmp(f));
 
-      expect(names).toContain('/real.md');
-      expect(names.every(n => !n.startsWith('/.git'))).toBe(true);
-      expect(names.every(n => !n.startsWith('/.claude'))).toBe(true);
-      expect(names.every(n => !n.startsWith('/node_modules'))).toBe(true);
+      expect(names).toContain(`${sep}real.md`);
+      expect(names.every(n => !n.startsWith(`${sep}.git`))).toBe(true);
+      expect(names.every(n => !n.startsWith(`${sep}.claude`))).toBe(true);
+      expect(names.every(n => !n.startsWith(`${sep}node_modules`))).toBe(true);
     });
   });
 
@@ -171,7 +174,7 @@ describe('collectSyncableFiles symlink + cycle hardening', () => {
       expect(first).toEqual(second);
       // Sorted: a.md, b.md, sub/c.md (lexicographic on absolute paths).
       expect(first.map(f => relToTmp(f))).toEqual([
-        '/a.md', '/b.md', '/sub/c.md',
+        `${sep}a.md`, `${sep}b.md`, `${sep}sub${sep}c.md`,
       ]);
     });
   });
