@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join, relative } from 'path';
+import { join, relative, sep } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
@@ -1887,7 +1887,14 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // NAV-1/NAV-2 scope-entry guard: the realpath-resolved scope must live
   // inside the realpath-resolved git root. Catches `--src-subpath ../escape`
   // AND a symlinked subdir pointing outside the repo, before any git op runs.
-  if (syncScopeRoot !== gitContextRoot && !syncScopeRoot.startsWith(gitContextRoot + '/')) {
+  // Compare with the NATIVE separator: both operands come from realpathSync(),
+  // so on win32 they are '\'-separated and a hardcoded '/' boundary can never
+  // match — every in-repo subdir scope was rejected as path traversal, which
+  // made `--src-subpath` unusable on Windows. Same defect (and same fix) as
+  // the archive-crawler allow-list in 2847b60f. `sep` keeps the boundary guard
+  // that stops `/repo-evil` from prefix-matching `/repo`, and is byte-identical
+  // to the old code on POSIX.
+  if (syncScopeRoot !== gitContextRoot && !syncScopeRoot.startsWith(gitContextRoot + sep)) {
     throw new Error(
       `Sync scope ${syncScopeRoot} resolves outside git repo ${gitContextRoot}. ` +
       `Refusing to sync: possible path traversal via --src-subpath.`,
