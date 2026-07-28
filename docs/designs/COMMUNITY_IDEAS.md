@@ -280,9 +280,9 @@ triage report) and should be treated as a coordinated design, not piecemeal merg
   trees), bloating DB + embedding cost. gitignore-parity `.gbrainignore` + per-source
   `excludePatterns`. *(See also the maintainer's walker-prune work; #1942 prunes
   vendor/dist/build.)*
-- **Monorepo sub-path sources** (#774, @jeremyknows) — **HELD, high.** `--src-subpath`
-  (split repo into git-root + logical-source axes) + `--exclude` so one repo can hold N
-  sources at subdirs.
+- **Monorepo sub-path sources** (#774, @jeremyknows) — **SHIPPED.** `--src-subpath`
+  splits the git root from the logical source, while repeatable `--exclude` patterns let
+  one repository hold sources in multiple subdirectories.
 - **MCP tool filtering** (#747, @joelwp) — **OPEN, high.** MCP advertises all ~51 ops to
   every consumer (~10K tokens of schemas, tool confusion); `GBRAIN_EXPOSED_TOOLS` filters
   the advertised surface.

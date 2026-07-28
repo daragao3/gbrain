@@ -2,26 +2,14 @@
 
 ## v0.42.72.0 follow-ups (native path separators)
 
-- [ ] **P2 — sweep the remaining `startsWith(x + '/')` containment checks in `src/`.**
-  v0.42.72.0 fixed the three that had a visibly dead feature behind them
-  (`src/commands/sync.ts` scope containment, `src/core/archive-crawler-config.ts`,
-  `src/core/skillpack/copy.ts`). The class is not closed. A hand-classified grep leaves
-  roughly nine more sites where the compared value is a filesystem path and the written-in
-  forward slash is therefore wrong on Windows: `src/core/storage/local.ts:19`,
-  `src/core/path-confine.ts:45`, `src/core/file-resolver.ts:59`,
-  `src/core/brain-writer.ts:339`, `src/core/brain-resolver.ts:72`,
-  `src/core/ingestion/sources/inbox-folder.ts:159`, `src/commands/sync.ts:1120`,
-  `src/commands/doctor.ts:5063`, `src/commands/integrations.ts:983`.
-  Do NOT bulk-replace. Three sites in that grep are correct as written and must be left
-  alone: `src/core/operations.ts:188` compares page slugs, and `src/commands/sync.ts:2240`
-  and `:2244` compare git-relative paths, both of which use a forward slash on every
-  platform. Classify each site by what the value actually holds before touching it.
-  Several of these fail OPEN rather than closed, which makes them higher value than the
-  three already fixed, and none of them can be caught by CI: the suite is ubuntu-only, where
-  the forward slash is correct. Fix each one with a test that pins a directory boundary
-  (`foo` must not match `foobar`), not just that a valid path is accepted, since the latter
-  passes equally well with the check deleted.
-  Where: the files listed above.
+- [ ] **P2 — audit remaining filesystem containment checks for native separators.**
+  v0.42.72.0 fixed three checks, but similar prefix comparisons may remain. Do NOT
+  bulk-replace: page slugs and git-relative paths correctly use forward slashes on every
+  platform. Classify each candidate by the value it actually holds, then fix filesystem
+  cases with a test that pins the directory boundary (`foo` must not match `foobar`), not
+  only that a valid path is accepted. The suite is Ubuntu-only, so the Windows branch needs
+  an explicit cross-platform proof.
+  Where: filesystem path-prefix comparisons in `src/`.
 
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
