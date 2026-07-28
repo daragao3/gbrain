@@ -35,10 +35,11 @@ Both must pass. Do not ship with failing E2E tests. Do not skip E2E tests.
 skips TypeScript type checking — it only enforces runtime behavior.
 Three ways to actually gate on types:
 
-1. `bun run test` (npm script in `package.json`) — includes `bun run typecheck`
-   plus the four shell pre-checks (`check-jsonb-pattern.sh`,
-   `check-progress-to-stdout.sh`, `check-trailing-newline.sh`,
-   `check-wasm-embedded.sh`) before the runner. Use this mid-branch.
+1. `bun run verify` (npm script in `package.json`) — fans out every guard check
+   plus `typecheck` in parallel via `scripts/run-verify-parallel.sh`. This is the
+   pre-push gate; use it mid-branch. Note `bun run test` is the parallel unit
+   runner only (`scripts/run-unit-parallel.sh`); it does NOT typecheck or run the
+   guards, so a green `bun run test` says nothing about types.
 2. `bun run typecheck` — `tsc --noEmit` standalone. Fast (~5s on this repo).
 3. `bun run ci:local` — the full local CI gate from Path A.
 

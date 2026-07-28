@@ -115,6 +115,24 @@ Rename to `*.serial.test.ts` when:
 
 The quarantine has grown to dozens of files — treat it as debt: every addition needs a reason from the list above, and prefer fixing the contention root cause when one exists.
 
+### Resolving the repo root (and other filesystem paths)
+
+Tests that spawn the CLI or read repo files must resolve the repo root through `test/helpers/repo-root.ts`:
+
+```ts
+import { REPO_ROOT, repoPath } from './helpers/repo-root.ts';
+
+Bun.spawnSync([process.execPath, repoPath('src', 'cli.ts')], { cwd: REPO_ROOT });
+```
+
+`REPO_ROOT` is absolute, in the platform's own format, with no trailing separator; `repoPath(...segments)` joins onto it.
+
+**Never build a filesystem path from `new URL(...).pathname`.** `URL.pathname` is a URL path: on Windows `new URL('..', import.meta.url).pathname` yields `/C:/Users/...`, which no Win32 API accepts. As a `Bun.spawn` `cwd:` it fails with `ENOENT: no such file or directory, uv_spawn 'bun'` — that message names argv[0], not the directory that is actually missing, so it reads as "bun is not installed" and sends debugging the wrong way. Interpolated into a script argument it surfaces as `Module not found "/C:/.../src/cli.ts"`. The expression is an identity transform on POSIX, so Linux CI cannot catch it.
+
+`scripts/check-url-pathname-fs.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on that pattern. It leaves alone the cases where `.pathname` is the right accessor — reading a database name out of a connection string, routing an HTTP request, assigning `u.pathname` — and a `url-pathname-guard-ok` comment opts out a line that genuinely wants a URL path. Outside tests, use `fileURLToPath()` from `node:url` or `import.meta.dir`.
+
+Same class, same fix: build expected paths with `join()` rather than a hardcoded forward-slash literal when the code under test joins them, or the assertion can only pass on POSIX.
+
 ### Unit test inventory
 
 `bun test` runs all tests without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
