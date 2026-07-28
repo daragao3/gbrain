@@ -54,7 +54,7 @@ This divergence is intentional. Don't try to make them equal — the two scripts
 When `bun run test` finds any failure, the wrapper:
 
 1. Writes failure blocks (each prefixed with `--- shard N: <test name> ---`) to `.context/test-failures.log` (workspace-local, gitignored). On systems without a writable `.context/`, falls back to `/tmp/gbrain-test-failures.log`.
-2. Prints a loud stderr banner with the absolute log path, plus the last 30 lines of the failure log inlined. Banner survives `| head` / `| tail` / agent-side log truncation.
+2. Prints a loud stderr banner with the absolute log path, plus the last 30 lines of the failure log inlined. Banner survives `| head` / `| tail` / agent-side log truncation. The path is assembled inside bash (`cd "$(dirname …)" && pwd`), so on Git-Bash/Cygwin it carries the POSIX spelling of the location (`/tmp/…`) rather than the Windows one (`C:\…`) — that is the form you can paste back into the shell the wrapper ran in. `test/scripts/run-unit-parallel.test.ts` pins the contract rather than a literal string: the banner line must be absolute (a root or a drive letter, separator-normalized) and must end at that run's own `.context/test-failures.log`. Comparing it against a path built by Node's `join()` only ever agrees on Linux, where `os.tmpdir()` and `pwd` happen to match.
 3. Writes a one-line-per-shard summary to `.context/test-summary.txt` (`shard N/M: pass=X fail=Y skip=Z rc=W`).
 4. Exits non-zero. Empty failure log + non-zero exit = infrastructure problem (wedged shard, killed child); the banner says so.
 
