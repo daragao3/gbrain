@@ -77,6 +77,7 @@ If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the
 | MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
 
 `GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
+
 ### Stopping a run (process-tree teardown)
 
 Both runners tear down their own process trees when a run is stopped, via `scripts/lib/proc-tree.sh` (built from `ps` + `kill` only — `pkill`/`pgrep` are absent on Git-Bash and default Cygwin, where `pkill -P` was a silent no-op). `run-unit-parallel.sh` reaps shards, the serial pass, the heartbeat, and the watchdog from one EXIT/INT/TERM trap; `run-serial-tests.sh` runs each file's `bun test` as a tracked background child and kills its tree from the same trap. Both refuse to start (`exit 2`) if the helper is missing, rather than limping on with teardown silently doing nothing.
