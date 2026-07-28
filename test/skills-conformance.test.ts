@@ -5,8 +5,16 @@ import { join } from "path";
 const SKILLS_DIR = join(import.meta.dir, "..", "skills");
 const MANIFEST_PATH = join(SKILLS_DIR, "manifest.json");
 
-/** Simple YAML frontmatter parser — extracts fields between --- delimiters */
-function parseFrontmatter(content: string): Record<string, unknown> | null {
+/**
+ * Simple YAML frontmatter parser — extracts fields between --- delimiters.
+ *
+ * Normalizes line endings first: an LF-only fence cannot match a file that
+ * starts `---\r\n`, so on Windows (`core.autocrlf=true` is the Git-for-Windows
+ * default) this returned null for the entire checked-out skills corpus.
+ * Normalizing also keeps a trailing `\r` off every parsed value.
+ */
+function parseFrontmatter(raw: string): Record<string, unknown> | null {
+  const content = raw.replace(/\r\n/g, "\n");
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return null;
   const yaml = match[1];
@@ -65,7 +73,9 @@ describe("skills conformance", () => {
       const content = readFileSync(join(SKILLS_DIR, dir, "SKILL.md"), "utf-8");
 
       test("has YAML frontmatter", () => {
-        expect(content.startsWith("---\n")).toBe(true);
+        // CRLF-tolerant: `startsWith("---\n")` is an offset-0 test that is false
+        // for every SKILL.md checked out on Windows.
+        expect(/^---\r?\n/.test(content)).toBe(true);
         const fm = parseFrontmatter(content);
         expect(fm).not.toBeNull();
       });

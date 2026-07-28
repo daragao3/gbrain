@@ -12,12 +12,40 @@ Seven test command tiers, each with a clear scope:
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
 | `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
-| `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (~30 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s (parallel; typecheck dominates) | Before pushing; before `/ship`. |
+| `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (32 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
 | `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation). | ~1s per quarantined file | Debugging a specific quarantined file. |
 | `bun run test:e2e` | Real Postgres E2E. Requires Docker + `DATABASE_URL`. Sequential. | ~5-10min | Pre-ship; nightly. |
-| `bun run check:all` | The historical pre-check scripts (22, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (~30 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+| `bun run check:all` | The historical pre-check scripts (23, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (32 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+
+### Adding a check to `verify`
+
+Append the script to the `CHECKS` array in `scripts/run-verify-parallel.sh` and add its
+`package.json` entry **written as `bash scripts/check-foo.sh`**. The `bash ` prefix is not
+cosmetic: bun on Windows will not start a `.sh` from its shebang line, so a bare path exits
+immediately with "command not found" and the check reports a failure without having read
+anything. A bare path works on Linux and macOS, so CI cannot catch the omission.
+
+Shell scripts are pinned to LF by the root `.gitattributes` (`*.sh text eol=lf`). Without it
+`core.autocrlf=true` — the Git-for-Windows installer default — checks every script out CRLF
+and a strict bash dies on the trailing `\r`. The rule applies at checkout, so a clone that
+predates it keeps CRLF copies until they are replaced:
+`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`
+
+### Per-check timeouts
+
+Each check gets a wallclock cap, default 120s (`GBRAIN_VERIFY_TIMEOUT`). `typecheck` has its
+own budget, default 600s (`GBRAIN_VERIFY_TIMEOUT_TYPECHECK`), because a full `tsc --noEmit`
+over this codebase is legitimately longer than the cap the grep-style guards share. Keeping
+the shared default tight is what makes a hung or accidentally-quadratic check fail fast
+rather than stall the run.
+
+All 32 checks are spawned at once with no concurrency cap. On a heavily loaded machine that
+can exhaust the process table and produce failures unrelated to the code — the signature is
+`fork: retry: Resource temporarily unavailable` or `dofork: child -1` in the output. Re-run
+when the machine is quieter, or run the single check directly (`bash scripts/check-foo.sh`)
+to confirm.
 
 ### CI vs local: intentionally divergent file sets
 
@@ -145,6 +173,10 @@ Bun.spawnSync([process.execPath, repoPath('src', 'cli.ts')], { cwd: REPO_ROOT })
 `scripts/check-url-pathname-fs.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on that pattern. It leaves alone the cases where `.pathname` is the right accessor — reading a database name out of a connection string, routing an HTTP request, assigning `u.pathname` — and a `url-pathname-guard-ok` comment opts out a line that genuinely wants a URL path. Outside tests, use `fileURLToPath()` from `node:url` or `import.meta.dir`.
 
 Same class, same fix: build expected paths with `join()` rather than a hardcoded forward-slash literal when the code under test joins them, or the assertion can only pass on POSIX.
+
+**Never match a YAML frontmatter fence with an LF-only `---\n`.** `content.match(/^---\n…/)` has no `m` flag, so `^` anchors at offset 0 only and a file starting `---\r\n` matches nowhere. Nothing throws: the parser returns null or an empty array, and every caller concludes the file has no frontmatter. On Windows `core.autocrlf=true` makes every checked-out `SKILL.md` CRLF, so it fires for the whole skills tree at once, and it is an identity transform on POSIX, so Linux CI cannot catch it. `.gitattributes` cannot fix it either, because `skillsDir` is a runtime parameter and gbrain parses `SKILL.md` files it does not own.
+
+`scripts/check-frontmatter-fence.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on the two shapes that read from offset 0: an LF-only fence in a regex literal, and `.startsWith('---\n')`. It leaves alone the far more common case of *building* content — fixture bodies, page builders, markdown-HR joins — which carry neither a `^` anchor nor `startsWith`. Fix by relaxing the fence to `/^---\r?\n…/`, or by normalizing once up front (`content.replace(/\r\n/g, '\n')`), which is preferred when the parsed values flow downstream because it also strips a trailing `\r` off each one. Do not normalize when the function returns a byte offset into the original text, since that shifts every offset. A `frontmatter-fence-guard-ok` comment opts out a line that genuinely wants LF only — in tests that means asserting on gbrain's own emitted markdown, where LF is the property under test and relaxing the fence would stop the assertion catching a CRLF regression in the writer.
 
 ### Unit test inventory
 

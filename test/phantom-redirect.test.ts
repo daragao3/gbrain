@@ -367,6 +367,8 @@ I believe shipping fast is a moral imperative.
       // Canonical .md now exists with proper frontmatter (round 6)
       expect(mdExists(brainDir, 'people/alice-example')).toBe(true);
       const canonicalMd = readMd(brainDir, 'people/alice-example');
+      // frontmatter-fence-guard-ok: reads back a file gbrain just WROTE. gbrain
+      // emits LF; asserting LF here is deliberate, not a CRLF-tolerance gap.
       expect(canonicalMd).toMatch(/^---\n/); // frontmatter present
       expect(canonicalMd).toContain('type: person');
       expect(canonicalMd).toContain('Loves jazz'); // merged fact

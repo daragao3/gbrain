@@ -2,6 +2,112 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.71.0] - 2026-07-28
+
+**A bug that silently blanked out every skill file on Windows has now been caught six times. This release adds a build check so it cannot come back a seventh.**
+
+Skill files start with a block of settings fenced by three dashes and a line break. GBrain reads that block to learn a skill's name, its triggers, and what it is allowed to do. Windows ends lines with two characters where Mac and Linux use one, and several of GBrain's readers only looked for the one-character form. When they met a Windows file they did not report an error. They reported that the file had no settings at all. Skills lost their names, their declared triggers went unseen, and the checks meant to catch that reported everything was fine. The same mistake had been found and fixed five separate times in different files. It kept returning because nothing was watching for it, and because it is invisible on Mac and Linux, so the automated test suite could never see it either.
+
+A new check now reads the code itself and fails the build when it finds a reader written the fragile way. Six more places that still had the bug were fixed along with it.
+
+### How to use it
+
+The check runs as part of the normal gate:
+
+```bash
+bun run verify
+```
+
+To run just this one:
+
+```bash
+bash scripts/check-frontmatter-fence.sh
+```
+
+It prints the file, the line, and the two accepted fixes when it finds something.
+
+### What it looks at
+
+The three-dash-newline sequence appears in hundreds of places in the codebase that are perfectly fine, because building a file and reading one are different jobs. The check only looks at code that reads from the very start of a file, which is the only place the bug can hide. Everything that assembles content is left alone. Comments are stripped first, so the notes explaining this rule do not trip it.
+
+Some code is meant to require the one-character form, because it is checking GBrain's own output and that output is always written the one-character way. Those lines carry a `frontmatter-fence-guard-ok` comment with the reason, and the check honors it.
+
+### Things to watch
+
+This release is for people working on GBrain itself. Nothing changes for running GBrain, and there are no schema migrations.
+
+If you write a new file reader and the build stops on it, the message names both accepted fixes. Prefer converting line endings once up front when the values you read get used later, because that also strips a stray carriage return off the end of each one. Relax the pattern instead when your function hands back a position inside the original text, because converting would shift every position.
+
+### Itemized changes
+
+#### Added
+- **Build check for fragile settings-block readers.** `scripts/check-frontmatter-fence.sh` fails the build on the two shapes that read from the start of a file with a one-character line break. It is wired into `bun run verify` and `check:all`. A conversion on a nearby preceding line satisfies it, and a `frontmatter-fence-guard-ok` comment opts a line out, either at the end of the line or in the comment block directly above it.
+- **Test pinning the check.** `test/check-frontmatter-fence.test.ts` plants each broken shape and each acceptable shape in a temporary folder and asserts the check catches the first group and passes the second. It also asserts the check is wired into the gate, and that the real source tree is clean, because the automated test suite runs on Linux where this bug cannot be reproduced.
+
+#### Fixed
+- **Skill files kept their settings block in the body on Windows.** `stripFrontmatter` in `src/core/skill-brain-first.ts` returned the file unchanged instead of removing the block, so a tool listed in the settings counted as the skill reaching outside the brain. That is the exact false report the function exists to prevent.
+- **Leftover settings blocks survived in enriched pages.** `parseSynthesis` in `src/core/enrich/thin.ts` tested for the block in a way that is false for any Windows-style input.
+- **Two skill checks passed by reading nothing.** `test/resolver.test.ts` and `test/skills-conformance.test.ts` read real skill files off disk and now convert line endings first. Before this, on Windows one threw for every skill in the tree and the other silently let settings leak into the text it was scanning.
+
+#### Documentation
+- `CLAUDE.md` names the check under the existing rule, so the rule and the thing enforcing it sit together.
+
+## To take advantage of v0.42.71.0
+
+Nothing to do. This adds a build check and fixes readers behind it. If you develop on Windows, run `bun run verify` once to confirm the gate is green on your machine.
+
+## [0.42.70.0] - 2026-07-28
+
+**On Windows, `bun run verify` now actually runs. All 32 build checks start, instead of quitting before they read a single file.**
+
+GBrain's build checks are shell scripts, and `package.json` invoked them by path. A Unix shell starts a file like that by reading the `#!` line at the top; bun on Windows does not, so every check exited right away saying the command was not found. The gate reported the same failure count no matter what the code underneath looked like, which made it useless for anyone developing on Windows. A second problem sat underneath that one: Git for Windows installs with `core.autocrlf=true`, which rewrites shell scripts to Windows line endings when you check them out, and a strict bash then fails on the carriage return at the end of every line. Both are fixed. Checks now run through `bash` explicitly, and a new line-ending rule pins shell scripts to Unix endings on every platform. Six checks that failed only because of Windows text and process handling were corrected as well.
+
+### How to use it
+
+```bash
+bun run verify
+```
+
+On Windows that now dispatches all 32 checks and reports `pass=32 fail=0`.
+
+A clone that already exists still has the old line endings on disk. The rule applies on checkout, so replace the working copies once:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .
+```
+
+### Things to watch
+
+This release is for people working on GBrain itself. Nothing changes for running GBrain, and there are no schema migrations.
+
+The checks are spawned in parallel, one process per check. On a busy machine that can exhaust the process table and report failures that have nothing to do with your code. The signature is `fork: retry: Resource temporarily unavailable` in the output. Re-run when the machine is quieter, or run the one check on its own:
+
+```bash
+bash scripts/check-privacy.sh
+```
+
+### Itemized changes
+
+#### Fixed
+- **Shell script checks start on Windows.** 32 script entries in `package.json` now invoke their script through `bash` rather than by bare path. Without this each one exits immediately and never reads a file, so the check result carries no information about the code.
+- **Shell scripts check out with Unix line endings everywhere.** A new root `.gitattributes` sets `*.sh text eol=lf`, so `core.autocrlf=true` no longer rewrites them. All 59 tracked shell scripts now land the same way on every platform.
+- **`check:eval-glossary` no longer reports a fresh document as stale.** `scripts/check-eval-glossary-fresh.sh` compares with trailing carriage returns stripped. The committed document and the generator both use Unix endings, but a Windows working copy has Windows endings, so a byte comparison flagged all 176 lines as drifted while CI stayed green. Real content drift still fails.
+- **`check:wasm` no longer reports a false embedding regression on Windows.** `scripts/check-wasm-embedded.sh` builds into a temp directory instead of a temp file. `bun build --compile` appends `.exe` on Windows, so the pre-created extension-less file was left at 0 bytes and running it produced empty output, which the script read as missing symbols.
+- **`check:skill-brain-first` no longer reports `parse_error` when the check is green.** `scripts/check-skill-brain-first.sh` feeds the report to python on standard input instead of interpolating a path into the source. A native Windows python cannot open the POSIX-style temp path the shell produces, so the open failed and the guard blamed the parse.
+- **`check:privacy` and `check:test-isolation` finish inside the time limit.** Both used to spawn a `grep` or `awk` per file per pattern, roughly 7,700 and 6,000 processes. Process creation is expensive on Windows, and that alone pushed them past the harness timeout. `check-privacy.sh` filters with shell builtins and batches the survivors into one `grep` per pattern through `xargs -0`; `check-test-isolation.sh` evaluates all four rules in a single `awk` pass that reads the file list itself rather than taking it as arguments. Same patterns, same allow-lists, same exit codes, same report format.
+- **`check:test-names` drops about 400 process spawns.** `scripts/check-test-real-names.sh` matches its needles with `shopt -s nocasematch` and a `case` statement instead of piping each line into `grep -qi`. The needles are literal words, so the substring match is equivalent.
+- **`typecheck` gets its own time budget inside `verify`.** `scripts/run-verify-parallel.sh` reads a separate `GBRAIN_VERIFY_TIMEOUT_TYPECHECK`, default 600 seconds. A full `tsc --noEmit` over this codebase is legitimately longer than the 120 second cap the grep-style guards share, so it was reported as a failure when nothing was wrong. The tight default still applies to every other check, which is what makes a hung one fail fast.
+
+#### Tests
+- **A gap that survives frontmatter parsing is pinned.** `test/check-resolvable.test.ts` adds a case where a Windows-line-ending skill file has a settings block that parses but declares no triggers. The neighbouring case covers a file with no settings block at all, which fails earlier and by a different route.
+
+## To take advantage of v0.42.70.0
+
+`gbrain upgrade`. No new schema migrations, and nothing changes for running GBrain.
+
+1. **If you contribute to GBrain from Windows:** `bun run verify` now works. Replace the shell scripts in an existing clone once so they pick up the new line endings: `git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`
+2. **If you add a check:** put `bash ` in front of the script path in `package.json`. A bare path works on Linux and macOS and silently fails on Windows.
+
 ## [0.42.69.0] - 2026-07-28
 
 **On Windows, a test run now reports its results instead of coming back blank, and the background job supervisor stops looking for a program that has no Windows build.**

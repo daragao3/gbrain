@@ -86,7 +86,13 @@ loop" below), silent fallback to recursive chunking in the compiled binary
 `.pathname` (`scripts/check-url-pathname-fs.sh` — an identity transform on POSIX
 that yields an unusable `/C:/...` on Windows, so Linux CI cannot catch it; use
 `fileURLToPath()`, `import.meta.dir`, or `REPO_ROOT` from
-`test/helpers/repo-root.ts`), and resolver drift on bundled skills
+`test/helpers/repo-root.ts`), LF-only YAML frontmatter fences
+(`scripts/check-frontmatter-fence.sh` — `/^---\n/` has no `m` flag, so it anchors
+at offset 0 and matches nowhere in a `---\r\n` file; the parser then returns null
+with no error. `core.autocrlf=true` makes every checked-out `SKILL.md` CRLF on
+Windows, and this too is an identity transform on POSIX. Relax the fence to
+`/^---\r?\n/` or normalize with `content.replace(/\r\n/g, '\n')` first), and
+resolver drift on bundled skills
 (`bun run check:resolver` — strict-mode `check-resolvable` that exit-1s on any
 warning, added in v0.41.14.0 to catch SKILL.md frontmatter ↔ RESOLVER.md drift
 before merge). `bun run check:all` runs the full historical sweep including the

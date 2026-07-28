@@ -161,10 +161,18 @@ export const PHASE_HEADING_RE = /^##+\s*(?:Phase\s*1|Step\s*0)\b[^\n]*brain/im;
 
 /**
  * Frontmatter fence regex used by body extraction. Conservative match:
- * leading `---\n` through the next `\n---` (greedy stop). Matches the
+ * leading `---` through the next `---` (greedy stop). Matches the
  * shape `parseSkillFrontmatter` already accepts.
+ *
+ * CRLF-tolerant. An LF-only fence cannot match a file that starts `---\r\n`,
+ * so on Windows (`core.autocrlf=true`) `stripFrontmatter` silently returned the
+ * content UNCHANGED for every checked-out SKILL.md — leaving the YAML in the
+ * body and letting a `tools: [web_search]` declaration count as the skill's
+ * "first external reference", which is the exact F6 false-flag this strip
+ * exists to prevent. Cannot be normalized away here: callers pass raw file
+ * content and compare offsets into it.
  */
-const FRONTMATTER_RE = /^---\n[\s\S]*?\n---\n?/;
+const FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
 
 // ---------------------------------------------------------------------------
 // Hardcoded EXEMPT_SKILLS (CMT1 — replaces the dropped upgrade migration)

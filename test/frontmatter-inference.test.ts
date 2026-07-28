@@ -279,6 +279,9 @@ describe('applyInference', () => {
       'people/alice-smith.md',
       '# Alice Smith\n\n> Founder of FooBar',
     );
+    // frontmatter-fence-guard-ok: asserts gbrain's OWN emitted frontmatter, which
+    // applyInference builds in memory with `\n`. LF is the property under test —
+    // relaxing to \r?\n would stop this catching a CRLF regression in the writer.
     expect(content).toMatch(/^---\n/);
     expect(content).toContain('type: person');
     expect(content).toContain('title: Alice Smith');

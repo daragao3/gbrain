@@ -1,5 +1,26 @@
 # TODOS
 
+## v0.42.70.0 follow-ups (Windows verify dispatch)
+
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
+  checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
+  bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
+  `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
+  a spurious timeout. Observed repeatedly on a box running several concurrent agent
+  sessions: the same commit produced `pass=26 fail=6`, then `pass=32 fail=0` minutes later
+  with no code change, and each of the 6 passed when run alone. `check:privacy` measured
+  12s standalone against its 120s cap, so the cap is not the problem — contention is.
+  A `GBRAIN_VERIFY_JOBS` cap (default something like `nproc`) with a simple wait-for-slot
+  loop would make the gate deterministic. Today a red `verify` on a busy machine has to be
+  re-run before it can be believed, which is the opposite of what a gate is for.
+  Where: `scripts/run-verify-parallel.sh`.
+- [ ] **P3 — `check:privacy` and `check:test-isolation` are still the two slowest guards.**
+  v0.42.70.0 took them from per-file `grep`/`awk` spawns (~7.7k and ~6k processes) to
+  batched `xargs -0` and a single `awk` pass, which is what brought them inside the 120s
+  cap on Windows. They remain the ones closest to it. If either creeps back toward the cap,
+  the next step is narrowing the candidate set with `git grep` first, the way
+  `check-url-pathname-fs.sh` already does.
+
 ## v0.42.69.0 follow-ups (Windows bun test crash)
 
 - [x] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
@@ -43,15 +64,19 @@
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)
 
-- [ ] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.**
-  v0.42.68.1 fixed the fourth and fifth recurrence of the same defect: a frontmatter
-  matcher written `/^---\n/` instead of `/^---\r?\n/`, which silently parses every CRLF
-  `SKILL.md` as having no frontmatter. The repo's own convention is that a guard cures
-  what prose cannot (see `scripts/check-jsonb-pattern.sh`,
-  `scripts/check-url-pathname-fs.sh`). Add `scripts/check-frontmatter-fence.sh`: fail on
-  a `---\n` fence literal in `src/` and `test/` that is not preceded by `\r?`, with an
-  opt-out comment for a genuine LF-only case. Wire it into `bun run verify`. The bug is
-  invisible on Linux CI (LF checkouts), so only a static guard catches site number six.
+- [x] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.** Done in
+  v0.42.71.0. `scripts/check-frontmatter-fence.sh` fails on the two offset-0 matcher
+  shapes (`/^---\n` and `.startsWith('---\n')`) across `src/` and `test/`, wired into
+  `bun run verify` and `check:all` and pinned by `test/check-frontmatter-fence.test.ts`.
+  It keys on the MATCHER rather than the fence literal, because `---\n` appears in
+  hundreds of legitimate DATA sites (fixture bodies, page builders, markdown-HR joins)
+  that carry neither a `^` anchor nor `startsWith`, so those are excluded structurally
+  instead of by allowlist. A preceding `\r\n` normalize satisfies it; a genuine LF-only
+  case opts out with a `frontmatter-fence-guard-ok` comment, honored inline or in the
+  comment block directly above. It caught site number six on its first run
+  (`stripFrontmatter` in `src/core/skill-brain-first.ts`, which left the YAML in the
+  body so a declared tool counted as the skill's first external reference) plus five
+  more.
 - [ ] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
   `replace`/`delete` edits match their `target` with a raw `indexOf` against the body, so a
   multi-line target authored with LF never matches a CRLF `SKILL.md` (and vice versa).
