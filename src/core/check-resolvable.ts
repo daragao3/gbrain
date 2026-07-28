@@ -219,7 +219,17 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
 
 /** Simple YAML frontmatter parser — extracts triggers array if present. */
 function extractTriggers(skillContent: string): string[] {
-  const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
+  // Normalise CRLF → LF before matching. The delimiter pattern below anchors
+  // on `---\n`, which cannot match a `---\r\n` file, so a CRLF SKILL.md
+  // yielded NO frontmatter at all and every skill looked like it was missing
+  // `triggers:`. That misreports as a mece_gap per skill — 49 of them on a
+  // Windows checkout with core.autocrlf=true, and equally on any Windows
+  // user's own skills dir. Normalising once here also keeps the trailing
+  // `\r` out of the parsed values, which would otherwise defeat the
+  // closing-quote strip below. Mirrors the `\r?\n` handling already used by
+  // src/core/skill-frontmatter.ts.
+  const normalized = skillContent.replace(/\r\n/g, '\n');
+  const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---/);
   if (!fmMatch) return [];
   const fm = fmMatch[1];
   const triggersMatch = fm.match(/^triggers:\s*\n((?:\s+-\s+.+\n?)*)/m);

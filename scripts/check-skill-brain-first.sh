@@ -44,25 +44,49 @@ GBRAIN_SKILLS_DIR="$ROOT/skills" bun run src/cli.ts doctor --fast --json >"$TMPO
 # Extract the skill_brain_first check status. Use python3 (already a
 # repo-wide dependency via image-decoders + admin tooling) so we don't
 # add jq to the verify chain.
+#
+# The report is fed to python on STDIN, never as a path interpolated into
+# the source. On Windows dev boxes `python3` resolves to a native
+# interpreter that cannot open the POSIX-emulation temp path this script's
+# shell produces (`/tmp/...`), so `open('$TMPOUT')` raised ENOENT and the
+# guard reported `parse_error` even when the check was green. The shell
+# owns the redirect, so path translation is its problem, not python's.
+#
+# Whole-document parse first (the envelope is one JSON object, pretty or
+# not); per-line scan is the fallback for a report preceded by stray
+# non-JSON noise.
 STATUS=$(python3 -c "
 import json, sys
-with open('$TMPOUT') as fp:
-    for line in fp:
+
+raw = sys.stdin.read()
+
+def status_from(report):
+    if not isinstance(report, dict):
+        return None
+    for c in report.get('checks', []):
+        if c.get('name') == 'skill_brain_first':
+            return c.get('status', 'missing')
+    return 'missing'
+
+try:
+    found = status_from(json.loads(raw))
+except Exception:
+    found = None
+
+if found is None:
+    for line in raw.splitlines():
         line = line.strip()
         if not (line.startswith('{') and line.endswith('}')):
             continue
         try:
-            report = json.loads(line)
+            found = status_from(json.loads(line))
         except Exception:
             continue
-        for c in report.get('checks', []):
-            if c.get('name') == 'skill_brain_first':
-                print(c.get('status', 'missing'))
-                sys.exit(0)
-        print('missing')
-        sys.exit(0)
-print('parse_error')
-" 2>/dev/null || echo "parse_error")
+        if found is not None:
+            break
+
+print(found if found is not None else 'parse_error')
+" <"$TMPOUT" 2>/dev/null || echo "parse_error")
 
 case "$STATUS" in
   ok)
