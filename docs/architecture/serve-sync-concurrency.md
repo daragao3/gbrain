@@ -24,6 +24,15 @@ Symptoms of serve↔sync contention on PGLite:
    pkill -f 'gbrain serve'      # or stop your MCP client / Claude Desktop / Cursor
    gbrain sync --no-pull --no-embed --yes
    ```
+   On Windows, `pkill` is usually not installed (it ships with procps, which
+   Git-Bash and a default Cygwin both omit) and the command fails silently.
+   Match on the command line instead, so you never hit an unrelated process
+   that happens to share the `bun` or `node` image name:
+   ```powershell
+   Get-CimInstance Win32_Process |
+     Where-Object { $_.CommandLine -like '*gbrain*serve*' } |
+     ForEach-Object { Stop-Process -Id $_.ProcessId }
+   ```
 2. Restart `gbrain serve` after the sync completes.
 
 This contention does **not** apply to the Postgres engine — Postgres tolerates
