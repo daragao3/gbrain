@@ -40,6 +40,7 @@ Upgrade and confirm the packs resolve. Windows users get a real fix here; macOS 
 - The check prefilters candidate files with `git grep`, so a full-tree scan reads 17 files rather than 2124. That takes it from 2m6s to 23s on Windows, inside verify's 120s per-check cap.
 - `test/upgrade.serial.test.ts` builds its `BUN_INSTALL` expectation with `join()` instead of a hardcoded POSIX literal. `resolveBunGlobalRoot` returns a native path because the value is used as an `execFileSync` working directory and printed as a paste-ready recovery hint, so the test was wrong, not the implementation. `posix.join` returns the old string byte for byte, so this is a no-op off Windows.
 - `CLAUDE.md` gains the rule as a cross-cutting invariant, next to the JSONB and engine-parity entries, and `docs/architecture/KEY_FILES.md` documents the check and the helper.
+- `CONTRIBUTING.md` and `docs/TESTING.md` carry the rule for contributors, next to the existing Windows shell-dispatch notes, and `README.md` gets a troubleshooting entry for the schema-pack symptom. `docs/TESTING.md` also corrects its check counts, which listed 22 and "~30" against an actual 24 and 33.
 - Wired into `bun run verify`, `bun run check:all`, and `scripts/run-verify-parallel.sh`. `package.json` invokes it through `bash`, matching how the other checks are called.
 
 ## [0.42.67.0] - 2026-07-28
