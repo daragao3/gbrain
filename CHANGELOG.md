@@ -2,6 +2,33 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.69.1] - 2026-07-28
+
+**One more Windows test failure is gone. The check on the test-failure banner now passes there instead of failing on every single run.**
+
+When a test run fails, the parallel test runner prints a banner telling you where the full failure log is. One test checks that the banner gives you a whole path you can copy and paste, not a partial one. On Windows that test failed every time, whether or not any real test had gone wrong.
+
+The banner was right all along. The test was comparing it the wrong way. The path in the banner comes from bash, and on Git Bash bash writes paths the Unix way, starting with a slash. The test built the path it expected the Windows way, starting with a drive letter. Both name the same file on disk, so the two spellings could never match as plain text. On Linux both come out identical, which is why the test only ever passed there.
+
+The test now checks what actually matters. The banner has to carry a whole path, one that starts at a drive letter or at a root rather than partway down, and that ends at this run's failure log. The banner itself is untouched. On Git Bash the Unix spelling is the one you can paste straight back into your shell, so it stays exactly as it was.
+
+Nothing changes on macOS or Linux, and no runtime code changes on any platform.
+
+## To take advantage of v0.42.69.1
+
+Nothing to install and nothing to configure. If you are on Windows and want to see it for yourself:
+
+```bash
+bun test test/scripts/run-unit-parallel.test.ts --timeout=60000 -t "prints loud stderr banner"
+```
+
+One test passes. Before this release the same command failed, reporting that it expected a path spelled `C:\Users\...` and received one spelled `/tmp/...`.
+
+### Itemized changes
+
+- `test/scripts/run-unit-parallel.test.ts`: the failure-log contract test no longer compares the banner against a path built by Node's `join()`. A new `bannerFailureLogPath()` helper pulls the path line out of the banner, and the test then asserts three things about it: the line is present, the path is whole once separators are normalized (a root or a drive letter), and it ends at this run's own temporary directory followed by `.context/test-failures.log`. A relative path, or one belonging to a different run, still fails the test.
+- `scripts/run-unit-parallel.sh`: unchanged, deliberately. The path it prints is already the copy-pasteable one for the shell it ran in.
+
 ## [0.42.67.0] - 2026-07-28
 
 **If you develop GBrain on Windows, the test and check commands now actually run. Until this release they were quietly doing almost nothing.**

@@ -1,5 +1,18 @@
 # TODOS
 
+## v0.42.69.1 follow-ups (Windows test suite)
+
+- [ ] **P3 — `run-unit-parallel.test.ts` no-timeout-binary fallback cannot build its PATH fixture on Windows.**
+  The `no-timeout-binary fallback` block's `beforeAll` calls `symlinkSync` to assemble a
+  curated PATH directory, and on an unprivileged Windows account that throws
+  `EPERM: operation not permitted, symlink 'C:\Program Files\Git\usr\bin\bash.exe' -> ...`,
+  failing the block's only test before any assertion runs. Confirmed against unmodified
+  `origin/master`, so it predates v0.42.69.1 and is independent of that release's assertion
+  fix. Same root cause as the `check:wasm` P3 below (Windows needs developer mode for
+  symlinks), and the same remedies apply: a junction, a plain copy, or skipping the block
+  with a clear message when symlink creation is unavailable. The other 6 tests in the file
+  pass on Windows.
+
 ## v0.42.67.0 follow-ups (Windows build tooling)
 
 Filed as follow-ups from v0.42.67.0 (`.gitattributes` LF pin for `*.sh` +
