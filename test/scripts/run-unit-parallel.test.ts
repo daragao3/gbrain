@@ -24,7 +24,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { execFileSync, spawnSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, chmodSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
-import { join, resolve } from 'path';
+import { basename, join, resolve } from 'path';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const PARALLEL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-unit-parallel.sh');
@@ -82,6 +82,27 @@ function runWrapper(extraArgs: string[] = []): { code: number; stdout: string; s
   };
 }
 
+/**
+ * Pull the failure-log path line out of the stderr banner.
+ *
+ * The banner prints `   $ABS_FAIL` on its own line, where ABS_FAIL is built
+ * inside bash as `$(cd "$(dirname …)" && pwd)/$(basename …)`. On Windows
+ * (Git-Bash / Cygwin) `pwd` yields a POSIX path — /tmp/gbrain-parallel-test-X
+ * /.context/test-failures.log — while Node's join() yields the native
+ * C:\Users\…\Temp\gbrain-parallel-test-X\.context\test-failures.log. The two
+ * spellings can never be string-equal, so comparing against join() passes on
+ * Linux and always fails on Windows. Assert the contract instead: the banner
+ * carries an ABSOLUTE, copy-pasteable path (POSIX root or drive letter) whose
+ * tail is <this-run's-tempdir>/.context/test-failures.log.
+ */
+function bannerFailureLogPath(stderr: string): string | null {
+  const line = stderr
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => /(^|[/\\])test-failures\.log$/.test(l));
+  return line ?? null;
+}
+
 describe('run-unit-parallel.sh exit-code propagation (a)', () => {
   it('exits non-zero when any shard contains a failing test', () => {
     const r = runWrapper();
@@ -124,7 +145,15 @@ describe('run-unit-parallel.sh failure-log contract (d)', () => {
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain('TEST FAILURES');
     // Banner includes the absolute path so users can `cat` it directly.
-    expect(r.stderr).toContain(join(TMPROOT, '.context', 'test-failures.log'));
+    // Separator-agnostic (see bannerFailureLogPath): Git-Bash `pwd` emits the
+    // POSIX spelling of the same location on Windows.
+    const bannerPath = bannerFailureLogPath(r.stderr);
+    expect(bannerPath).not.toBeNull();
+    const normalized = bannerPath!.replace(/\\/g, '/');
+    // Absolute: POSIX root, UNC, or a Windows drive letter — never relative.
+    expect(normalized).toMatch(/^(\/|[A-Za-z]:\/)/);
+    // …and it points at THIS run's tempdir, not some other .context/.
+    expect(normalized).toEndWith(`/${basename(TMPROOT)}/.context/test-failures.log`);
   });
 
   it('clears .context/test-failures.log to empty when all shards pass', () => {
