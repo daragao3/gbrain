@@ -5,8 +5,8 @@
 - [ ] **P2 — calibrate `WINDOWS_SECONDS_PER_FILE` end to end.** The 30s Windows per-file
   budget in `scripts/run-unit-parallel.sh` was chosen for headroom, not measured. Nobody has
   run the full unit suite to completion on Windows to find the real per-file cost, so the
-  derived cap there (264 files per shard, so 7920s) is a generous guess rather than a
-  calibrated number. Calibrating needs a quiet box and a suite that runs to completion on
+  derived cap there (about 7600s at today's ~253 files per shard) is a generous guess rather
+  than a calibrated number. Calibrating needs a quiet box and a suite that runs to completion on
   Windows, which is blocked on the separate `uv_spawn` ENOENT and PGLite-WASM crash work.
   Until then the stall watchdog, not the cap, is what catches a real hang on Windows. The
   Unix side is already anchored: 253 files per shard times 6s is 1518s against the 1500s

@@ -16,16 +16,20 @@ Nothing changes for a passing run on Linux or macOS. The derived limit there wor
 
 ### The numbers
 
-| Platform | Per-file budget | Limit on today's suite |
+At 253 files per shard, which is roughly where the suite sits today:
+
+| Platform | Per-file budget | Limit |
 |---|---|---|
-| Linux and macOS | 6s | 253 files per shard, so 1518s |
-| Windows | 30s | 264 files per shard, so 7920s |
+| Linux and macOS | 6s | 1518s, against the 1500s constant it replaces |
+| Windows | 30s | 7590s |
 | Either, floor | n/a | never below 600s |
+
+The file count is whatever your checkout holds, so these move as the suite grows. That is the whole point of deriving them.
 
 The banner now states how the limit was reached, so a shard that gets killed tells you which knob to turn:
 
 ```
-[unit-parallel] N=4 shards | --max-concurrency=4 | timeout=7920s (264 files/shard x 30s) | stall=600s | logs=.context/test-shards
+[unit-parallel] N=4 shards | --max-concurrency=4 | timeout=7590s (253 files/shard x 30s) | stall=600s | logs=.context/test-shards
 ```
 
 ### Things to watch
