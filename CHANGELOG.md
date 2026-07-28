@@ -2,6 +2,34 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.2] - 2026-07-28
+
+**Bundled schema packs work on Windows again, and the test suite can finish there.**
+
+On Windows, gbrain looked for its own bundled schema pack files using a web-address style path (`/C:/Users/...`) instead of a real Windows path (`C:\Users\...`). Windows rejects that shape, so every bundled pack came back empty and `gbrain schema use gbrain-base` could not find a file that ships inside the product. macOS and Linux were never affected, because on those systems the two path styles happen to be identical.
+
+The same mistake sat in the test suite, where it took a more confusing form. Tests that launch the gbrain command line handed that bad path to the new process as its working directory. The operating system refused it and reported `ENOENT: no such file or directory, uv_spawn 'bun'`. That message names the program being launched, not the directory that is actually missing, so it read as "bun is not installed" and sent people to check their bun install. Bun was fine. The working directory was not. On a full run the failure landed between tests and took the whole run down partway through, so the suite could not finish on Windows.
+
+Both now convert the module location with the platform's own file-path conversion. One shared helper replaces the hand-rolled expression everywhere it appeared, and a new test pins the properties that make the result safe to hand to the operating system.
+
+## To take advantage of v0.42.67.2
+
+`gbrain upgrade` is enough. No schema migration and no config change.
+
+1. **On Windows, confirm bundled packs resolve:**
+   ```bash
+   gbrain schema packs
+   gbrain schema use gbrain-base
+   ```
+   Before this release these found nothing on Windows.
+
+### Itemized changes
+
+- `packPathByName` in `src/commands/schema.ts` converts the module URL with `fileURLToPath` instead of reading `.pathname`, so bundled packs under `src/core/schema-pack/base/` resolve on Windows.
+- New `test/helpers/repo-root.ts` exports `REPO_ROOT` and `repoPath()`, replacing about 20 hand-rolled repo-root expressions across 10 test files.
+- New `test/helpers/repo-root.test.ts` pins the invariants that keep the value usable: absolute, existing, no `/C:` prefix, no percent-encoding, no trailing separator, and accepted as a spawn working directory.
+- Two assertions that hardcoded forward slashes now compare without depending on the separator, in `test/commands/schema-packpath.test.ts` and `test/integrations.test.ts`.
+
 ## [0.42.66.1] - 2026-07-27
 
 ### Fixed
