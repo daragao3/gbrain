@@ -157,7 +157,7 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
       // Install-path fallback succeeds when test runs inside the gbrain repo.
       expect(r.error).toBeNull();
       // r.dir is join()/resolve()-built, so the separator is '\' on win32.
-    expect(r.dir).toMatch(/[\\/]skills$/);
+      expect(r.dir).toMatch(/[\\/]skills$/);
       expect(r.source).toBe('install_path');
     } finally {
       process.chdir(original);

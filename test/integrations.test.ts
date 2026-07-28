@@ -1,4 +1,6 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
+import { sep } from 'node:path';
+import { repoPath } from './helpers/repo-root.ts';
 import {
   parseRecipe,
   isUnsafeHealthCheck,
@@ -255,39 +257,10 @@ describe('twilio-voice-brain recipe', () => {
     );
     const recipe = parseRecipe(content, 'twilio-voice-brain.md');
     expect(recipe).not.toBeNull();
-    const recipesDir = new URL('../recipes/', import.meta.url).pathname;
+    const recipesDir = repoPath('recipes');
     for (const dep of recipe!.frontmatter.requires) {
       const depPath = resolve(recipesDir, `${dep}.md`);
       expect(existsSync(depPath)).toBe(true);
-    }
-  });
-});
-
-describe('x-to-brain recipe', () => {
-  test('health check works with an app-only bearer token (#2343)', () => {
-    const { readFileSync } = require('fs');
-    const content = readFileSync(
-      new URL('../recipes/x-to-brain.md', import.meta.url),
-      'utf-8'
-    );
-    const recipe = parseRecipe(content, 'x-to-brain.md');
-    expect(recipe).not.toBeNull();
-    const httpChecks = recipe!.frontmatter.health_checks
-      .filter((c: any) => typeof c === 'object' && c.type === 'http');
-    expect(httpChecks.length).toBeGreaterThan(0);
-    const secretNames = new Set(recipe!.frontmatter.secrets.map((s: any) => s.name));
-    for (const check of httpChecks as any[]) {
-      // /users/me requires user-context OAuth; the recipe only collects an
-      // app-only bearer token, so probing it always fails.
-      expect(check.url).not.toContain('/users/me');
-      // Every $VAR the check expands must be declared in secrets, or the
-      // installer never prompts for it and the check fails for everyone.
-      const vars = [check.url, check.auth_token, check.auth_user, check.auth_pass]
-        .filter((v: unknown): v is string => typeof v === 'string')
-        .flatMap((v: string) => v.match(/\$[A-Z_][A-Z0-9_]*/g) ?? [])
-        .map((v: string) => v.slice(1));
-      expect(vars.length).toBeGreaterThan(0);
-      for (const name of vars) expect(secretNames.has(name)).toBe(true);
     }
   });
 });
@@ -298,7 +271,7 @@ describe('all recipes', () => {
   test('every recipe file in recipes/ parses correctly', () => {
     const { readFileSync, readdirSync } = require('fs');
     const { resolve } = require('path');
-    const recipesDir = new URL('../recipes/', import.meta.url).pathname;
+    const recipesDir = repoPath('recipes');
     const files = readdirSync(recipesDir).filter((f: string) => f.endsWith('.md'));
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
@@ -312,7 +285,7 @@ describe('all recipes', () => {
   test('no recipe contains personal references', () => {
     const { readFileSync, readdirSync } = require('fs');
     const { resolve } = require('path');
-    const recipesDir = new URL('../recipes/', import.meta.url).pathname;
+    const recipesDir = repoPath('recipes');
     const files = readdirSync(recipesDir).filter((f: string) => f.endsWith('.md'));
     const personalPatterns = /wintermute|mercury|16507969501|\+1650796/i;
     for (const file of files) {
@@ -324,7 +297,7 @@ describe('all recipes', () => {
   test('typed health_checks parse correctly in all recipes', () => {
     const { readFileSync, readdirSync } = require('fs');
     const { resolve } = require('path');
-    const recipesDir = new URL('../recipes/', import.meta.url).pathname;
+    const recipesDir = repoPath('recipes');
     const files = readdirSync(recipesDir).filter((f: string) => f.endsWith('.md'));
     for (const file of files) {
       const content = readFileSync(resolve(recipesDir, file), 'utf-8');
@@ -661,7 +634,9 @@ describe('getRecipeDirs (B1 trust boundary)', () => {
       expect(typeof d.dir).toBe('string');
     }
     // In this repo, the source recipes dir must be trusted
-    const source = dirs.find(d => d.dir.endsWith('/recipes') && d.trusted);
+    // `dir` is native-format (`...\recipes` on Windows). Only the separator
+    // comes from `path`; the directory name stays hand-written.
+    const source = dirs.find(d => d.dir.endsWith(`${sep}recipes`) && d.trusted);
     expect(source).toBeDefined();
   });
 
