@@ -2,6 +2,59 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.1] - 2026-07-28
+
+**Fixes agent sessions that connect to gbrain but show none of its tools.**
+
+Sometimes an agent would start up, report gbrain as connected, and then have no gbrain tools available at all. Health checks passed and the server looked fine, so there was nothing obvious to chase. The cause was the token check. Every request to the server, including the one handshake that registers the tool list, asked the database to re-verify the same access token. When the machine was busy, that check ran out of time and the handshake was refused. Clients do not retry a refused handshake, so the session came up empty and stayed empty until someone restarted it.
+
+Raising the time limit did not help, because the lookup was never slow. The database had already answered and was waiting on a busy host to read the reply. So the fix is to stop asking. The shared local token is a fixed secret on disk backed by a single database row, and re-reading it on every request was wasted work. A successful check is now held in memory for a short window, which takes the database out of the handshake path.
+
+Two supporting fixes ship with it: the token lookup now has a time limit instead of waiting indefinitely, and the "last used" timestamp refresh no longer holds up the request that triggered it.
+
+## To take advantage of v0.42.67.1
+
+`gbrain upgrade` should do this automatically. No schema migration ships in this release and no manual action is needed.
+
+1. **Upgrade and verify:**
+   ```bash
+   gbrain upgrade
+   gbrain doctor
+   ```
+2. **If you run a long-lived HTTP server**, restart it so the new auth path is loaded:
+   ```bash
+   gbrain serve --http --port 7483
+   ```
+3. **If any step fails,** please file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor`.
+
+### How to use it
+
+Nothing to do. The memory window is on by default at 30 seconds.
+
+To change it, or to turn it off:
+
+```bash
+# Default: remember a successful token check for 30 seconds.
+export GBRAIN_AUTH_CACHE_TTL_MS=30000
+
+# Turn it off, so every request checks the database again.
+export GBRAIN_AUTH_CACHE_TTL_MS=0
+```
+
+### Things to watch
+
+- **Revoking a token.** Revoking inside the running server takes effect immediately. Revoking with `gbrain auth revoke` from a separate terminal takes effect within the window, so up to 30 seconds by default. Set `GBRAIN_AUTH_CACHE_TTL_MS=0` if you want every request checked against the database.
+- **Only successful checks are held.** An unknown, expired, or revoked token is never remembered, and a token's own expiry is re-checked every time it is served from memory, so this cannot keep a token alive past its expiry.
+
+### Itemized changes
+
+- `verifyAccessToken` in `src/core/oauth-provider.ts` holds a successful verification against the token hash for `GBRAIN_AUTH_CACHE_TTL_MS` (default 30000, `0` disables), so the MCP `initialize` handshake no longer depends on a database read. Entries expire at the earlier of the window and the token's own expiry, are stored and returned as copies, and are dropped on revocation. Revoking by name clears the whole set, since that path cannot compute a single hash.
+- `src/core/retryable-bearer-auth.ts` bounds the token lookup with `readWithAuthDbTimeout` and one retry, surfacing `AuthDbTimeoutError` instead of waiting on the driver's own connect timeout.
+- The legacy `last_used_at` refresh in `src/core/oauth-provider.ts` is debounced and no longer awaited, so it stays off the request path.
+- `src/commands/serve-http.ts` reports a transient auth-lookup failure as a retryable error instead of a generic one.
+- `node_modules` is untracked. It had been committed as a symlink to a build-sandbox path, and checking it out replaced real installed dependencies with a one-line file.
+- Tests: `test/oauth-token-verify-cache.test.ts` (16), `test/retryable-bearer-auth.test.ts`, `test/oauth-auth-db-timeout.test.ts`, `test/oauth-legacy-last-used-nonblocking.test.ts`.
+
 ## [0.42.66.1] - 2026-07-27
 
 ### Fixed
