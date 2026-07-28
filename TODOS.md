@@ -1,5 +1,26 @@
 # TODOS
 
+## v0.42.70.0 follow-ups (Windows verify dispatch)
+
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
+  checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
+  bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
+  `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
+  a spurious timeout. Observed repeatedly on a box running several concurrent agent
+  sessions: the same commit produced `pass=26 fail=6`, then `pass=32 fail=0` minutes later
+  with no code change, and each of the 6 passed when run alone. `check:privacy` measured
+  12s standalone against its 120s cap, so the cap is not the problem — contention is.
+  A `GBRAIN_VERIFY_JOBS` cap (default something like `nproc`) with a simple wait-for-slot
+  loop would make the gate deterministic. Today a red `verify` on a busy machine has to be
+  re-run before it can be believed, which is the opposite of what a gate is for.
+  Where: `scripts/run-verify-parallel.sh`.
+- [ ] **P3 — `check:privacy` and `check:test-isolation` are still the two slowest guards.**
+  v0.42.70.0 took them from per-file `grep`/`awk` spawns (~7.7k and ~6k processes) to
+  batched `xargs -0` and a single `awk` pass, which is what brought them inside the 120s
+  cap on Windows. They remain the ones closest to it. If either creeps back toward the cap,
+  the next step is narrowing the candidate set with `git grep` first, the way
+  `check-url-pathname-fs.sh` already does.
+
 ## v0.42.69.0 follow-ups (Windows bun test crash)
 
 - [ ] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
