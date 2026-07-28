@@ -106,6 +106,23 @@ await withEnv({ A: '1', B: '2', C: undefined }, fn);
 
 `withEnv` saves the prior value of every key it touches and restores via try/finally — including when the callback throws. **It is cross-test safe but NOT intra-file concurrent-safe.** `process.env` is process-global; two `test.concurrent()` calls in the same file both touching the same key will race. Files using `withEnv` stay outside the `test.concurrent()` codemod's eligibility filter.
 
+#### Repo-root paths (`REPO_ROOT` / `repoPath`)
+
+Any test that spawns the CLI or reads a repo file resolves the repository root through `test/helpers/repo-root.ts`:
+
+```ts
+import { REPO_ROOT, repoPath } from './helpers/repo-root.ts';
+
+const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', '--version'], { cwd: REPO_ROOT });
+const source = await Bun.file(repoPath('src', 'cli.ts')).text();
+```
+
+**Never derive it with `new URL('..', import.meta.url).pathname`.** `URL.pathname` is a URL path, not a filesystem path: on Windows it yields `/C:/Users/...` (leading slash, forward slashes, still percent-encoded), which no Win32 API accepts. Passed as a `Bun.spawn` `cwd:` it fails as `ENOENT: no such file or directory, uv_spawn 'bun'` — that message names argv[0], not the directory that is actually missing, so it reads as a missing bun install. Interpolated into a script argument it surfaces as `Module not found "/C:/.../src/cli.ts"`. On POSIX the two forms agree, so Linux CI never catches the difference.
+
+`REPO_ROOT` is absolute, native-format, and has no trailing separator; `repoPath(...segments)` joins onto it. `test/helpers/repo-root.test.ts` pins those invariants plus "usable as a `Bun.spawn` cwd".
+
+When asserting on a path the OS produced, compare without depending on the separator (`path.replace(/\\/g, '/')`) rather than hardcoding forward slashes.
+
 #### When to quarantine instead of fix
 
 Rename to `*.serial.test.ts` when:
