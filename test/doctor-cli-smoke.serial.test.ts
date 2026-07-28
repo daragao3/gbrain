@@ -18,24 +18,12 @@
  * Per-spawn cold-start on CI is ~10-20s. Single test, single brain.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { REPO_ROOT as REPO } from './helpers/repo-root.ts';
+import { makeGbrainShim } from './helpers/gbrain-shim.ts';
 const SKIP = process.env.GBRAIN_SKIP_SUBPROCESS_TESTS === '1';
-
-function makeGbrainShim(): { binDir: string; cleanup: () => void } {
-  const binDir = mkdtempSync(join(tmpdir(), 'gbrain-shim-doctor-'));
-  const shimPath = join(binDir, 'gbrain');
-  writeFileSync(shimPath, `#!/bin/sh\nexec bun run ${REPO}/src/cli.ts "$@"\n`, { mode: 0o755 });
-  chmodSync(shimPath, 0o755);
-  return {
-    binDir,
-    cleanup: () => {
-      try { rmSync(binDir, { recursive: true, force: true }); } catch { /* best effort */ }
-    },
-  };
-}
 
 async function runCli(
   args: string[],
@@ -66,7 +54,7 @@ async function runCli(
 describe('gbrain doctor --json subprocess smoke (D10/CMT-2)', () => {
   test.skipIf(SKIP)('exits 0 on freshly-initialized PGLite brain; JSON envelope is well-formed', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-doctor-smoke-'));
-    const shim = makeGbrainShim();
+    const shim = makeGbrainShim('gbrain-shim-doctor-');
     try {
       mkdirSync(join(home, '.gbrain'), { recursive: true });
       writeFileSync(
@@ -77,10 +65,14 @@ describe('gbrain doctor --json subprocess smoke (D10/CMT-2)', () => {
           embedding_dimensions: 1536,
         }) + '\n',
       );
+      // `GBRAIN_HOME` is what actually redirects the brain: `configDir()`
+      // honors it and only falls back to `homedir()`, which on Windows
+      // reads USERPROFILE and would ignore a bare `HOME`. `shim.pathValue`
+      // joins with the platform PATH delimiter (`;` on Windows).
       const env = {
         HOME: home,
         GBRAIN_HOME: home,
-        PATH: `${shim.binDir}:${process.env.PATH ?? ''}`,
+        PATH: shim.pathValue,
       };
 
       // Step 1: init + apply migrations so the brain is at head before doctor runs.

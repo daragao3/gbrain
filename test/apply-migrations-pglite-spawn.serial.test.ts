@@ -25,38 +25,11 @@
  * Serial because it spawns subprocesses + writes a tmpdir.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { REPO_ROOT as REPO } from './helpers/repo-root.ts';
-
-/**
- * Make a shim `gbrain` binary that routes to `bun run <repo>/src/cli.ts`.
- *
- * The v0.11.0 orchestrator chain spawns subprocesses via `execSync('gbrain
- * jobs smoke')` and `execSync('gbrain init --migrate-only')` (the Postgres
- * path; PGLite now routes in-process, but phase B's smoke still shells out).
- * On a developer machine `gbrain` resolves via `bun link`; on CI it
- * doesn't exist on PATH and execSync fails with "command not found",
- * propagating up as an orchestrator failure. The shim avoids the global-
- * install dependency.
- */
-function makeGbrainShim(): { binDir: string; cleanup: () => void } {
-  const binDir = mkdtempSync(join(tmpdir(), 'gbrain-shim-'));
-  const shimPath = join(binDir, 'gbrain');
-  writeFileSync(
-    shimPath,
-    `#!/bin/sh\nexec bun run ${REPO}/src/cli.ts "$@"\n`,
-    { mode: 0o755 },
-  );
-  chmodSync(shimPath, 0o755);
-  return {
-    binDir,
-    cleanup: () => {
-      try { rmSync(binDir, { recursive: true, force: true }); } catch { /* best effort */ }
-    },
-  };
-}
+import { makeGbrainShim } from './helpers/gbrain-shim.ts';
 
 async function runCli(
   args: string[],
@@ -105,10 +78,18 @@ describe('apply-migrations on fresh PGLite (v0.36.1.x #1100)', () => {
       // and similar resolve to our shim instead of requiring a global
       // install. This matches the contract users hit in production
       // (gbrain on PATH) without depending on `bun link` having run.
+      //
+      // `shim.pathValue` joins with the platform PATH delimiter. A
+      // hardcoded ':' does not error on Windows — it silently makes the
+      // shim dir (and every inherited entry) unresolvable, so lookup falls
+      // through to whatever `gbrain` is globally installed.
+      // `GBRAIN_HOME` is what actually redirects the brain: `configDir()`
+      // honors it and only falls back to `homedir()`, which on Windows
+      // reads USERPROFILE and would ignore a bare `HOME`.
       const env = {
         HOME: home,
         GBRAIN_HOME: home,
-        PATH: `${shim.binDir}:${process.env.PATH ?? ''}`,
+        PATH: shim.pathValue,
       };
 
       // Step 1: init --migrate-only seeds the schema. Pre-fix on PGLite this
