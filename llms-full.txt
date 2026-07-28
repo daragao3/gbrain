@@ -224,6 +224,34 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   `node:url` or `import.meta.dir`; in tests use `REPO_ROOT`/`repoPath()` from
   `test/helpers/repo-root.ts`. Guarded by `scripts/check-url-pathname-fs.sh` (opt out a
   genuine URL-path use with a `url-pathname-guard-ok` comment).
+- **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
+  that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
+  returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows
+  installer default) makes EVERY checked-out `SKILL.md` CRLF, so this fires for the whole
+  skills tree, and it is an identity transform on POSIX so Linux CI can never catch it.
+  `skillsDir` is a runtime parameter — gbrain parses `SKILL.md` files it does not own — so
+  `.gitattributes` cannot fix this; the parsers must be tolerant. Canonical form is
+  `src/core/skill-frontmatter.ts`: `content.match(/^---\r?\n([\s\S]*?)\r?\n---/)`. Prefer
+  normalizing once (`content.replace(/\r\n/g, '\n')`) when the parsed VALUES flow downstream
+  — it also keeps a trailing `\r` out of them. Relax only the fence when the function returns
+  a byte offset into the original text (`splitFrontmatter` in `src/core/skillopt/apply-edits.ts`),
+  since normalizing would corrupt every offset. Guarded by
+  `scripts/check-frontmatter-fence.sh`, which flags the two offset-0 matcher shapes
+  (`/^---\n` and `.startsWith('---\n')`) while ignoring the hundreds of `---\n` DATA
+  uses; a preceding `\r\n` normalize satisfies it, and a genuinely LF-only case opts
+  out with a `frontmatter-fence-guard-ok` comment (its real users are assertions on
+  gbrain's OWN emitted markdown, where LF is the property under test).
+- **The repo's own shell scripts: LF-pinned, and invoked through `bash`.** Complementary to
+  the rule above, and the case `.gitattributes` CAN fix — these are files the repo owns, not
+  a runtime `skillsDir`. Two halves, and each hides the other: (1) `.gitattributes` sets
+  `*.sh text eol=lf`, without which `core.autocrlf=true` checks every script out CRLF and a
+  strict bash dies on the trailing `\r`; (2) every `package.json` script that runs a `.sh`
+  MUST be written `bash scripts/foo.sh`, never the bare path — bun on Windows will not start
+  a file from its shebang, so a bare path exits instantly with "command not found" and the
+  check reports failure without having read a line. A bare path works on Linux and macOS, so
+  CI can never catch it. When you add a check, prefix it. Note `.gitattributes` only changes
+  what a FUTURE checkout materializes; an existing clone keeps its CRLF copies until you
+  replace them (`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`).
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by

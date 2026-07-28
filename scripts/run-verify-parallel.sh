@@ -43,6 +43,7 @@ CHECKS=(
   "check:source-config-leak"
   "check:progress"
   "check:url-pathname"
+  "check:frontmatter-fence"
   "check:test-isolation"
   "check:wasm"
   "check:admin-build"
@@ -87,6 +88,26 @@ fi
 
 TIMEOUT="${GBRAIN_VERIFY_TIMEOUT:-120}"
 
+# Per-check timeout overrides.
+#
+# The 120s default is sized for the grep-style guards, which now all finish
+# well inside it — keeping that cap tight is what makes a hung or
+# accidentally-quadratic check fail fast instead of stalling the run.
+# `typecheck` is a different animal: a full `tsc --noEmit` over this codebase
+# is legitimately north of two minutes on a cold cache, so the shared cap
+# reported it as a failure when nothing was wrong. Give the compiler its own
+# budget rather than loosening the bound for all 30 other checks.
+#
+# Override either value from the environment.
+TIMEOUT_TYPECHECK="${GBRAIN_VERIFY_TIMEOUT_TYPECHECK:-600}"
+
+timeout_for() {
+  case "$1" in
+    typecheck) echo "$TIMEOUT_TYPECHECK" ;;
+    *)         echo "$TIMEOUT" ;;
+  esac
+}
+
 # Per-check temp dir. Each check gets its own subdir so writes can't race
 # on shared scratch state (the checks themselves are read-only — they grep
 # the working tree — but defense-in-depth.)
@@ -107,7 +128,7 @@ elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
 fi
 
 START_TS=$(date +%s)
-echo "[verify-parallel] running ${#CHECKS[@]} checks in parallel (timeout=${TIMEOUT}s, logs=$LOG_DIR)" >&2
+echo "[verify-parallel] running ${#CHECKS[@]} checks in parallel (timeout=${TIMEOUT}s, typecheck=${TIMEOUT_TYPECHECK}s, logs=$LOG_DIR)" >&2
 
 # ──────────────────────────────────────────────────────────────────────────
 # Spawn one background process per check. Each child captures its own exit
@@ -124,13 +145,14 @@ for c in "${CHECKS[@]}"; do
   SAFE_NAMES+=("$safe")
   LOG_FILE="$LOG_DIR/$safe.log"
   EXIT_FILE="$LOG_DIR/$safe.exit"
+  CHECK_TIMEOUT="$(timeout_for "$c")"
   (
     if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" "${TIMEOUT}s" bun run "$c" > "$LOG_FILE" 2>&1
+      "$TIMEOUT_BIN" "${CHECK_TIMEOUT}s" bun run "$c" > "$LOG_FILE" 2>&1
     else
       bun run "$c" > "$LOG_FILE" 2>&1 &
       pid=$!
-      ( sleep "$TIMEOUT" && kill -TERM "$pid" 2>/dev/null && \
+      ( sleep "$CHECK_TIMEOUT" && kill -TERM "$pid" 2>/dev/null && \
         sleep 5 && kill -KILL "$pid" 2>/dev/null ) &
       cap_pid=$!
       wait "$pid" 2>/dev/null
@@ -175,7 +197,7 @@ for i in "${!CHECKS[@]}"; do
     FAIL=$((FAIL + 1))
     FAIL_NAMES+=("$c")
     if [ "$rc" = "124" ]; then
-      FAIL_REPORT+=$'\n--- '"$c"' (TIMED OUT after '"${TIMEOUT}"'s) ---\n'
+      FAIL_REPORT+=$'\n--- '"$c"' (TIMED OUT after '"$(timeout_for "$c")"'s) ---\n'
     else
       FAIL_REPORT+=$'\n--- '"$c"' (rc='"$rc"') ---\n'
     fi
