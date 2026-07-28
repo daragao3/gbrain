@@ -224,6 +224,17 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   `node:url` or `import.meta.dir`; in tests use `REPO_ROOT`/`repoPath()` from
   `test/helpers/repo-root.ts`. Guarded by `scripts/check-url-pathname-fs.sh` (opt out a
   genuine URL-path use with a `url-pathname-guard-ok` comment).
+- **Directory boundaries: never `child.startsWith(parent + '/')`.** `resolve()`/`realpathSync()`
+  emit `\` on Windows, so a hardcoded `/` never matches at the boundary and the test is pinned
+  to `false`. Both polarities break: an ALLOW fence throws forever (dead feature — `sync`
+  rejected every file as a "symlink escape"; LocalStorage threw on every op) and a DENY fence
+  passes forever (leak — the source-overlap check admitted nested sources). Identity transform
+  on POSIX, so Linux CI never catches it; reintroduced 5× (sync ×4, archive-crawler ×1). Use
+  `isPathInside()` / `isPathStrictlyInside()` from `src/core/path-confine.ts` — they delegate to
+  `path.relative()`, which handles separators, mixed spellings, win32 NTFS case-folding and the
+  `/foo` vs `/foobar` boundary with no platform branch. Guarded by
+  `scripts/check-path-sep-boundary.sh` (opt out slugs / git-relative paths — forward-slash on
+  every platform, where `sep` would be WRONG — with a `path-sep-guard-ok` comment).
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows

@@ -54,9 +54,10 @@ export async function resolveFile(
 ): Promise<ResolvedFile> {
   // Validate filePath stays within brainRoot (prevents MCP callers from reading arbitrary files)
   const { resolve: resolvePath } = await import('path');
+  const { isPathInside } = await import('./path-confine.ts');
   const resolvedRoot = resolvePath(brainRoot);
   const resolvedFull = resolvePath(brainRoot, filePath);
-  if (!resolvedFull.startsWith(resolvedRoot + '/') && resolvedFull !== resolvedRoot) {
+  if (!isPathInside(resolvedFull, resolvedRoot)) {
     throw new Error(`Path traversal blocked: ${filePath} resolves outside brain root`);
   }
 

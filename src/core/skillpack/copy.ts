@@ -15,7 +15,8 @@
  * gets a chance to copy, or nothing does.
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
-import { dirname, join, relative, sep } from 'path';
+import { dirname, join, relative } from 'path';
+import { isPathInside } from '../path-confine.ts';
 
 export interface CopyItem {
   /** Absolute source path. */
@@ -151,13 +152,12 @@ export function copyArtifacts(items: CopyItem[], opts: CopyArtifactsOpts = {}): 
     }
     if (confineRoot) {
       const real = realpathSync(item.source);
-      // realpathSync returns paths without trailing slash; add path
-      // separator to the prefix check so /a/b doesn't match /a/bb.
-      // Both sides are realpathSync() output, so the separator must be the
-      // NATIVE one — a hardcoded '/' never matches a win32 path and rejected
-      // every source as path_traversal.
-      const prefix = confineRoot.endsWith(sep) ? confineRoot : confineRoot + sep;
-      if (real !== confineRoot && !real.startsWith(prefix)) {
+      // Boundary via isPathInside (path.relative), which keeps /a/b from
+      // matching /a/bb without a hand-rolled trailing separator. The previous
+      // `confineRoot + '/'` prefix could never match on Windows because
+      // realpathSync emits native separators, so this fence rejected every
+      // source file in a confined copy.
+      if (!isPathInside(real, confineRoot)) {
         throw new CopyError(
           `${item.source}: path traversal rejected. Source canonicalizes outside the confinement root (${confineRoot}).`,
           'path_traversal',

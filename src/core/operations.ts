@@ -185,6 +185,9 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
     if (p.endsWith('/*')) {
       const base = p.slice(0, -2);
       if (slug === base) continue;
+      // path-sep-guard-ok: gbrain slugs, not filesystem paths. Slugs are
+      // forward-slash by definition on every platform (validatePageSlug rejects
+      // backslashes outright), so `sep` here would break the match on Windows.
       if (slug.startsWith(base + '/')) return true;
     } else if (p === slug) {
       return true;

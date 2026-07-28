@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative, sep } from 'path';
+import { isPathInside } from '../core/path-confine.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
@@ -1117,7 +1118,7 @@ function isPathSafe(filePath: string, gitRoot: string): boolean {
   try {
     const real = realpathSync(filePath);
     const rootReal = realpathSync(gitRoot);
-    return real === rootReal || real.startsWith(rootReal + '/');
+    return isPathInside(real, rootReal);
   } catch {
     return false;
   }
@@ -1887,21 +1888,28 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // NAV-1/NAV-2 scope-entry guard: the realpath-resolved scope must live
   // inside the realpath-resolved git root. Catches `--src-subpath ../escape`
   // AND a symlinked subdir pointing outside the repo, before any git op runs.
-  // Compare with the NATIVE separator: both operands come from realpathSync(),
-  // so on win32 they are '\'-separated and a hardcoded '/' boundary can never
-  // match — every in-repo subdir scope was rejected as path traversal, which
-  // made `--src-subpath` unusable on Windows. Same defect (and same fix) as
-  // the archive-crawler allow-list in 2847b60f. `sep` keeps the boundary guard
-  // that stops `/repo-evil` from prefix-matching `/repo`, and is byte-identical
-  // to the old code on POSIX.
-  if (syncScopeRoot !== gitContextRoot && !syncScopeRoot.startsWith(gitContextRoot + sep)) {
+  if (!isPathInside(syncScopeRoot, gitContextRoot)) {
     throw new Error(
       `Sync scope ${syncScopeRoot} resolves outside git repo ${gitContextRoot}. ` +
       `Refusing to sync: possible path traversal via --src-subpath.`,
     );
   }
   // Relative path from git root to sync scope ('' when scope == root).
-  const syncScopeRelPath = syncScopeRoot === gitContextRoot ? '' : relative(gitContextRoot, syncScopeRoot);
+  //
+  // Normalized to POSIX separators because this value is compared against
+  // GIT-emitted paths (`inScope` / `scopeRel` below), and git always speaks
+  // forward slashes on every platform. `path.relative()` does NOT — it returns
+  // `docs\sub` on Windows, so the comparison mismatched at the separator and
+  // every path fell out of scope, making a nested `--src-subpath` import
+  // nothing. Note this is the one site in this class where `sep` is the WRONG
+  // fix: the two operands use different conventions by design, so the git side
+  // is authoritative and the path side must convert to it.
+  //
+  // Only bit multi-segment subpaths: a single-segment scope ('docs') contains
+  // no separator, so it matched by accident and hid the bug.
+  const syncScopeRelPath = syncScopeRoot === gitContextRoot
+    ? ''
+    : relative(gitContextRoot, syncScopeRoot).split(sep).join('/');
   const scoped = syncScopeRelPath !== '';
   // Anchor written back to sync state (sources.local_path / sync.repo_path):
   // the SCOPE path, so a follow-up bare `gbrain sync` auto-discovers the same
@@ -2236,10 +2244,14 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // subpath scope is active, only paths under it participate. Back-compat:
   // syncScopeRelPath is '' when scope == root, so inScope is always true and
   // the filters below reduce to the pre-#774 behavior exactly.
+  // path-sep-guard-ok: both operands are git-relative POSIX paths, never
+  // filesystem paths — `p` comes from git diff and `syncScopeRelPath` is
+  // POSIX-normalized at its definition. A native `sep` here would be wrong.
   const inScope = (p: string): boolean =>
     !scoped || p === syncScopeRelPath || p.startsWith(syncScopeRelPath + '/');
   // --exclude patterns match the SCOPE-relative path (what the user of a
   // scoped source thinks in), same form runImport matches on full sync.
+  // path-sep-guard-ok: git-relative POSIX paths on both sides — see `inScope`.
   const scopeRel = (p: string): string =>
     scoped && p.startsWith(syncScopeRelPath + '/') ? p.slice(syncScopeRelPath.length + 1) : p;
   const excluded = (p: string): boolean =>
@@ -3605,7 +3617,17 @@ async function performFullSync(
     // whose source_path lives outside the subpath (e.g. from an earlier
     // root-level sync of this source) are out of this walk's sight and must
     // not be treated as stale.
-    const scopePrefix = slugRoot ? relative(gitContextRoot, syncScopeRoot) + '/' : '';
+    // POSIX-normalized for the same reason as `syncScopeRelPath` above: this is
+    // matched against a raw stored `source_path`, which is git-derived and so
+    // forward-slashed, while `path.relative` returns `docs\sub` on Windows.
+    // planReconcileDeletes normalizes only the `current` membership test — the
+    // `isSyncablePath` predicate receives `r.source_path` UNNORMALIZED — so the
+    // mismatch made `reconcilable` empty and a scoped reconcile silently stopped
+    // clearing stale pages. Fail-closed (no wrong deletes), but a dead feature.
+    // path-sep-guard-ok on the `+ '/'`: git-relative POSIX path, not a filesystem path.
+    const scopePrefix = slugRoot
+      ? relative(gitContextRoot, syncScopeRoot).split(sep).join('/') + '/'
+      : '';
     const plan = planReconcileDeletes(
       rows,
       currentFiles,
