@@ -1765,6 +1765,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const { name } = req.body;
       if (!name) { res.status(400).json({ error: 'Name required' }); return; }
       await sql`UPDATE access_tokens SET revoked_at = now() WHERE name = ${name} AND revoked_at IS NULL`;
+      // verifyAccessToken memoizes successful verifications by token hash, which
+      // this endpoint cannot compute (it revokes by NAME). Clear the whole memo
+      // so a revoked key stops working immediately instead of surviving until
+      // its entry lapses.
+      oauthProvider.clearTokenCache();
       res.json({ revoked: true });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : 'Revoke failed' });

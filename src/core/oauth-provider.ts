@@ -209,6 +209,13 @@ interface GBrainOAuthProviderOptions {
    * See readWithAuthDbTimeout for the rationale.
    */
   authDbTimeoutMs?: number;
+  /**
+   * Lifetime (ms) of a memoized successful token verification. Defaults to
+   * resolveAuthCacheTtlMs(GBRAIN_AUTH_CACHE_TTL_MS) → 30000. `0` disables the
+   * memo. See DEFAULT_AUTH_CACHE_TTL_MS for why bounding the read was not
+   * enough on its own.
+   */
+  authCacheTtlMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +410,48 @@ export function resolveAuthDbTimeoutMs(env: string | undefined): number {
 }
 
 /**
+ * Default lifetime of a memoized token verification (2026-07-27 diagnosis).
+ *
+ * No timeout value fixes the `initialize` 503, because the queries were never
+ * slow: EXPLAIN ANALYZE puts both token lookups at ~0.05ms, and during a stall
+ * pg_stat_activity shows every gbrain backend idle / wait_event=ClientRead —
+ * Postgres has ALREADY answered and is waiting on a client that isn't draining
+ * its sockets, because the host is CPU-saturated. Raising the bound just walks
+ * the failure signature along with it (13s@2500 → 19s@6000 → 29s@15000, then
+ * the driver's own hardcoded connect_timeout).
+ *
+ * The fix is to stop asking. The shared loopback token is a STATIC secret on
+ * disk backed by a single legacy access_tokens row, so re-verifying it on every
+ * POST /mcp is pure waste. 30s is short enough that an out-of-process
+ * revocation (`gbrain auth revoke`, which runs in a separate process and cannot
+ * invalidate this map) takes effect promptly, and long enough that a burst of
+ * handshakes costs exactly one read. Override with GBRAIN_AUTH_CACHE_TTL_MS;
+ * `0` disables memoization entirely.
+ */
+export const DEFAULT_AUTH_CACHE_TTL_MS = 30_000;
+
+/**
+ * Parse GBRAIN_AUTH_CACHE_TTL_MS; fall back to the default on unset/invalid.
+ *
+ * Unlike resolveAuthDbTimeoutMs, an explicit `0` is HONORED rather than
+ * coerced to the default — it is the operator's off-switch for the memo.
+ */
+export function resolveAuthCacheTtlMs(env: string | undefined): number {
+  if (env === undefined || env === '') return DEFAULT_AUTH_CACHE_TTL_MS;
+  const n = parseInt(env, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_AUTH_CACHE_TTL_MS;
+}
+
+/** Upper bound on memoized entries — a backstop, not a working limit. */
+const AUTH_CACHE_MAX_ENTRIES = 500;
+
+/** A memoized successful verification, valid until `notAfterMs` (epoch ms). */
+interface AuthCacheEntry {
+  info: CoreAuthInfo;
+  notAfterMs: number;
+}
+
+/**
  * Thrown when a token-lookup read exceeds its timeout on BOTH the initial
  * attempt and the single retry — reached in ~2×timeout instead of the ~10s
  * driver hang, and only after a retry has had a chance to absorb a momentary
@@ -477,6 +526,14 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private tokenTtl: number;
   private refreshTtl: number;
   private readonly authDbTimeoutMs: number;
+  private readonly authCacheTtlMs: number;
+  /**
+   * Memoized successful verifications, keyed by token HASH (never the
+   * plaintext). Per-INSTANCE, deliberately not module-global: the CLI builds
+   * its own short-lived provider, and a shared map would leak across both
+   * processes-in-one and tests.
+   */
+  private readonly tokenCache = new Map<string, AuthCacheEntry>();
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -486,6 +543,99 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     this.refreshTtl = options.refreshTtl || 30 * 24 * 3600;
     this.authDbTimeoutMs = options.authDbTimeoutMs
       ?? resolveAuthDbTimeoutMs(process.env.GBRAIN_AUTH_DB_TIMEOUT_MS);
+    this.authCacheTtlMs = options.authCacheTtlMs
+      ?? resolveAuthCacheTtlMs(process.env.GBRAIN_AUTH_CACHE_TTL_MS);
+  }
+
+  /**
+   * Drop every memoized verification.
+   *
+   * Called by the admin revoke-by-NAME endpoint, which cannot compute the
+   * token hash it needs to evict a single entry. Revocation is rare and the
+   * map is small, so a blanket clear is the correct trade — it closes the
+   * in-process staleness window completely rather than leaving a token
+   * usable for the rest of its TTL.
+   */
+  clearTokenCache(): void {
+    this.tokenCache.clear();
+  }
+
+  /** Evict one token's memoized verification (used on targeted revocation). */
+  private invalidateTokenHash(tokenHash: string): void {
+    this.tokenCache.delete(tokenHash);
+  }
+
+  /**
+   * Return a memoized AuthInfo for this hash, or undefined on miss/expiry.
+   *
+   * Re-checks the token's OWN expiry on every hit, independently of the memo
+   * TTL — belt and braces alongside the notAfterMs clamp applied at store
+   * time, so an expired token can never be served from memory.
+   */
+  private getCachedAuth(tokenHash: string): CoreAuthInfo | undefined {
+    if (this.authCacheTtlMs <= 0) return undefined;
+    const entry = this.tokenCache.get(tokenHash);
+    if (!entry) return undefined;
+    const nowMs = Date.now();
+    if (nowMs >= entry.notAfterMs) {
+      this.tokenCache.delete(tokenHash);
+      return undefined;
+    }
+    if (typeof entry.info.expiresAt === 'number'
+      && entry.info.expiresAt < Math.floor(nowMs / 1000)) {
+      this.tokenCache.delete(tokenHash);
+      return undefined;
+    }
+    // Hand back a COPY. Downstream assigns this to req.auth; a mutation there
+    // (or in any operation handler) must not contaminate the next request.
+    return {
+      ...entry.info,
+      scopes: [...entry.info.scopes],
+      allowedSources: entry.info.allowedSources
+        ? [...entry.info.allowedSources]
+        : entry.info.allowedSources,
+    };
+  }
+
+  /**
+   * Memoize a SUCCESSFUL verification. Failures are never cached: an unknown,
+   * revoked, or expired token must re-read so it keeps returning 401/403, and
+   * a token minted a moment ago must not be rejected for the rest of the TTL.
+   *
+   * The entry expires at min(now + ttl, token expiry) so the memo can never
+   * extend a token's life by even a second.
+   */
+  private setCachedAuth(tokenHash: string, info: CoreAuthInfo): void {
+    if (this.authCacheTtlMs <= 0) return;
+    let notAfterMs = Date.now() + this.authCacheTtlMs;
+    if (typeof info.expiresAt === 'number') {
+      notAfterMs = Math.min(notAfterMs, info.expiresAt * 1000);
+    }
+    if (notAfterMs <= Date.now()) return; // already expired — nothing to cache
+    if (this.tokenCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+      // Opportunistic prune of lapsed entries; if that frees nothing, drop the
+      // oldest insertion (Map preserves insertion order) so the map stays bounded.
+      const nowMs = Date.now();
+      for (const [k, v] of this.tokenCache) {
+        if (nowMs >= v.notAfterMs) this.tokenCache.delete(k);
+      }
+      if (this.tokenCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+        const oldest = this.tokenCache.keys().next();
+        if (!oldest.done) this.tokenCache.delete(oldest.value);
+      }
+    }
+    // Store a SNAPSHOT, not the object handed back to this caller. The miss
+    // path returns `info` directly to the middleware, which assigns it to
+    // req.auth; without this copy a downstream mutation of that first response
+    // would rewrite the cached entry every later request is served from.
+    this.tokenCache.set(tokenHash, {
+      info: {
+        ...info,
+        scopes: [...info.scopes],
+        allowedSources: info.allowedSources ? [...info.allowedSources] : info.allowedSources,
+      },
+      notAfterMs,
+    });
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -685,6 +835,21 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
 
+    // Memo fast path (2026-07-27). The shared loopback token is a static
+    // secret backed by ONE legacy access_tokens row, so every POST /mcp —
+    // including the `initialize` handshake — was re-reading the same two rows.
+    // Under host CPU saturation those reads time out (not because the queries
+    // are slow, but because the process can't drain its sockets), the bounded
+    // read throws AuthDbTimeoutError → 503, and Claude Code abandons tool
+    // discovery for the whole session. Serving a repeat verification from
+    // memory removes the handshake's database dependency entirely.
+    //
+    // Only successes land here, so every failure path below — InvalidTokenError,
+    // AuthDbTimeoutError, and the isUndefinedColumnError column probes —
+    // behaves exactly as it did before.
+    const cached = this.getCachedAuth(tokenHash);
+    if (cached) return cached as SdkAuthInfo;
+
     // Try OAuth tokens first. JOIN oauth_clients in the same query so
     // verifyAccessToken returns client_name AND source_id in AuthInfo —
     // eliminates the separate per-request lookup at serve-http.ts that
@@ -761,7 +926,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       const allowedSources = Array.isArray(federatedRaw)
         ? (federatedRaw as string[])
         : undefined;
-      return {
+      const info: CoreAuthInfo = {
         token,
         clientId: row.client_id as string,
         clientName: (row.client_name as string | null) ?? undefined,
@@ -776,7 +941,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // operations.ts prefers this array over scalar sourceId when set
         // and non-empty.
         allowedSources,
-      } as CoreAuthInfo as SdkAuthInfo;
+      } as CoreAuthInfo;
+      // Clamped to the token's own expiry inside setCachedAuth.
+      this.setCachedAuth(tokenHash, info);
+      return info as SdkAuthInfo;
     }
 
     // Fallback: legacy access_tokens table (backward compat). Modern legacy
@@ -842,7 +1010,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         ? (permissions as Record<string, unknown>).source_id
         : undefined;
       const { sourceId, allowedSources } = parseLegacyTokenScope(sourceGrant);
-      return {
+      const info: CoreAuthInfo = {
         token,
         clientId: name,
         clientName: name,
@@ -853,7 +1021,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // allowedSources for federated reads, matching legacy HTTP transport.
         sourceId,
         allowedSources,
-      } as CoreAuthInfo as SdkAuthInfo;
+      } as CoreAuthInfo;
+      // THE hot path: this is the branch the shared static loopback token takes
+      // on every POST /mcp. Memoizing it is what takes Postgres off `initialize`.
+      // The 1yr synthetic expiry means the memo TTL is always the binding limit
+      // here, so an out-of-process `gbrain auth revoke` is picked up within it.
+      this.setCachedAuth(tokenHash, info);
+      return info as SdkAuthInfo;
     }
 
     throw new InvalidTokenError('Invalid token');
@@ -879,6 +1053,9 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       WHERE token_hash = ${tokenHash}
         AND client_id = ${client.client_id}
     `;
+    // Evict the memo so the revocation takes effect on the very next request
+    // rather than after the TTL lapses.
+    this.invalidateTokenHash(tokenHash);
   }
 
   // -------------------------------------------------------------------------
