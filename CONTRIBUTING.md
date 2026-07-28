@@ -82,7 +82,11 @@ patterns (`scripts/check-jsonb-pattern.sh`), `\r` progress bleed to stdout
 (`scripts/check-test-isolation.sh` — see "Writing tests that survive the parallel
 loop" below), silent fallback to recursive chunking in the compiled binary
 (`scripts/check-wasm-embedded.sh`), stale admin-dashboard build artifacts
-(`scripts/check-admin-build.sh`), and resolver drift on bundled skills
+(`scripts/check-admin-build.sh`), filesystem paths built from a file URL's
+`.pathname` (`scripts/check-url-pathname-fs.sh` — an identity transform on POSIX
+that yields an unusable `/C:/...` on Windows, so Linux CI cannot catch it; use
+`fileURLToPath()`, `import.meta.dir`, or `REPO_ROOT` from
+`test/helpers/repo-root.ts`), and resolver drift on bundled skills
 (`bun run check:resolver` — strict-mode `check-resolvable` that exit-1s on any
 warning, added in v0.41.14.0 to catch SKILL.md frontmatter ↔ RESOLVER.md drift
 before merge). `bun run check:all` runs the full historical sweep including the

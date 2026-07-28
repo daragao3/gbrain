@@ -12,12 +12,40 @@ Seven test command tiers, each with a clear scope:
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
 | `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
-| `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (~30 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s (parallel; typecheck dominates) | Before pushing; before `/ship`. |
+| `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (32 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
 | `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation). | ~1s per quarantined file | Debugging a specific quarantined file. |
 | `bun run test:e2e` | Real Postgres E2E. Requires Docker + `DATABASE_URL`. Sequential. | ~5-10min | Pre-ship; nightly. |
-| `bun run check:all` | The historical pre-check scripts (22, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (~30 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+| `bun run check:all` | The historical pre-check scripts (23, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (32 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+
+### Adding a check to `verify`
+
+Append the script to the `CHECKS` array in `scripts/run-verify-parallel.sh` and add its
+`package.json` entry **written as `bash scripts/check-foo.sh`**. The `bash ` prefix is not
+cosmetic: bun on Windows will not start a `.sh` from its shebang line, so a bare path exits
+immediately with "command not found" and the check reports a failure without having read
+anything. A bare path works on Linux and macOS, so CI cannot catch the omission.
+
+Shell scripts are pinned to LF by the root `.gitattributes` (`*.sh text eol=lf`). Without it
+`core.autocrlf=true` — the Git-for-Windows installer default — checks every script out CRLF
+and a strict bash dies on the trailing `\r`. The rule applies at checkout, so a clone that
+predates it keeps CRLF copies until they are replaced:
+`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`
+
+### Per-check timeouts
+
+Each check gets a wallclock cap, default 120s (`GBRAIN_VERIFY_TIMEOUT`). `typecheck` has its
+own budget, default 600s (`GBRAIN_VERIFY_TIMEOUT_TYPECHECK`), because a full `tsc --noEmit`
+over this codebase is legitimately longer than the cap the grep-style guards share. Keeping
+the shared default tight is what makes a hung or accidentally-quadratic check fail fast
+rather than stall the run.
+
+All 32 checks are spawned at once with no concurrency cap. On a heavily loaded machine that
+can exhaust the process table and produce failures unrelated to the code — the signature is
+`fork: retry: Resource temporarily unavailable` or `dofork: child -1` in the output. Re-run
+when the machine is quieter, or run the single check directly (`bash scripts/check-foo.sh`)
+to confirm.
 
 ### CI vs local: intentionally divergent file sets
 
@@ -36,6 +64,19 @@ When `bun run test` finds any failure, the wrapper:
 4. Exits non-zero. Empty failure log + non-zero exit = infrastructure problem (wedged shard, killed child); the banner says so.
 
 If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the wrapper writes `--- shard N: WEDGED after ${SHARD_TIMEOUT}s ---` to the failure log, includes the last 50 lines of the shard log, and proceeds with other shards' results.
+
+### Chunking a shard's file list (`GBRAIN_TEST_CHUNK_SIZE`)
+
+`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for **every file in that invocation** are lost, so a 253-file shard reports `pass=0 fail=0 rc=127` and the run cannot gate anything.
+
+`scripts/run-unit-shard.sh` therefore splits its file list into bounded chunks and runs one `bun test` per chunk, so a crash costs one chunk instead of the shard. A chunk that exits non-zero is reported with its file list named on stderr rather than silently under-reporting, and the shard exits with the worst chunk's code. `run-unit-parallel.sh`'s `bun_summary_count()` already sums Bun's summary block across multiple invocations per shard, so chunking needs no aggregator change.
+
+| Platform | Default | Why |
+|---|---|---|
+| POSIX (Linux, macOS) | `0` (off) | One invocation per shard, byte-identical to prior CI behavior. |
+| MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
+
+`GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
 
 ### File taxonomy
 
@@ -114,6 +155,24 @@ Rename to `*.serial.test.ts` when:
 - The file's tests intentionally share state across `it()` boundaries.
 
 The quarantine has grown to dozens of files — treat it as debt: every addition needs a reason from the list above, and prefer fixing the contention root cause when one exists.
+
+### Resolving the repo root (and other filesystem paths)
+
+Tests that spawn the CLI or read repo files must resolve the repo root through `test/helpers/repo-root.ts`:
+
+```ts
+import { REPO_ROOT, repoPath } from './helpers/repo-root.ts';
+
+Bun.spawnSync([process.execPath, repoPath('src', 'cli.ts')], { cwd: REPO_ROOT });
+```
+
+`REPO_ROOT` is absolute, in the platform's own format, with no trailing separator; `repoPath(...segments)` joins onto it.
+
+**Never build a filesystem path from `new URL(...).pathname`.** `URL.pathname` is a URL path: on Windows `new URL('..', import.meta.url).pathname` yields `/C:/Users/...`, which no Win32 API accepts. As a `Bun.spawn` `cwd:` it fails with `ENOENT: no such file or directory, uv_spawn 'bun'` — that message names argv[0], not the directory that is actually missing, so it reads as "bun is not installed" and sends debugging the wrong way. Interpolated into a script argument it surfaces as `Module not found "/C:/.../src/cli.ts"`. The expression is an identity transform on POSIX, so Linux CI cannot catch it.
+
+`scripts/check-url-pathname-fs.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on that pattern. It leaves alone the cases where `.pathname` is the right accessor — reading a database name out of a connection string, routing an HTTP request, assigning `u.pathname` — and a `url-pathname-guard-ok` comment opts out a line that genuinely wants a URL path. Outside tests, use `fileURLToPath()` from `node:url` or `import.meta.dir`.
+
+Same class, same fix: build expected paths with `join()` rather than a hardcoded forward-slash literal when the code under test joins them, or the assertion can only pass on POSIX.
 
 ### Unit test inventory
 

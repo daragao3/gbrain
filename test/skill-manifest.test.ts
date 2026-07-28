@@ -175,3 +175,61 @@ describe('loadOrDeriveManifest', () => {
     expect(r.skills.map(s => s.name)).toEqual(['query']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// CRLF tolerance
+//
+// An LF-only frontmatter fence (`/^---\n/`) cannot match a file that starts
+// `---\r\n`, so a CRLF SKILL.md parsed as having NO frontmatter — silently,
+// with no error — and every derived entry fell back to the dirname instead of
+// the declared `name:`. On Windows `core.autocrlf=true` (the Git-for-Windows
+// installer default) makes EVERY checked-out SKILL.md CRLF, so this fired for
+// the whole skills tree, not an edge case.
+// ---------------------------------------------------------------------------
+
+/** Write a SKILL.md verbatim, so the test controls the line endings. */
+function writeSkillRaw(skillsDir: string, dirName: string, content: string): void {
+  const skillDir = join(skillsDir, dirName);
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(skillDir, 'SKILL.md'), content);
+}
+
+const LF_SKILL = '---\nname: declared-name\ndescription: test\n---\n\n# heading\n';
+const CRLF_SKILL = LF_SKILL.replace(/\n/g, '\r\n');
+
+describe('loadOrDeriveManifest — CRLF frontmatter', () => {
+  afterEach(() => {
+    while (created.length) {
+      const d = created.pop();
+      if (d && existsSync(d)) rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it('reads name: from a CRLF SKILL.md instead of falling back to the dirname', () => {
+    const dir = scratch();
+    writeSkillRaw(dir, 'dir-name', CRLF_SKILL);
+    const r = loadOrDeriveManifest(dir);
+    expect(r.skills.length).toBe(1);
+    // The bug: dirname fallback ('dir-name') instead of the declared name.
+    expect(r.skills[0]!.name).toBe('declared-name');
+    // And no trailing \r smuggled into the value.
+    expect(r.skills[0]!.name).not.toContain('\r');
+  });
+
+  it('CRLF and LF SKILL.md produce identical manifest entries', () => {
+    const lfDir = scratch();
+    const crlfDir = scratch();
+    writeSkillRaw(lfDir, 'dir-name', LF_SKILL);
+    writeSkillRaw(crlfDir, 'dir-name', CRLF_SKILL);
+    expect(loadOrDeriveManifest(crlfDir).skills).toEqual(loadOrDeriveManifest(lfDir).skills);
+  });
+
+  it('still falls back to the dirname when a CRLF file genuinely has no frontmatter', () => {
+    const dir = scratch();
+    // No fence at all — the loader MUST report absence, not invent a name.
+    writeSkillRaw(dir, 'dir-name', '# heading\r\n\r\nname: not-in-frontmatter\r\n');
+    const r = loadOrDeriveManifest(dir);
+    expect(r.skills.length).toBe(1);
+    expect(r.skills[0]!.name).toBe('dir-name');
+  });
+});

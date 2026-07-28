@@ -19,16 +19,50 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT_BIN="$(mktemp /tmp/gbrain-wasm-check.XXXXXX)"
-trap 'rm -f "$OUT_BIN"' EXIT
+# Build into a temp DIRECTORY rather than a temp FILE: `bun build --compile`
+# appends `.exe` on Windows, so a pre-created extension-less mktemp file is
+# left behind at 0 bytes while the real binary lands next to it. Executing
+# the stub yielded empty output and tripped the "no symbol names (fallback
+# chunks)" branch below — reporting a WASM-embedding regression on every
+# Windows dev box when embedding was in fact working.
+OUT_DIR="$(mktemp -d /tmp/gbrain-wasm-check.XXXXXX)"
+trap 'rm -rf "$OUT_DIR"' EXIT
+OUT_BIN="$OUT_DIR/gbrain-wasm-check"
 
 # Build a minimal smoketest binary that imports the chunker. We compile this
 # instead of the full gbrain CLI so the failure mode is laser-focused on
 # chunker + WASM path resolution, not unrelated CLI wiring.
-bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >/dev/null 2>&1
+if ! bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >"$OUT_DIR/build.log" 2>&1; then
+  echo "[check-wasm-embedded] FAIL: 'bun build --compile' did not succeed." >&2
+  echo "[check-wasm-embedded] Build log:" >&2
+  cat "$OUT_DIR/build.log" >&2
+  exit 1
+fi
+
+# Resolve whichever name the toolchain actually produced.
+if [ -x "$OUT_BIN.exe" ]; then
+  OUT_BIN="$OUT_BIN.exe"
+elif [ ! -x "$OUT_BIN" ]; then
+  echo "[check-wasm-embedded] FAIL: build reported success but no executable was produced at" >&2
+  echo "[check-wasm-embedded]   $OUT_BIN (or $OUT_BIN.exe)" >&2
+  echo "[check-wasm-embedded] Contents of build dir:" >&2
+  ls -la "$OUT_DIR" >&2
+  exit 1
+fi
 
 # Run it and capture JSON output.
 OUTPUT="$("$OUT_BIN" 2>&1)"
+
+# Distinguish "binary ran and produced fallback chunks" (a real regression)
+# from "binary produced nothing at all" (a harness/toolchain problem). The
+# assertions below only grep for presence, so without this an empty string
+# masquerades as a chunking regression.
+if [ -z "${OUTPUT//[[:space:]]/}" ]; then
+  echo "[check-wasm-embedded] FAIL: compiled binary produced no output at all." >&2
+  echo "[check-wasm-embedded] This is a harness/toolchain problem, not a chunking regression." >&2
+  echo "[check-wasm-embedded] Binary: $OUT_BIN" >&2
+  exit 1
+fi
 
 # Sanity: JSON parses and has expected shape.
 # - has_symbol_names: at least one chunk carries a concrete symbol name
