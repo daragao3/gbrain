@@ -59,6 +59,8 @@ describe('serializePageToMarkdown — DRY extract for dream + put_page write-thr
     const page = buildPage();
     const md = serializePageToMarkdown(page, []);
     // Frontmatter open + close fences should bracket the body.
+    // frontmatter-fence-guard-ok: asserts the serializer's OWN output, built in
+    // memory with `\n`. LF is the property under test, not a tolerance gap.
     expect(md).toMatch(/^---\n/);
     expect(md).toContain('title: Alice Example');
     expect(md).toContain('type: person');
@@ -135,6 +137,7 @@ describe('serializePageToMarkdown — DRY extract for dream + put_page write-thr
     const page = buildPage({ compiled_truth: '', timeline: '' });
     const md = serializePageToMarkdown(page, []);
     // Frontmatter close fence should still appear.
+    // frontmatter-fence-guard-ok: serializer's own LF output, as above.
     expect(md).toMatch(/^---\n/);
     expect(md.match(/---/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });

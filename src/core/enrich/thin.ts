@@ -207,8 +207,12 @@ export function parseSynthesis(raw: string): { skip: boolean; body: string } {
   if (fence) body = fence[1].trim();
   // Strip stray leading YAML frontmatter (the page already has frontmatter;
   // write-through manages it). Defensive — rule 4 forbids this, but models drift.
-  if (body.startsWith('---\n')) {
-    const end = body.indexOf('\n---', 4);
+  // CRLF-tolerant fence: an LF-only `---\n` test is anchored at offset 0 and is
+  // false for any `---\r\n` input. Model output is LF today, but the fence costs
+  // nothing to relax and a `\r` here would silently pass the frontmatter through.
+  const fmOpen = body.match(/^---\r?\n/);
+  if (fmOpen) {
+    const end = body.indexOf('\n---', fmOpen[0].length);
     if (end !== -1) body = body.slice(end + 4).trim();
   }
   return { skip: false, body };
