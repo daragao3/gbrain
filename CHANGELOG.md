@@ -38,6 +38,8 @@ Only Windows contributors need to do anything, and only once. `.gitattributes` a
 - New root `.gitattributes` pins `*.sh text eol=lf`, so shell scripts check out with Unix line endings regardless of the contributor's `core.autocrlf` setting. All 59 tracked `.sh` files were already stored with Unix endings, so `git add --renormalize .` reports nothing to do and no stored content changes.
 - `package.json` now routes the remaining 33 `.sh` check commands through `bash`, matching the 11 that already did. Every tracked `.sh` file carries a bash shebang (52 `#!/usr/bin/env bash` and 7 `#!/bin/bash`), so the treatment is uniform across all of them.
 - The five `scripts/*.ts` entries still run under bun and are untouched.
+- `CONTRIBUTING.md` gains a Windows section covering the one-time working-copy refresh and the `bash scripts/<name>.sh` convention for new checks.
+- `docs/TESTING.md` records how the test commands dispatch through bash, and notes that three tree-walking checks plus `typecheck` can exceed the 120s per-check cap on Windows while passing on Linux and macOS.
 
 ## [0.42.66.1] - 2026-07-27
 
