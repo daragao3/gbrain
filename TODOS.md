@@ -1,5 +1,28 @@
 # TODOS
 
+## v0.42.67.1 follow-ups (auth memoization)
+
+- [ ] **P1 — `node_modules` is committed as a symlink and destroys real dependencies on checkout.**
+  Upstream `faf5cdba` added `node_modules` to the index as a mode-120000 symlink pointing at
+  `/tmp/fleet/repo/node_modules`, a build-sandbox path. `.gitignore` line 1 is `node_modules/`
+  with a trailing slash, which ignores a DIRECTORY of that name but not a file or symlink, so
+  it was never caught. Merging it replaces a real installed `node_modules` with a one-line
+  file, which removes every dependency from the working tree. v0.42.67.1 untracks it locally;
+  report upstream and propose `/node_modules` (no trailing slash) in `.gitignore` plus
+  untracking on master, so the fix does not have to be re-applied after every merge.
+- [ ] **P2 — `test/brain-repo-durability.serial.test.ts` is nondeterministic on Windows.**
+  Consecutive runs against an unchanged tree yield 11 pass / 8 fail and then 12 pass / 7 fail,
+  and the failing set differs in both directions against a master baseline. The suite does real
+  git operations with push probes, so it is likely timing or remote-reachability sensitive.
+  Make it deterministic or mark it as requiring a reachable remote.
+- [ ] **P2 — full `bun test` does not complete on Windows.**
+  The run aborts with exit 127 rather than printing a summary. Three distinct causes are
+  visible: `Bun.spawn(['bun', ...])` fails `ENOENT` even with `bun` on PATH (needs `bun.exe`
+  or `process.execPath` on Windows), `test/book-mirror*` builds a malformed `\C:\Users\...`
+  path with a leading separator, and a Docker/`tini` probe hangs. Until this is fixed, the
+  full suite cannot gate a Windows ship and targeted suites plus a master baseline diff are
+  the substitute.
+
 ## community fix-wave follow-ups (filed v0.42.60.0)
 
 - [x] **P2 — cherry-pick #2112's uncovered doctor.ts hunk.** Fix-wave A (#2820) superseded

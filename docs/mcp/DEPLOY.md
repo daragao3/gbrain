@@ -306,6 +306,28 @@ Run `gbrain auth list` to see active tokens.
 **"service_unavailable" error**
 Database connection failed. Check your Supabase dashboard for outages.
 
+**Client says "connected" but no gbrain tools are available**
+The MCP `initialize` handshake is what registers the tool list, and it is
+authenticated like every other request. If the token check does not complete,
+the handshake is refused and most clients do not retry it, so the session stays
+up with zero tools while `/health` still returns 200. Restarting the client is
+the immediate fix.
+
+Successful token checks are held in memory for `GBRAIN_AUTH_CACHE_TTL_MS`
+(default 30000, `0` disables), which keeps the handshake off the database. Two
+knobs control the auth path:
+
+| Env var | Default | What it does |
+|---|---|---|
+| `GBRAIN_AUTH_CACHE_TTL_MS` | 30000 | How long a successful token check is remembered, in milliseconds. `0` disables it, so every request checks the database again. |
+| `GBRAIN_AUTH_DB_TIMEOUT_MS` | see `resolveAuthDbTimeoutMs` | Time limit on a single token lookup. The lookup is retried once, then reported as a retryable error instead of waiting on the driver's own connect timeout. |
+
+Only successful checks are held. An unknown, expired, or revoked token is never
+remembered, and a token's own expiry is re-checked each time it is served from
+memory. Revoking inside the running server takes effect immediately; revoking
+with `gbrain auth revoke` from a separate process takes effect within the
+window, so up to 30 seconds by default.
+
 **Claude Desktop doesn't connect**
 Remote servers must be added via Settings > Integrations, NOT
 `claude_desktop_config.json`. See [CLAUDE_DESKTOP.md](CLAUDE_DESKTOP.md).
