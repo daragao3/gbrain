@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { join } from "path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import {
   checkResolvable,
@@ -444,6 +444,21 @@ describe("checkResolvable — CRLF frontmatter", () => {
     dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" }, { omitFrontmatter: true });
     const report = checkResolvable(dir);
     const gaps = report.issues.filter(i => i.type === "mece_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].skill).toBe("alpha");
+  });
+
+  test("still reports a gap when CRLF frontmatter parses but omits triggers:", () => {
+    // Distinct from the case above: the fence IS present and parses, so the
+    // normalize step succeeds and the absence has to be caught by the
+    // triggers: lookup rather than by the frontmatter match failing.
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" });
+    const skillPath = join(dir, "alpha", "SKILL.md");
+    writeFileSync(
+      skillPath,
+      readFileSync(skillPath, "utf8").replace(/triggers:\r\n( *- .*\r\n)+/, "")
+    );
+    const gaps = checkResolvable(dir).issues.filter(i => i.type === "mece_gap");
     expect(gaps).toHaveLength(1);
     expect(gaps[0].skill).toBe("alpha");
   });

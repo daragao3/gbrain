@@ -80,61 +80,123 @@ FILE_LIST="$(find "$TARGET_DIR" -name '*.test.ts' \
 violations=0
 file_count=0
 
-emit_violation() {
-  local f="$1" rule="$2" detail="$3" lines="$4"
-  if is_allowlisted "$f"; then
-    return
-  fi
-  echo "ERROR: $f"
-  echo "       rule $rule: $detail"
-  if [ -n "$lines" ]; then
-    echo "$lines" | head -3 | sed 's/^/         /'
-  fi
-  violations=$((violations + 1))
+# ---------------------------------------------------------------------------
+# Scan every file in ONE awk pass.
+#
+# This used to be a bash loop spawning up to 6 `grep`/`awk` processes per
+# file. Across ~1.2k non-serial unit tests that is ~6k process spawns; on
+# Windows, where spawns are very expensive, the check ran for over ten
+# minutes and blew the verify harness's per-check timeout. The rules are
+# all line-local (R1, R2) or simple whole-file state (R3's distance from the
+# last beforeAll, R4's presence flags), so a single pass expresses them
+# directly.
+#
+# awk reads the file list itself rather than taking filenames as argv:
+# ~1.2k paths overflow ARG_MAX on some systems, and this sidesteps xargs
+# re-batching entirely. Files are visited in the same sorted order, and
+# rules are evaluated per file in the same R1→R4 order, so the report is
+# byte-identical to the per-file version.
+#
+# Protocol back to the shell (tab-separated, one record per line):
+#   V<TAB>file<TAB>rule   start of a violation
+#   L<TAB>lineno:content  a matching line for the preceding V
+#   F<TAB>count           total files scanned
+# Allow-list filtering and the 3-line detail cap stay in the shell, where
+# the allow-list already lives.
+# ---------------------------------------------------------------------------
+FILE_LIST_TMP="$(mktemp)"
+AWK_OUT_TMP="$(mktemp)"
+trap 'rm -f "$FILE_LIST_TMP" "$AWK_OUT_TMP"' EXIT
+printf '%s\n' "$FILE_LIST" > "$FILE_LIST_TMP"
+
+awk -v LIST="$FILE_LIST_TMP" '
+BEGIN {
+  nfiles = 0
+  while ((getline f < LIST) > 0) {
+    if (f == "") continue
+    nfiles++
+    r1 = ""; r2 = ""; r3 = ""
+    has_pglite = 0; has_afterall = 0; has_disconnect = 0
+    lba = -1000
+    n = 0
+    while ((getline line < f) > 0) {
+      n++
+      # R1: env mutations.
+      if (line ~ /process\.env\.[A-Za-z_][A-Za-z_0-9]*[[:space:]]*=[^=]/ ||
+          line ~ /process\.env\[[^]]+\][[:space:]]*=[^=]/ ||
+          line ~ /delete[[:space:]]+process\.env\./ ||
+          line ~ /delete[[:space:]]+process\.env\[/ ||
+          line ~ /Object\.assign[[:space:]]*\([[:space:]]*process\.env/ ||
+          line ~ /Reflect\.set[[:space:]]*\([[:space:]]*process\.env/)
+        r1 = r1 n ":" line "\n"
+      # R2: mock.module() anywhere.
+      if (line ~ /mock\.module[[:space:]]*\(/)
+        r2 = r2 n ":" line "\n"
+      # R3/R4 state.
+      if (line ~ /beforeAll[[:space:]]*\(/) lba = n
+      if (line ~ /new PGLiteEngine[[:space:]]*\(/) {
+        has_pglite = 1
+        if (n - lba > 50) r3 = r3 n ":" line "\n"
+      }
+      if (line ~ /afterAll[[:space:]]*\(/) has_afterall = 1
+      if (line ~ /\.disconnect[[:space:]]*\(/) has_disconnect = 1
+    }
+    close(f)
+
+    if (r1 != "") { print "V\t" f "\tR1"; emit(r1) }
+    if (r2 != "") { print "V\t" f "\tR2"; emit(r2) }
+    if (r3 != "") { print "V\t" f "\tR3"; emit(r3) }
+    if (has_pglite && (!has_afterall || !has_disconnect)) print "V\t" f "\tR4"
+  }
+  close(LIST)
+  print "F\t" nfiles
+}
+function emit(blob,   parts, i, m) {
+  m = split(blob, parts, "\n")
+  for (i = 1; i < m; i++) print "L\t" parts[i]
+}
+' > "$AWK_OUT_TMP"
+
+detail_rule() {
+  case "$1" in
+    R1) echo "process.env mutation; use withEnv() or rename to *.serial.test.ts" ;;
+    R2) echo "mock.module() leaks across files in the shard process; rename to *.serial.test.ts" ;;
+    R3) echo "new PGLiteEngine(...) outside beforeAll() context (>50 lines); move into beforeAll" ;;
+    R4) echo "creates PGLiteEngine but missing afterAll(() => engine.disconnect()); engine leaks across files in the shard process" ;;
+  esac
 }
 
-# Read newline-separated file list; OK on macOS bash 3.2.
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  file_count=$((file_count + 1))
-  # R1: env mutations.
-  env_lines=$(grep -nE 'process\.env\.[A-Za-z_][A-Za-z_0-9]*[[:space:]]*=[^=]|process\.env\[[^]]+\][[:space:]]*=[^=]|delete[[:space:]]+process\.env\.|delete[[:space:]]+process\.env\[|Object\.assign[[:space:]]*\([[:space:]]*process\.env|Reflect\.set[[:space:]]*\([[:space:]]*process\.env' "$f" 2>/dev/null || true)
-  if [ -n "$env_lines" ]; then
-    emit_violation "$f" "R1" "process.env mutation; use withEnv() or rename to *.serial.test.ts" "$env_lines"
-  fi
-
-  # R2: mock.module() anywhere.
-  mock_lines=$(grep -nE 'mock\.module[[:space:]]*\(' "$f" 2>/dev/null || true)
-  if [ -n "$mock_lines" ]; then
-    emit_violation "$f" "R2" "mock.module() leaks across files in the shard process; rename to *.serial.test.ts" "$mock_lines"
-  fi
-
-  # R3: PGLiteEngine outside ~50 lines after a beforeAll(.
-  if grep -qE 'new PGLiteEngine[[:space:]]*\(' "$f" 2>/dev/null; then
-    bad=$(awk '
-      BEGIN { last_before_all = -1000 }
-      /beforeAll[[:space:]]*\(/ { last_before_all = NR }
-      /new PGLiteEngine[[:space:]]*\(/ {
-        if (NR - last_before_all > 50) {
-          printf "%d:%s\n", NR, $0
-        }
-      }
-    ' "$f" 2>/dev/null)
-    if [ -n "$bad" ]; then
-      emit_violation "$f" "R3" "new PGLiteEngine(...) outside beforeAll() context (>50 lines); move into beforeAll" "$bad"
-    fi
-  fi
-
-  # R4: PGLiteEngine creation requires afterAll{disconnect}.
-  if grep -qE 'new PGLiteEngine[[:space:]]*\(' "$f" 2>/dev/null; then
-    if ! grep -qE 'afterAll[[:space:]]*\(' "$f" 2>/dev/null \
-       || ! grep -qE '\.disconnect[[:space:]]*\(' "$f" 2>/dev/null; then
-      emit_violation "$f" "R4" "creates PGLiteEngine but missing afterAll(() => engine.disconnect()); engine leaks across files in the shard process" ""
-    fi
-  fi
-done <<EOF
-$FILE_LIST
-EOF
+skip_current=0
+detail_shown=0
+while IFS= read -r rec; do
+  tag="${rec%%$'\t'*}"
+  rest="${rec#*$'\t'}"
+  case "$tag" in
+    F)
+      file_count="$rest"
+      ;;
+    V)
+      f="${rest%%$'\t'*}"
+      rule="${rest##*$'\t'}"
+      detail_shown=0
+      if is_allowlisted "$f"; then
+        skip_current=1
+        continue
+      fi
+      skip_current=0
+      echo "ERROR: $f"
+      echo "       rule $rule: $(detail_rule "$rule")"
+      violations=$((violations + 1))
+      ;;
+    L)
+      [ "$skip_current" -eq 1 ] && continue
+      # Match the original `head -3` cap on detail lines.
+      [ "$detail_shown" -ge 3 ] && continue
+      detail_shown=$((detail_shown + 1))
+      echo "         $rest"
+      ;;
+  esac
+done < "$AWK_OUT_TMP"
 
 if [ $violations -gt 0 ]; then
   echo

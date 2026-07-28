@@ -4,56 +4,55 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.42.70.0] - 2026-07-28
 
-**Stopping a test run now stops all of it, instead of leaving processes behind that keep working for hours.**
+**On Windows, `bun run verify` now actually runs. All 32 build checks start, instead of quitting before they read a single file.**
 
-GBrain's test suite ends with a serial pass that runs certain test files one at a time, each in its own process. That pass had no way to tell that the run which started it was gone. Stopping a test run left it alive, and it kept walking its file list and starting fresh test processes long after everything else had exited. They pile up across sessions. Nine were found running at once on one machine, every one of them with a dead parent, and three that were checked in detail were still starting new processes hours later. Enough of them at the same time keeps a machine busy enough that later test runs measure the wrong thing, or fail to start at all. The serial pass now takes its own processes down when it is stopped, and notices by itself when the run that owns it has gone away.
+GBrain's build checks are shell scripts, and `package.json` invoked them by path. A Unix shell starts a file like that by reading the `#!` line at the top; bun on Windows does not, so every check exited right away saying the command was not found. The gate reported the same failure count no matter what the code underneath looked like, which made it useless for anyone developing on Windows. A second problem sat underneath that one: Git for Windows installs with `core.autocrlf=true`, which rewrites shell scripts to Windows line endings when you check them out, and a strict bash then fails on the carriage return at the end of every line. Both are fixed. Checks now run through `bash` explicitly, and a new line-ending rule pins shell scripts to Unix endings on every platform. Six checks that failed only because of Windows text and process handling were corrected as well.
 
 ### How to use it
 
-Nothing to do, and no schema migrations. Stop a test run however you normally would:
-
 ```bash
-bun run test
+bun run verify
 ```
 
-Press Ctrl-C, or kill the run, and the serial pass and the test process it was running stop with it.
+On Windows that now dispatches all 32 checks and reports `pass=32 fail=0`.
+
+A clone that already exists still has the old line endings on disk. The rule applies on checkout, so replace the working copies once:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .
+```
 
 ### Things to watch
 
-This affects people working on GBrain itself, not people running it. Nothing about the `gbrain` program changes.
+This release is for people working on GBrain itself. Nothing changes for running GBrain, and there are no schema migrations.
 
-If you deliberately detach a test run from whatever started it, such as running it under `nohup`, switch the parent check off so a missing parent is not read as a stopped run:
+The checks are spawned in parallel, one process per check. On a busy machine that can exhaust the process table and report failures that have nothing to do with your code. The signature is `fork: retry: Resource temporarily unavailable` in the output. Re-run when the machine is quieter, or run the one check on its own:
 
 ```bash
-GBRAIN_TEST_NO_PARENT_WATCH=1 bun run test
+bash scripts/check-privacy.sh
 ```
-
-Two other variables cover unusual setups. `GBRAIN_TEST_WATCH_PID` chooses which process counts as the run, and `GBRAIN_TEST_WATCH_INTERVAL` sets how often it is checked, in seconds.
-
-On Windows the parent of a test run started by `bun run` cannot be observed from the shell, so the check turns itself off rather than guessing. The runner prints which mode it is in on its first line, as `watchdog=<pid>` or `watchdog=off`. Coverage does not depend on it: the parallel runner still takes the serial pass down when it exits, and the serial pass still watches the parallel runner.
 
 ### Itemized changes
 
 #### Fixed
-- **The serial pass takes its test process with it.** `scripts/run-serial-tests.sh` now runs each file's `bun test` as a tracked background child and ends its whole tree from a trap on `EXIT`, `INT`, `TERM` and `HUP`. The child previously ran in the foreground in the same process group, so signalling the script alone reaped the shell and left the test process running.
-- **An orphaned serial pass stops itself.** It watches the process that owns the run and shuts down when that process disappears. A trap alone could not cover this: when the parent dies without signalling, nothing is ever delivered.
-- **The parallel runner supervises the serial pass.** `scripts/run-unit-parallel.sh` starts it in the background, keeps its process id, and reaps it from the same trap that reaps the shards. It was previously started in the foreground with no supervision at all.
-- **The progress heartbeat no longer leaks a timer process.** Its cleanup used `pkill`, which is not installed on Git-Bash or on a default Cygwin. There the call did nothing and the redirect hid the failure, so the leak it was meant to prevent happened anyway. The heartbeat now cancels its own timer from a trap, which needs no external tool and works everywhere.
-
-#### Added
-- **`scripts/lib/proc-tree.sh`**, shared process-tree teardown helpers used by both runners. Built from `ps` and `kill` only, with no dependency on `pkill` or `pgrep`. It signals process ids it already knows using the shell builtin first and only then reads the process table, because one read of that table measured 9 to 12 seconds on a loaded Windows machine, which is long enough for the process being stopped to finish the work being cancelled. The table read is skipped entirely when nothing is still alive, so a run that ends normally never pays for it. Descendants are found in a single pass rather than one call per process.
-- **Both runners fail loudly if that helper is missing**, with `ERROR: missing required helper` and exit code 2. Without this they carried on with every teardown call silently doing nothing, which is the same leak wearing a different hat.
+- **Shell script checks start on Windows.** 32 script entries in `package.json` now invoke their script through `bash` rather than by bare path. Without this each one exits immediately and never reads a file, so the check result carries no information about the code.
+- **Shell scripts check out with Unix line endings everywhere.** A new root `.gitattributes` sets `*.sh text eol=lf`, so `core.autocrlf=true` no longer rewrites them. All 59 tracked shell scripts now land the same way on every platform.
+- **`check:eval-glossary` no longer reports a fresh document as stale.** `scripts/check-eval-glossary-fresh.sh` compares with trailing carriage returns stripped. The committed document and the generator both use Unix endings, but a Windows working copy has Windows endings, so a byte comparison flagged all 176 lines as drifted while CI stayed green. Real content drift still fails.
+- **`check:wasm` no longer reports a false embedding regression on Windows.** `scripts/check-wasm-embedded.sh` builds into a temp directory instead of a temp file. `bun build --compile` appends `.exe` on Windows, so the pre-created extension-less file was left at 0 bytes and running it produced empty output, which the script read as missing symbols.
+- **`check:skill-brain-first` no longer reports `parse_error` when the check is green.** `scripts/check-skill-brain-first.sh` feeds the report to python on standard input instead of interpolating a path into the source. A native Windows python cannot open the POSIX-style temp path the shell produces, so the open failed and the guard blamed the parse.
+- **`check:privacy` and `check:test-isolation` finish inside the time limit.** Both used to spawn a `grep` or `awk` per file per pattern, roughly 7,700 and 6,000 processes. Process creation is expensive on Windows, and that alone pushed them past the harness timeout. `check-privacy.sh` filters with shell builtins and batches the survivors into one `grep` per pattern through `xargs -0`; `check-test-isolation.sh` evaluates all four rules in a single `awk` pass that reads the file list itself rather than taking it as arguments. Same patterns, same allow-lists, same exit codes, same report format.
+- **`check:test-names` drops about 400 process spawns.** `scripts/check-test-real-names.sh` matches its needles with `shopt -s nocasematch` and a `case` statement instead of piping each line into `grep -qi`. The needles are literal words, so the substring match is equivalent.
+- **`typecheck` gets its own time budget inside `verify`.** `scripts/run-verify-parallel.sh` reads a separate `GBRAIN_VERIFY_TIMEOUT_TYPECHECK`, default 600 seconds. A full `tsc --noEmit` over this codebase is legitimately longer than the 120 second cap the grep-style guards share, so it was reported as a failure when nothing was wrong. The tight default still applies to every other check, which is what makes a hung one fail fast.
 
 #### Tests
-- **`test/scripts/run-serial-tests-teardown.serial.test.ts`** (5 tests) covers the orphaned parent, a direct `SIGTERM`, and the full chain where the parallel runner is orphaned while the serial pass is in flight, plus two that pin the serial pass exit code and its report of which files failed. Assertions use marker files on a timeline rather than process ids, so they are portable. The marker written by the grandchild `bun` process is the one that proves the whole tree stopped, not just the shell.
-- **`test/scripts/run-unit-parallel.test.ts`** copies the new helper into its temporary fixture, which the runners now require.
+- **A gap that survives frontmatter parsing is pinned.** `test/check-resolvable.test.ts` adds a case where a Windows-line-ending skill file has a settings block that parses but declares no triggers. The neighbouring case covers a file with no settings block at all, which fails earlier and by a different route.
 
 ## To take advantage of v0.42.70.0
 
-Nothing to run, and no schema migrations. If you work on GBrain itself, stop a test run the way you always have and it will clean up after itself.
+`gbrain upgrade`. No new schema migrations, and nothing changes for running GBrain.
 
-1. **If you detach test runs on purpose**, for example under `nohup` or `setsid`, set `GBRAIN_TEST_NO_PARENT_WATCH=1` so the missing parent is not read as a stopped run.
-2. **If you have collected orphans from earlier runs**, they are from before this change and will not clear themselves. Select them by command line rather than by program name, since other processes share the same name, and check that the parent is actually gone before ending anything.
+1. **If you contribute to GBrain from Windows:** `bun run verify` now works. Replace the shell scripts in an existing clone once so they pick up the new line endings: `git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`
+2. **If you add a check:** put `bash ` in front of the script path in `package.json`. A bare path works on Linux and macOS and silently fails on Windows.
 
 ## [0.42.69.0] - 2026-07-28
 

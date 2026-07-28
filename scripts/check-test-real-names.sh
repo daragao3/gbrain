@@ -116,6 +116,15 @@ fi
 # "file:<needle>" appears in ALLOWLIST for any needle in BANNED_EMAILS+NAMES
 # that matches the content.
 filtered=""
+# `shopt -s nocasematch` makes the `case` below case-insensitive, replacing
+# an `echo "$content" | grep -qi -- "$needle"` pipeline that cost TWO process
+# spawns per needle per matched line. With 7 needles that is up to ~400
+# spawns, which on Windows dominated this check's runtime (~50s of an ~85s
+# total) even though the underlying search takes ~3s. The needles are literal
+# words with no glob metacharacters, so a `*"$needle"*` substring match is
+# equivalent to the old case-insensitive grep. Available since bash 3.1, so
+# the macOS system bash (3.2) this repo targets is fine.
+shopt -s nocasematch
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   # Extract filename and content (everything after second :).
@@ -126,10 +135,12 @@ while IFS= read -r line; do
 
   matched_needle=""
   for needle in "${BANNED_EMAILS[@]}" "${BANNED_NAMES[@]}"; do
-    if echo "$content" | grep -qi -- "$needle"; then
-      matched_needle="$needle"
-      break
-    fi
+    case "$content" in
+      *"$needle"*)
+        matched_needle="$needle"
+        break
+        ;;
+    esac
   done
 
   allow_key="${file}:${matched_needle}"
@@ -145,6 +156,9 @@ while IFS= read -r line; do
     filtered+="${line}"$'\n'
   fi
 done <<< "$matches"
+# Restore case-sensitive matching; the allow-list comparison above is an
+# exact `[ = ]` test and the entries are case-distinct by design.
+shopt -u nocasematch
 
 if [ -z "$filtered" ]; then
   exit 0
