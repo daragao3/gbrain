@@ -41,7 +41,12 @@ describe('walkSourceDir', () => {
 
     const items = walkSourceDir(src, '/some/dst');
     expect(items).toHaveLength(2);
-    expect(items.map(i => i.target).sort()).toEqual(['/some/dst/a.txt', '/some/dst/b.txt']);
+    // Build expectations with join(), the same way walkSourceDir builds targets,
+    // so they carry native separators (byte-identical on POSIX).
+    expect(items.map(i => i.target).sort()).toEqual([
+      join('/some/dst', 'a.txt'),
+      join('/some/dst', 'b.txt'),
+    ]);
   });
 
   it('walks nested directories recursively, mirroring structure', () => {
@@ -54,7 +59,11 @@ describe('walkSourceDir', () => {
     const items = walkSourceDir(src, '/dst');
     expect(items).toHaveLength(3);
     const targets = items.map(i => i.target).sort();
-    expect(targets).toEqual(['/dst/sub/deeper/low.txt', '/dst/sub/mid.txt', '/dst/top.txt']);
+    expect(targets).toEqual([
+      join('/dst', 'sub', 'deeper', 'low.txt'),
+      join('/dst', 'sub', 'mid.txt'),
+      join('/dst', 'top.txt'),
+    ]);
   });
 
   it('returns empty array for a non-existent source directory', () => {

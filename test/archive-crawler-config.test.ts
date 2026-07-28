@@ -17,7 +17,7 @@
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { homedir, tmpdir } from 'os';
 import {
   loadArchiveCrawlerConfig,
@@ -39,6 +39,17 @@ afterEach(() => {
     // best-effort
   }
 });
+
+/**
+ * Mirror the path normalizer in src/core/archive-crawler-config.ts: resolve()
+ * to an absolute native-separator path, then re-add the trailing slash that
+ * resolve() strips. Building expectations this way keeps them byte-identical
+ * on POSIX while carrying `\` (and a drive letter) on Windows.
+ */
+function norm(p: string): string {
+  const r = resolve(p);
+  return r.endsWith('/') ? r : r + '/';
+}
 
 function writeYaml(content: string): string {
   const path = join(workdir, 'gbrain.yml');
@@ -140,8 +151,8 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
 `);
     const config = loadArchiveCrawlerConfig(workdir);
     expect(config.scan_paths).toEqual([
-      '/home/user/writing/',
-      '/mnt/backup/old-letters/',
+      norm('/home/user/writing'),
+      norm('/mnt/backup/old-letters/'),
     ]);
     expect(config.deny_paths).toEqual([]);
   });
@@ -150,7 +161,7 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
     const home = homedir();
     writeYaml('archive-crawler:\n  scan_paths:\n    - ~/Documents/writing\n');
     const config = loadArchiveCrawlerConfig(workdir);
-    expect(config.scan_paths[0]).toBe(`${home}/Documents/writing/`);
+    expect(config.scan_paths[0]).toBe(norm(join(home, 'Documents', 'writing')));
   });
 
   it('accepts deny_paths alongside scan_paths', () => {
@@ -163,15 +174,15 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
 `);
     const config = loadArchiveCrawlerConfig(workdir);
     expect(config.deny_paths).toEqual([
-      '/home/user/Documents/finances/',
-      '/home/user/Documents/medical/',
+      norm('/home/user/Documents/finances/'),
+      norm('/home/user/Documents/medical/'),
     ]);
   });
 
   it('accepts both archive-crawler and archive_crawler key spellings', () => {
     writeYaml('archive_crawler:\n  scan_paths:\n    - /home/user/notes\n');
     const config = loadArchiveCrawlerConfig(workdir);
-    expect(config.scan_paths[0]).toBe('/home/user/notes/');
+    expect(config.scan_paths[0]).toBe(norm('/home/user/notes'));
   });
 });
 
@@ -186,7 +197,7 @@ describe('normalizeAndValidateArchiveCrawlerConfig — direct API', () => {
     const out = normalizeAndValidateArchiveCrawlerConfig({
       scan_paths: ['/a/b', '/c/d/'],
     });
-    expect(out.scan_paths).toEqual(['/a/b/', '/c/d/']);
+    expect(out.scan_paths).toEqual([norm('/a/b'), norm('/c/d/')]);
   });
 });
 
