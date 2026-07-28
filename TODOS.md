@@ -1,5 +1,28 @@
 # TODOS
 
+## v0.42.67.0 follow-ups (Windows test-runner crash)
+
+Filed as follow-ups from v0.42.67.0, which hoisted the `chronicle/ontology.ts`
+dynamic import out of `mergeOntologyFact` in both engines.
+
+- [ ] **P2 — audit the remaining `await import()` sites on the engine path.**
+  v0.42.67.0 fixed one trigger; a dynamic import issued while the PGLite WASM
+  instance is live can still crash the Bun test runner on Windows, and the crash
+  discards pass/fail totals for every file in the invocation. Remaining sites in
+  `src/core/pglite-engine.ts` and `src/core/postgres-engine.ts` pull `ai/gateway.ts`,
+  `retry.ts`, `retry-matcher.ts`, `search/recency-decay.ts`,
+  `audit/db-disconnect-audit.ts`, and `audit/pool-recovery-audit.ts`. Most sit on
+  error or cold paths, so they are lower risk than the `mergeOntologyFact` one,
+  which ran on every ontology merge. Find them with
+  `git grep -n "await import" -- src/core/pglite-engine.ts src/core/postgres-engine.ts`.
+  Hoist the ones on hot paths, keeping both engines in lockstep.
+- [ ] **P3 — reproduce Windows runner crashes at the right scale.** Single-file and
+  five-file runs pass green even with a known trigger present; it took 12
+  database-backed files in one `bun test` invocation to crash. A green small repro
+  is not evidence that a trigger is gone. Note also that `git log -S` will not find
+  a dynamic-to-static import change, because the pickaxe counts occurrences of the
+  string and the count does not change. Use `git log -G`.
+
 ## community fix-wave follow-ups (filed v0.42.60.0)
 
 - [x] **P2 — cherry-pick #2112's uncovered doctor.ts hunk.** Fix-wave A (#2820) superseded

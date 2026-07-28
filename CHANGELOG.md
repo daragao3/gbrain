@@ -2,6 +2,26 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.0] - 2026-07-28
+
+**Contributors on Windows get test results back instead of silence.**
+
+Running the test suite on Windows could take the whole test process down partway through. The crash happened before any summary was printed, so the pass and fail counts for every file in that run were thrown away, not just the file that crashed. A run covering hundreds of files could finish with no results at all, which makes a healthy branch and a broken one look identical and leaves nothing to gate a merge on.
+
+The trigger was a helper module loaded on first use, from inside a database method, while the embedded PGLite database was already running. Both engines now load that helper when the file loads. Nothing about how gbrain behaves changes: the same code runs, just loaded earlier.
+
+### Fixed
+
+- The embedded-Postgres and Postgres engines load the chronicle ontology helpers when the module loads instead of on first use inside `mergeOntologyFact`. This stops the Windows test runner from crashing partway through a run and discarding every file's results.
+
+### Things to watch
+
+This removes one trigger, not every one. Large runs on Windows can still crash for other reasons, and a few other lazily loaded modules remain on the same database path. On a run of 12 database-backed test files that previously crashed with no output, the suite now completes and reports its totals.
+
+### Itemized changes
+
+- `src/core/pglite-engine.ts`, `src/core/postgres-engine.ts`: `valueHash`, `normalizeDimension`, and `isNovelDimension` move from an `await import()` inside `mergeOntologyFact` to a static top-level import. Applied to both engines together, per the engine-parity rule.
+
 ## [0.42.66.1] - 2026-07-27
 
 ### Fixed
