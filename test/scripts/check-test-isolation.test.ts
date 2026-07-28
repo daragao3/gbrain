@@ -8,11 +8,31 @@
  * test/e2e/).
  */
 
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, setDefaultTimeout } from 'bun:test';
 import { spawnSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
+
+// Every test here shells out to the lint via spawnSync('bash', ...). On
+// Windows that is far slower than bun's 5s default per-test timeout, and
+// the cost is process CREATION, not the lint's logic:
+//
+//   bash startup itself ...................  ~0.7s
+//   git rev-parse --show-toplevel .........  ~5.8s
+//   4x grep child spawns ..................  ~9.3s  (~2.3s each)
+//
+// i.e. ~15-23s for ONE invocation against a ONE-file fixture, measured
+// 2026-07-28. MSYS/MINGW64 fork emulation plus on-access AV scanning make
+// each child spawn cost seconds; the script returns the correct answer
+// (status 0, "OK (1 non-serial unit files scanned)"), it just cannot fit
+// in 5s. Without this the whole file fails with `Received: -1`.
+//
+// This is a CEILING, not a delay: on Linux CI these spawns are ~10ms and
+// the suite is unaffected. Raising it keeps every assertion intact rather
+// than skipping the suite on the platform where these scripts are most
+// fragile.
+setDefaultTimeout(120_000);
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const LINT_SH = resolve(REPO_ROOT, 'scripts/check-test-isolation.sh');

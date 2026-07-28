@@ -19,10 +19,16 @@
  * (3) CI workflow's verify job calls `bun run verify`.
  */
 
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, setDefaultTimeout } from 'bun:test';
 import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import { spawnSync } from 'child_process';
+
+// The dispatcher test shells out via spawnSync('bash', ...). On Windows each
+// child spawn out of MINGW64 bash costs ~1.5-2.5s (MSYS fork emulation +
+// on-access AV), overshooting bun's 5s default and failing with
+// `Received: -1`. Measured 2026-07-28. Ceiling only; Linux CI is unaffected.
+setDefaultTimeout(120_000);
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const PACKAGE_JSON = resolve(REPO_ROOT, 'package.json');
@@ -33,9 +39,22 @@ const TEST_WORKFLOW = resolve(REPO_ROOT, '.github/workflows/test.yml');
 describe('check-privacy.sh CI wiring', () => {
   it('scripts/check-privacy.sh exists and is executable', () => {
     expect(existsSync(PRIVACY_SCRIPT)).toBe(true);
-    const stat = require('fs').statSync(PRIVACY_SCRIPT);
-    // eslint-disable-next-line no-bitwise
-    expect((stat.mode & 0o100) !== 0).toBe(true);
+    // Assert the mode RECORDED IN GIT, not the working-tree mode. NTFS has
+    // no POSIX exec bit, so fs.statSync() reports 100666 on Windows even
+    // though the file is committed 100755 — the old `stat.mode & 0o100`
+    // check failed here for a reason that had nothing to do with the repo.
+    //
+    // Git's index mode is also the stronger assertion on every platform:
+    // it is what actually determines whether the script is executable when
+    // CI checks it out, and it catches a file committed without the exec
+    // bit even if the author's local filesystem happens to have it set.
+    const r = spawnSync('git', ['ls-files', '-s', '--', 'scripts/check-privacy.sh'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).not.toBe('');
+    expect(r.stdout.trim().split(/\s+/)[0]).toBe('100755');
   });
 
   it('package.json "verify" script delegates to run-verify-parallel.sh', () => {

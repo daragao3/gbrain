@@ -13,11 +13,20 @@
 // (3) is a soft regression guard, not a hard timing assertion (CI runners
 // vary). (4) is the load-bearing test: failure surfaces with name + log.
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Every test shells out via spawnSync('bash', ...), and the synthetic
+// dispatcher below fans out several more child processes (mktemp, basename,
+// cat, tail, plus one process per fake check). On Windows each child spawn
+// out of MINGW64 bash costs ~1.5-2.5s (MSYS fork emulation + on-access AV),
+// so a single dispatcher run blows well past bun's 5s default and fails
+// with `Received: -1`. Measured 2026-07-28. Ceiling only — on Linux CI
+// these spawns are ~10ms, so nothing here slows down.
+setDefaultTimeout(120_000);
 
 const SCRIPT = "scripts/run-verify-parallel.sh";
 

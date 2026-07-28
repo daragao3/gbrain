@@ -2,6 +2,51 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.68.1] - 2026-07-28
+
+**On Windows, the three test suites that cover GBrain's own build checks now pass instead of reporting nineteen failures that were never real.**
+
+These suites run GBrain's shell based build checks and assert on what they report. Every one of them starts a bash process, and that bash starts more processes of its own for git, find and grep. On Linux each of those costs about ten milliseconds. On Windows each one costs one and a half to two and a half seconds, so a single check against a one file fixture took fifteen to twenty three seconds against a five second per test limit. The tests were cut off partway and recorded as failures even though the checks themselves returned the correct answer every time. A separate failure had its own cause: one test asked the filesystem whether a script carries the executable permission bit, and Windows has no such bit to report.
+
+Both are fixed, and no assertion was relaxed to do it. The Windows contributor now sees the same result Linux has been seeing all along.
+
+### How to use it
+
+This one is for people working on GBrain itself. Nothing to upgrade, nothing to migrate.
+
+```bash
+bun test test/scripts/check-test-isolation.test.ts test/privacy-script-wired.test.ts test/scripts/run-verify-parallel.test.ts
+```
+
+### Numbers that matter
+
+| | Before | After |
+|---|---|---|
+| Result on Windows | 8 pass, 19 fail | 27 pass, 0 fail |
+| One check against a one file fixture | 15 to 23 seconds | unchanged |
+| Per test limit | 5 seconds | 120 seconds |
+| Result on Linux | unaffected | unaffected |
+
+Where the time in a single run goes, measured on Windows: about 0.7 seconds for bash itself, about 5.8 seconds for one `git rev-parse`, and about 9.3 seconds for four `grep` calls. The cost is starting processes, not the work they do.
+
+### Things to watch
+
+The raised limit is a ceiling, not a delay. A test that finishes in ten milliseconds still finishes in ten milliseconds, so Linux and CI timings do not move. On Windows these suites do take longer in wall clock than before, because the assertions now run to completion instead of being cut off early.
+
+If you see these suites time out again on Windows, the machine is likely under heavy load. Process creation is the bottleneck, so a count of concurrent processes explains far more than any change to the checks themselves.
+
+### Itemized changes
+
+#### Fixed
+- **The spawn heavy suites get a limit that matches what they do.** `test/scripts/check-test-isolation.test.ts`, `test/privacy-script-wired.test.ts` and `test/scripts/run-verify-parallel.test.ts` each set `setDefaultTimeout(120_000)`. Every one of their tests shells out through `spawnSync('bash', ...)`, and the synthetic dispatcher in the last of the three fans out several more child processes on top. Each file carries a comment recording the measured cost so the number does not read as arbitrary.
+- **The executable bit check asks git instead of the filesystem.** `test/privacy-script-wired.test.ts` read the permission bit with `fs.statSync`, which reports `100666` on a Windows checkout because NTFS has no executable bit, while the file is committed `100755`. The test now reads the mode recorded in the index with `git ls-files -s`. That is the mode that decides whether the script is executable when CI checks it out, so the assertion holds on every platform and also catches a script committed without the bit even when the author's own filesystem happens to have it set.
+
+## To take advantage of v0.42.68.1
+
+Nothing to do. No schema migrations, and no change to how GBrain runs.
+
+1. **If you contribute to GBrain from Windows:** these three suites should now report all green. If they do not, capture the run to a file and read it there rather than piping it, so the real exit code survives.
+
 ## [0.42.68.0] - 2026-07-28
 
 **On Windows, the bundled schema packs load instead of coming back empty, and a new build check stops the underlying path bug from returning.**
