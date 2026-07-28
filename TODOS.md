@@ -1,5 +1,24 @@
 # TODOS
 
+## v0.42.68.1 follow-ups (CRLF frontmatter fence)
+
+- [ ] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.**
+  v0.42.68.1 fixed the fourth and fifth recurrence of the same defect: a frontmatter
+  matcher written `/^---\n/` instead of `/^---\r?\n/`, which silently parses every CRLF
+  `SKILL.md` as having no frontmatter. The repo's own convention is that a guard cures
+  what prose cannot (see `scripts/check-jsonb-pattern.sh`,
+  `scripts/check-url-pathname-fs.sh`). Add `scripts/check-frontmatter-fence.sh`: fail on
+  a `---\n` fence literal in `src/` and `test/` that is not preceded by `\r?`, with an
+  opt-out comment for a genuine LF-only case. Wire it into `bun run verify`. The bug is
+  invisible on Linux CI (LF checkouts), so only a static guard catches site number six.
+- [ ] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
+  `replace`/`delete` edits match their `target` with a raw `indexOf` against the body, so a
+  multi-line target authored with LF never matches a CRLF `SKILL.md` (and vice versa).
+  Out of scope for v0.42.68.1, which fixed only the frontmatter fence. Decide whether to
+  match line-ending agnostically or to normalize the target against the file's detected
+  ending before searching. Note that `splitFrontmatter` returns an offset into the original
+  text, so any fix must not normalize the body in place.
+
 ## community fix-wave follow-ups (filed v0.42.60.0)
 
 - [ ] **P1 — take-writes source scoping fails open when source resolution errors (#2684 residual).**
