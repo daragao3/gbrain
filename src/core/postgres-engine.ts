@@ -13,11 +13,20 @@ import type {
   NewFact, FactListOpts, FactsHealth,
   SourceRow,
 } from './engine.ts';
-import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
-// Static import, mirroring pglite-engine.ts (engine parity): the former
-// `await import(...)` inside mergeOntologyFact can crash the bun test runner on
-// Windows. No cycle risk: ontology.ts only pulls ingestion/types.ts.
+// Static imports mirroring pglite-engine.ts (engine parity). These were all
+// `await import(...)` calls on the engine path; a dynamic import issued while
+// the PGLite WASM instance is live can crash the bun test runner on Windows,
+// and one crash discards pass/fail totals for every file in the invocation.
+//   - retry.ts and retry-matcher.ts were already in this module's static
+//     graph (retry.ts re-exports from retry-matcher.ts), so these add nothing.
+//   - chronicle/ontology.ts only pulls ingestion/types.ts — no cycle risk.
+//   - search/recency-decay.ts is a pure leaf: zero imports, no side effects.
+// `ai/gateway.ts` and the audit writers stay lazy on purpose — see their
+// call sites.
+import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, isRetryableConnError, type BatchAuditSite } from './retry.ts';
+import { isConnectionEndedError } from './retry-matcher.ts';
 import { valueHash, normalizeDimension, isNovelDimension } from './chronicle/ontology.ts';
+import { resolveRecencyDecayMap, DEFAULT_FALLBACK } from './search/recency-decay.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
@@ -2382,8 +2391,9 @@ export class PostgresEngine implements BrainEngine {
       if (err instanceof Error && err.name === 'RetryAbortError') throw err;
       // Best-effort exhausted-retry log. If the error wasn't retryable in
       // the first place, isRetryableConnError(err) is false and we skip.
-      // Lazy-import to avoid a circular dep concern.
-      const { isRetryableConnError } = await import('./retry.ts');
+      // Statically imported at the top: retry.ts is already in this module's
+      // static graph (see the `withRetry` import), so the circular-dep concern
+      // the old lazy-import guarded against does not apply.
       if (isRetryableConnError(err)) {
         auditLogBatchExhausted(auditSite, batchSize, opts.maxRetries + 1, err);
       }
@@ -5789,7 +5799,6 @@ export class PostgresEngine implements BrainEngine {
     let isReap = false;
     if (ctx?.error !== undefined) {
       try {
-        const { isConnectionEndedError } = await import('./retry-matcher.ts');
         isReap = isConnectionEndedError(ctx.error);
       } catch { /* classification is best-effort */ }
     }
@@ -6267,7 +6276,6 @@ export class PostgresEngine implements BrainEngine {
     const recencyBias = opts.recency_bias ?? 'flat';
     let recencySql: string;
     if (recencyBias === 'on') {
-      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
       recencySql = buildRecencyComponentSql({
         slugColumn: 'p.slug',
         dateExpr: 'COALESCE(p.effective_date, p.updated_at)',

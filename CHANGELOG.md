@@ -2,6 +2,32 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.67.3] - 2026-07-28
+
+**The database engines now load their small helpers up front, and every remaining on-demand load is settled one way or the other.**
+
+Version 0.42.67.1 fixed one helper that was fetched on first use from inside a database method, which could take the whole Windows test process down and throw away every file's results. That fix closed one trigger and left the rest unexamined. This release works through all of them on the database engine path and either moves them up front or records why they stay put, so nobody has to guess again.
+
+Three moved. Two of those cost nothing at all, because the engine already loaded them at the top of the file: asking for them a second time returned a cached copy and pulled in no new code. The third is a small standalone file with no imports of its own. Added together, the whole change grows each engine's startup load by exactly one file.
+
+Two stay on demand on purpose. The AI gateway brings about fifty files with it, including the entire model SDK, so loading it up front would make every engine start and every test pay for a tree most of them never touch. The two audit log writers only ever run against a live Postgres connection.
+
+Being straight about the limits here: the crash could not be reproduced while this work was checked. Three full runs of the twelve database-backed test files that originally crashed all completed and reported their totals, and two of those runs still had the original trigger present and running. So this is a tightening of the engine path, not a fix for a crash that was watched happening.
+
+### Changed
+
+- The embedded-Postgres and Postgres engines load the retry classifier, the connection-ended classifier, and the recency decay helpers when the module loads instead of on first use. Applied to both engines together, per the engine-parity rule. Behaviour is unchanged: the same code runs, just bound earlier.
+
+### Things to watch
+
+The AI gateway is the riskiest remaining on-demand load, and moving it up front is not the answer. One of its call sites sits on the chunk upsert path, which runs while the embedded database is busy, the same shape as the problem 0.42.67.1 fixed. The engines only need two small accessors from it, so the repair is to split those into their own file rather than pull the whole SDK forward. That is filed as a follow-up, along with re-establishing a reliable way to reproduce the crash.
+
+### Itemized changes
+
+- `src/core/pglite-engine.ts`: `isRetryableConnError` folded into the existing `./retry.ts` import, and `resolveRecencyDecayMap` plus `DEFAULT_FALLBACK` moved to a top-level import from `./search/recency-decay.ts`. Static import graph goes from 37 modules to 38.
+- `src/core/postgres-engine.ts`: the same two changes, plus `isConnectionEndedError` from `./retry-matcher.ts`. A stale comment claiming the retry import had to stay lazy to avoid a circular dependency was corrected, since that module is already imported at the top of the file. Static import graph goes from 41 modules to 42.
+- `TODOS.md`: the v0.42.67.1 audit item is closed with its measured numbers, and two follow-ups are filed.
+
 ## [0.42.67.1] - 2026-07-28
 
 **Contributors on Windows get test results back instead of silence.**

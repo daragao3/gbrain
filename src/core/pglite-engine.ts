@@ -17,13 +17,22 @@ import type {
   SourceRow,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
-import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
-// Static (not `await import(...)` inside mergeOntologyFact): a dynamic import
+// Static, never `await import(...)`, on the engine path: a dynamic import
 // issued from an async method while the PGLite WASM instance is live can take
 // the whole `bun test` process down on Windows. Bun dies before printing its
 // summary, so one crash discards pass/fail totals for every file in the
-// invocation. No cycle risk: ontology.ts only pulls ingestion/types.ts.
+// invocation, not just the file that crashed. Each of these is safe to bind
+// eagerly:
+//   - retry.ts was already in this module's static graph (see `withRetry`),
+//     so `isRetryableConnError` adds nothing to the import closure.
+//   - chronicle/ontology.ts only pulls ingestion/types.ts — no cycle risk.
+//   - search/recency-decay.ts is a pure leaf: zero imports, no top-level
+//     side effects.
+// `ai/gateway.ts` in initSchema() stays lazy on purpose — its closure is the
+// whole AI SDK (~51 modules), which no engine init should have to pay for.
+import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, isRetryableConnError, type BatchAuditSite } from './retry.ts';
 import { valueHash, normalizeDimension, isNovelDimension } from './chronicle/ontology.ts';
+import { resolveRecencyDecayMap, DEFAULT_FALLBACK } from './search/recency-decay.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
@@ -2267,7 +2276,6 @@ export class PGLiteEngine implements BrainEngine {
       });
     } catch (err) {
       if (err instanceof Error && err.name === 'RetryAbortError') throw err;
-      const { isRetryableConnError } = await import('./retry.ts');
       if (isRetryableConnError(err)) {
         auditLogBatchExhausted(auditSite, batchSize, opts.maxRetries + 1, err);
       }
@@ -5978,7 +5986,6 @@ export class PGLiteEngine implements BrainEngine {
     const recencyBias = opts.recency_bias ?? 'flat';
     let recencySql: string;
     if (recencyBias === 'on') {
-      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
       recencySql = buildRecencyComponentSql({
         slugColumn: 'p.slug',
         dateExpr: 'COALESCE(p.effective_date, p.updated_at)',

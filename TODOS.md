@@ -5,23 +5,56 @@
 Filed as follow-ups from v0.42.67.1, which hoisted the `chronicle/ontology.ts`
 dynamic import out of `mergeOntologyFact` in both engines.
 
-- [ ] **P2 — audit the remaining `await import()` sites on the engine path.**
-  v0.42.67.1 fixed one trigger; a dynamic import issued while the PGLite WASM
-  instance is live can still crash the Bun test runner on Windows, and the crash
-  discards pass/fail totals for every file in the invocation. Remaining sites in
-  `src/core/pglite-engine.ts` and `src/core/postgres-engine.ts` pull `ai/gateway.ts`,
-  `retry.ts`, `retry-matcher.ts`, `search/recency-decay.ts`,
-  `audit/db-disconnect-audit.ts`, and `audit/pool-recovery-audit.ts`. Most sit on
-  error or cold paths, so they are lower risk than the `mergeOntologyFact` one,
-  which ran on every ontology merge. Find them with
-  `git grep -n "await import" -- src/core/pglite-engine.ts src/core/postgres-engine.ts`.
-  Hoist the ones on hot paths, keeping both engines in lockstep.
+- [x] **P2 — audit the remaining `await import()` sites on the engine path.** Done.
+  Hoisted `retry.ts` (`isRetryableConnError`), `retry-matcher.ts`
+  (`isConnectionEndedError`), and `search/recency-decay.ts` in both engines.
+  Measured rather than assumed: `retry.ts` and `retry-matcher.ts` were **already**
+  in each engine's static graph (`retry.ts` re-exports from `retry-matcher.ts`), so
+  those two `await import()`s were module-cache hits that loaded nothing — free
+  cleanup, not crash fixes. `search/recency-decay.ts` is a pure leaf (zero imports,
+  no top-level side effects), so the whole change moves each engine's static graph
+  by exactly **+1 module** (pglite 37→38, postgres 41→42). Deliberately left lazy:
+  `ai/gateway.ts` (closure ~51 modules — the whole AI SDK plus four `@ai-sdk/*`
+  packages and `zod`) and the two audit writers (`db-disconnect-audit.ts`,
+  `pool-recovery-audit.ts`, postgres-only, reachable only with a live Postgres
+  connection the non-e2e suite never opens).
 - [ ] **P3 — reproduce Windows runner crashes at the right scale.** Single-file and
   five-file runs pass green even with a known trigger present; it took 12
   database-backed files in one `bun test` invocation to crash. A green small repro
   is not evidence that a trigger is gone. Note also that `git log -S` will not find
   a dynamic-to-static import change, because the pickaxe counts occurrences of the
   string and the count does not change. Use `git log -G`.
+
+## v0.42.67.3 follow-ups (engine-path dynamic-import audit)
+
+Filed as follow-ups from v0.42.67.3, which completed the P2 audit above and
+hoisted `retry.ts`, `retry-matcher.ts`, and `search/recency-decay.ts`.
+
+- [ ] **P2 — extract the two gateway accessors used on the engine path into a leaf
+  module.** This is now the highest-risk remaining site, and hoisting cannot fix it.
+  `await import('./ai/gateway.ts')` appears at four places across the two engines;
+  the one in `_upsertChunksOnce` (pglite ~2341, postgres ~2457) is on the
+  **chunk-upsert hot path** with the PGLite WASM instance live — the same profile as
+  the `mergeOntologyFact` bug v0.42.67.1 fixed. The one in `initSchema()` fires on
+  every engine boot. Hoisting `gateway.ts` is not an option (it statically imports
+  `ai`, `@ai-sdk/{openai,google,anthropic,openai-compatible}` and `zod`, so every
+  engine init and every test would pay for the whole tree). But the engines only use
+  `getEmbeddingModel()` and `getEmbeddingDimensions()`, both one-liners over
+  `requireConfig()`. Move those two accessors (and the config they read) into a leaf
+  module the engines can import statically, and the lazy `gateway.ts` load disappears
+  from the engine path entirely without pulling the SDK forward.
+- [ ] **P3 — the 12-file repro did not reproduce and needs re-establishing.** Two full
+  runs of the documented 12-file command on `claude/hungry-edison-8bb1cd`, with the
+  ontology trigger present *and* exercised (4 of the 12 files, 48 references), both
+  returned exit 0 / 66 pass / 0 fail / totals printed / zero segfault-panic markers
+  (221s and 336s). So there is currently **no red baseline to A/B against**, and the
+  hoists above are hardening, not demonstrated crash fixes. Two candidate
+  explanations, untested: the crash is load-dependent (the original observation died
+  on the 10th file at 2.78GB peak, on a box that routinely runs 5+ concurrent agent
+  sessions — 16-17 `bun` processes were live during these runs too), or it is
+  lineage-dependent (`fd8be831`, the original A/B base, is not an ancestor of this
+  branch). Worth running the 12-file set at `fd8be831` in a throwaway worktree to
+  tell those apart before trusting any future single-sample A/B on this class of bug.
 
 ## v0.42.67.0 follow-ups (Windows build tooling)
 
