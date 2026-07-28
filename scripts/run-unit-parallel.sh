@@ -23,7 +23,97 @@
 
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+# Resolve the script dir BEFORE cd'ing, so sourcing below is cd-independent.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+# Hard-fail on a missing helper. This script runs under `set -uo pipefail`
+# WITHOUT `-e`, so a failed `.` would otherwise be a warning on stderr and
+# then a cascade of "command not found" as every teardown call silently did
+# nothing — i.e. exactly the leak this file exists to prevent, reintroduced
+# quietly. Copying the scripts somewhere without lib/ must be loud.
+PROC_TREE_LIB="$SCRIPT_DIR/lib/proc-tree.sh"
+if [ ! -r "$PROC_TREE_LIB" ]; then
+  echo "ERROR: missing required helper: $PROC_TREE_LIB" >&2
+  exit 2
+fi
+# shellcheck source=scripts/lib/proc-tree.sh
+. "$PROC_TREE_LIB"
+
+# ──────────────────────────────────────────────────────────────────────────
+# Run-level teardown state.
+#
+# Killing the top-level `bun run test` only kills bun: this script is then an
+# orphan but still very much ALIVE, so it walks on through the shards and into
+# the serial pass. run-serial-tests.sh's own watchdog cannot save us there —
+# its parent (us) is still running. Somebody has to notice the run itself is
+# gone, and that somebody is this script.
+#
+# Env knobs mirror run-serial-tests.sh:
+#   GBRAIN_TEST_WATCH_PID / GBRAIN_TEST_NO_PARENT_WATCH / GBRAIN_TEST_WATCH_INTERVAL
+# ──────────────────────────────────────────────────────────────────────────
+SELF_PID=$$
+WATCH_PID="${GBRAIN_TEST_WATCH_PID:-$PPID}"
+if [ "${GBRAIN_TEST_NO_PARENT_WATCH:-0}" = "1" ]; then
+  WATCH_PID=""
+fi
+WATCH_INTERVAL="${GBRAIN_TEST_WATCH_INTERVAL:-2}"
+
+# Fail safe on an unobservable parent — see the long note in
+# run-serial-tests.sh. Short version: `bun run test` gives its child bash a
+# PPID of 1 on Windows and `kill -0 1` fails there, so a watchdog that trusted
+# $PPID would abort every run instantly. When the parent cannot be observed we
+# disable the watchdog; the run is then still covered, because our EXIT/TERM
+# trap tears the serial pass down when we die politely, and run-serial-tests.sh
+# watches US (a real, observable pid) for the SIGKILL case.
+if [ -n "$WATCH_PID" ]; then
+  if [ "$WATCH_PID" -le 1 ] 2>/dev/null || ! proc_alive "$WATCH_PID"; then
+    WATCH_PID=""
+  fi
+fi
+
+SHARD_PIDS=()
+SERIAL_PID=""
+HB_PID=""
+WATCHDOG_PID=""
+
+# owned_pids: every pid this run is responsible for, as a flat list.
+owned_pids() {
+  if [ "${#SHARD_PIDS[@]}" -gt 0 ]; then
+    printf '%s\n' "${SHARD_PIDS[@]}"
+  fi
+  printf '%s\n%s\n%s\n' "$SERIAL_PID" "$WATCHDOG_PID" "$HB_PID"
+}
+
+# teardown_children: reap everything this run owns. Safe to call repeatedly
+# and from a trap; never changes the caller's exit status.
+teardown_children() {
+  # shellcheck disable=SC2046 — intentional word splitting of the pid list.
+  set -- $(owned_pids)
+  [ "$#" -gt 0 ] || return 0
+  # Happy path: on a normal run every child has already exited. Bail out on a
+  # builtin-only liveness check so the common case never pays for `ps`, which
+  # costs 9-12 SECONDS on a loaded Windows box.
+  proc_any_alive "$@" || return 0
+  proc_kill_forest TERM "$@"
+  local waited=0
+  while [ "$waited" -lt 3 ]; do
+    proc_any_alive "$@" || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  proc_kill_forest KILL "$@"
+  return 0
+}
+
+cleanup_run() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  teardown_children
+  return "$rc"
+}
+trap cleanup_run EXIT
+trap 'cleanup_run; exit 143' INT TERM HUP
 
 # ──────────────────────────────────────────────────────────────────────────
 # CPU detection: Apple Silicon perf cores → Mac total physical → nproc → 4.
@@ -109,7 +199,7 @@ elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
 fi
 
 START_TS=$(date +%s)
-echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR" >&2
+echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR | watchdog=${WATCH_PID:-off}" >&2
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "[unit-parallel] dry-run: would spawn $N shards with the above settings."
@@ -123,8 +213,9 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 # Spawn shards. Each child captures its own exit code into a sentinel file
 # so $? is recoverable per-shard (we never trust `wait`'s aggregate value).
+# SHARD_PIDS is declared with the other teardown state at the top of the file
+# so the EXIT trap can reap shards even if we die during the spawn loop.
 # ──────────────────────────────────────────────────────────────────────────
-SHARD_PIDS=()
 for i in $(seq 1 "$N"); do
   (
     SHARD_LOG="$LOG_DIR/shard-$i.log"
@@ -229,8 +320,20 @@ fmt_elapsed() {
 
 heartbeat() {
   local hb_start=$(date +%s)
+  local hb_sleep=""
+  # Own the sleep so we can cancel it from a trap. A shell parked in a
+  # FOREGROUND `sleep` does not forward SIGTERM to it: the shell dies, the
+  # sleep reparents to init and lingers. That leaked exactly one orphan sleep
+  # per invocation, which CI's end-of-job orphan sweep reported as unnamed
+  # test failures. The previous defence was `pkill -P`, which does not exist
+  # on Git-Bash/Cygwin — a silent no-op on the very platform that needed it.
+  # Backgrounding the sleep and waiting on it makes the trap effective
+  # everywhere, with no dependency on an external tool.
+  trap 'kill "$hb_sleep" 2>/dev/null; exit 0' TERM INT
   while true; do
-    sleep 10
+    sleep 10 &
+    hb_sleep=$!
+    wait "$hb_sleep" 2>/dev/null
     local line=""
     local now; now=$(date +%s)
     local hb_elapsed=$((now - hb_start))
@@ -271,25 +374,51 @@ heartbeat() {
 }
 heartbeat &
 HB_PID=$!
-# v0.41.11.0 cleanup: pkill children FIRST, then kill heartbeat. If we
-# kill the heartbeat shell first, its current `sleep 10` is reparented
-# to init/launchd and pkill -P can no longer find it (orphan). Order:
-# children first while the parent PID is still findable, then parent.
-# Known bash quirk: SIGTERM to a shell sleeping inside `sleep` doesn't
-# propagate to the sleep child before the wait returns. Without this,
-# each invocation of this script leaks ONE orphan sleep; CI's "orphan
-# process cleanup" at end-of-job reports them as (unnamed) test failures.
-# Seen on the garrytan/port-pr-1406 PR, 2 CI runs in a row, 6 orphans
-# matching the 6 invocations in test/scripts/run-unit-parallel.test.ts.
-trap 'pkill -P "$HB_PID" 2>/dev/null; kill "$HB_PID" 2>/dev/null; wait "$HB_PID" 2>/dev/null' EXIT
+
+# ──────────────────────────────────────────────────────────────────────────
+# Parent watchdog. Killing `bun run test` kills bun and nothing else — this
+# script survives as an orphan and keeps driving shards and (much worse) the
+# serial pass, which spawns one fresh bun per file for dozens of files. Poll
+# the pid that owns the run and tear the whole thing down when it goes away.
+#
+# The re-check after a short sleep is cheap insurance against a transient ps
+# hiccup or a pid that is momentarily unsignalable, so we never abort a
+# healthy run on a single bad sample.
+# ──────────────────────────────────────────────────────────────────────────
+parent_watchdog() {
+  local wd_sleep=""
+  # Same self-cancelling sleep as the heartbeat, for the same reason: a
+  # foreground `sleep` would outlive this shell as an orphan.
+  trap 'kill "$wd_sleep" 2>/dev/null; exit 0' TERM INT
+  while true; do
+    sleep "$WATCH_INTERVAL" &
+    wd_sleep=$!
+    wait "$wd_sleep" 2>/dev/null
+    if ! proc_alive "$WATCH_PID"; then
+      sleep 1
+      if proc_alive "$WATCH_PID"; then continue; fi
+      echo "" >&2
+      echo "[unit-parallel] owning run (pid $WATCH_PID) is gone — aborting and tearing down" >&2
+      kill -TERM "$SELF_PID" 2>/dev/null || true
+      return 0
+    fi
+  done
+}
+if [ -n "$WATCH_PID" ]; then
+  parent_watchdog &
+  WATCHDOG_PID=$!
+fi
 
 # Wait for every shard. Don't care about wait's exit code.
 for pid in "${SHARD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 
-pkill -P "$HB_PID" 2>/dev/null
-kill "$HB_PID" 2>/dev/null
+# The heartbeat cancels its own sleep from its TERM trap (see above), so a
+# plain builtin `kill` is enough and leaves nothing behind. Deliberately no
+# `ps` sweep on this path: it runs on every successful run, and `ps -e` costs
+# 9-12 seconds on a loaded Windows box.
+kill -TERM "$HB_PID" 2>/dev/null
 wait "$HB_PID" 2>/dev/null
-trap - EXIT
+HB_PID=""
 
 # ──────────────────────────────────────────────────────────────────────────
 # Aggregate failures (single writer; serial; never concurrent).
@@ -374,8 +503,21 @@ SERIAL_FILES_COUNT=0
 SERIAL_FILES_COUNT=$(find test -name '*.serial.test.ts' -not -path 'test/e2e/*' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$SERIAL_FILES_COUNT" -gt 0 ]; then
   echo "════════════ serial pass ($SERIAL_FILES_COUNT files) ════════════"
-  bash scripts/run-serial-tests.sh > "$LOG_DIR/serial.log" 2>&1
+  # Supervised the same way the shards are: backgrounded, pid retained, reaped
+  # children-first by the EXIT/TERM trap. Run synchronously via `wait` so the
+  # trap can interrupt it — a foreground child would leave this shell blocked
+  # in a syscall with its bun grandchild unreachable, which is how the serial
+  # pass used to survive its own run being killed.
+  #
+  # GBRAIN_TEST_WATCH_PID pins the watch to *this* script rather than whatever
+  # the child's $PPID happens to be, so intermediate subshells cannot mask a
+  # dead run.
+  GBRAIN_TEST_WATCH_PID="$SELF_PID" \
+    bash scripts/run-serial-tests.sh > "$LOG_DIR/serial.log" 2>&1 &
+  SERIAL_PID=$!
+  wait "$SERIAL_PID" 2>/dev/null
   SERIAL_RC=$?
+  SERIAL_PID=""
   cat "$LOG_DIR/serial.log"
   if [ "$SERIAL_RC" != "0" ]; then
     TOTAL_RC=1
@@ -402,6 +544,16 @@ if [ "$SERIAL_FILES_COUNT" -gt 0 ]; then
     TOTAL_PASS=$((TOTAL_PASS + s_pass))
     echo "serial: pass=$s_pass rc=0" >> "$SUMMARY_FILE"
   fi
+fi
+
+# Normal completion: retire the watchdog here, so by the time the EXIT trap
+# runs nothing this script owns is still alive and teardown_children can
+# short-circuit on its builtin liveness check. Leaving it running would make
+# every successful run pay for a `ps` sweep it does not need.
+if [ -n "$WATCHDOG_PID" ]; then
+  kill -TERM "$WATCHDOG_PID" 2>/dev/null
+  wait "$WATCHDOG_PID" 2>/dev/null
+  WATCHDOG_PID=""
 fi
 
 END_TS=$(date +%s)

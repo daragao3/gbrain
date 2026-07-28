@@ -30,6 +30,9 @@ const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const PARALLEL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-unit-parallel.sh');
 const SHARD_SH_SRC = resolve(REPO_ROOT, 'scripts/run-unit-shard.sh');
 const SERIAL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-serial-tests.sh');
+// Both runners source this for process-tree teardown and refuse to start
+// without it, so the tempdir fixture has to mirror the real scripts/ layout.
+const PROC_TREE_SH_SRC = resolve(REPO_ROOT, 'scripts/lib/proc-tree.sh');
 
 let TMPROOT: string;
 
@@ -38,15 +41,18 @@ beforeAll(() => {
   // and 4 fixture test files (3 pass, 1 fail). The wrapper's `find test`
   // expression will pick them up via cwd.
   TMPROOT = mkdtempSync(join(tmpdir(), 'gbrain-parallel-test-'));
-  mkdirSync(join(TMPROOT, 'scripts'), { recursive: true });
+  mkdirSync(join(TMPROOT, 'scripts', 'lib'), { recursive: true });
   mkdirSync(join(TMPROOT, 'test'), { recursive: true });
 
-  copyFileSync(PARALLEL_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-parallel.sh'));
-  copyFileSync(SHARD_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-shard.sh'));
-  copyFileSync(SERIAL_SH_SRC, join(TMPROOT, 'scripts', 'run-serial-tests.sh'));
-  chmodSync(join(TMPROOT, 'scripts', 'run-unit-parallel.sh'), 0o755);
-  chmodSync(join(TMPROOT, 'scripts', 'run-unit-shard.sh'), 0o755);
-  chmodSync(join(TMPROOT, 'scripts', 'run-serial-tests.sh'), 0o755);
+  for (const [src, dest] of [
+    [PARALLEL_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-parallel.sh')],
+    [SHARD_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-shard.sh')],
+    [SERIAL_SH_SRC, join(TMPROOT, 'scripts', 'run-serial-tests.sh')],
+    [PROC_TREE_SH_SRC, join(TMPROOT, 'scripts', 'lib', 'proc-tree.sh')],
+  ] as const) {
+    copyFileSync(src, dest);
+    chmodSync(dest, 0o755);
+  }
 
   // 3 passing + 1 failing test file. Round-robin sharding will land
   // them across 2 shards so we exercise the multi-shard merge path.
