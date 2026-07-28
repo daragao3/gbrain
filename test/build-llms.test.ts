@@ -7,6 +7,17 @@ import { SECTIONS, FULL_SIZE_BUDGET } from "../scripts/llms-config";
 
 const repoRoot = join(import.meta.dir, "..");
 
+// Compare bundle CONTENT, not bytes. On Windows `core.autocrlf=true` (the
+// Git-for-Windows installer default) checks the committed bundles out as CRLF,
+// while the generator emits its own scaffolding as LF — so a byte compare fails
+// on a checkout with zero real drift. `.gitattributes` can't fix this here: it
+// pins `*.sh` (and `*.md`), not the `.txt` bundles, and a pin only affects
+// FUTURE checkouts anyway, so contributors cloned before it landed stay broken.
+// Linux CI checks out LF, so this is an identity transform there and can never
+// be caught upstream. Normalizing keeps the staleness signal intact — any real
+// content change still fails.
+const normalizeEol = (s: string) => s.replace(/\r\n/g, "\n");
+
 describe("build-llms generator", () => {
   // Case 1 — every config path resolves on disk. Catches rename-induced 404s.
   test("every configured path exists on disk", () => {
@@ -63,8 +74,9 @@ describe("build-llms generator", () => {
 
     const helpMsg =
       "Run `bun run build:llms` and commit the updated output before shipping.";
-    expect(committedLlms, helpMsg).toBe(llmsTxt);
-    expect(committedFull, helpMsg).toBe(llmsFullTxt);
+    // Line endings normalized on both sides — see normalizeEol above.
+    expect(normalizeEol(committedLlms), helpMsg).toBe(normalizeEol(llmsTxt));
+    expect(normalizeEol(committedFull), helpMsg).toBe(normalizeEol(llmsFullTxt));
   });
 
   // Case 5 — content contract. Prevents silent removal of critical sections or
