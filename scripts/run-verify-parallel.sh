@@ -53,6 +53,7 @@ CHECKS=(
   "check:no-pii-agent-voice"
   "check:synthetic-corpus-privacy"
   "check:skill-brain-first"
+  "check:skill-frontmatter-byte-0"
   "check:fuzz-purity"
   "check:operations-filter-bypass"
   "check:gateway-routed"

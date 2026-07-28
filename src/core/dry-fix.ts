@@ -341,14 +341,38 @@ export function autoFixDryViolations(
  *
  * Exported for unit tests.
  */
+/**
+ * True when a `split('\n')` line is a YAML frontmatter fence (`---`),
+ * tolerating the trailing `\r` that CRLF checkouts leave behind.
+ */
+function isFenceLine(line: string | undefined): boolean {
+  return /^---\s*$/.test(line ?? '');
+}
+
+/**
+ * The dominant end-of-line sequence in `content`. Used so an inserted
+ * callout matches the file it lands in instead of introducing a lone LF
+ * line into an otherwise-CRLF file.
+ */
+function detectEol(content: string): '\r\n' | '\n' {
+  return content.includes('\r\n') ? '\r\n' : '\n';
+}
+
 export function findInsertionLine(content: string): number {
   const lines = content.split('\n');
   let cursor = 0;
 
   // Step 1: Skip leading frontmatter fence if present.
-  if (lines[0] === '---') {
+  //
+  // CRLF-tolerant. `content.split('\n')` leaves a trailing `\r` on every
+  // line of a Windows checkout (`core.autocrlf=true` is the default), so a
+  // strict `=== '---'` compare never matches `'---\r'`. That silently
+  // skipped the whole frontmatter step and returned 0 — splicing the
+  // Convention callout ABOVE the opening fence, which makes the YAML
+  // unparseable and drops the skill's `triggers:` + `brain_first:`.
+  if (isFenceLine(lines[0])) {
     for (let i = 1; i < lines.length; i++) {
-      if (lines[i] === '---') {
+      if (isFenceLine(lines[i])) {
         cursor = i + 1;
         break;
       }
@@ -436,9 +460,14 @@ function attemptInsertFix(
   // Build the new file content: splice [callout, ''] at insertAt.
   // The blank line after the callout keeps the surrounding block
   // structure readable.
+  //
+  // `split('\n')` keeps a trailing `\r` on each line of a CRLF file, so the
+  // two lines we synthesize get the same `\r` padding — otherwise they'd be
+  // the only LF-terminated lines in an otherwise-CRLF file.
+  const cr = detectEol(content) === '\r\n' ? '\r' : '';
   const before = lines.slice(0, insertAt);
   const after = lines.slice(insertAt);
-  const inserted = [...before, mrp.callout, '', ...after];
+  const inserted = [...before, mrp.callout + cr, cr, ...after];
   let next = inserted.join('\n');
   if (content.endsWith('\n') && !next.endsWith('\n')) {
     next += '\n';

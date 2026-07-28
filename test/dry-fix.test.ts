@@ -10,7 +10,9 @@ import {
   expandBullet,
   expandBlockquote,
   expandParagraph,
+  findInsertionLine,
 } from "../src/core/dry-fix.ts";
+import { parseSkillFrontmatter } from "../src/core/skill-frontmatter.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -281,4 +283,110 @@ describe("autoFixDryViolations", () => {
     // suppressed by proximity + filing-rule delegation
     expect(report.fixed).toHaveLength(0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// CRLF regression — the byte-0 Convention-banner corruption
+//
+// On a Windows checkout (`core.autocrlf=true`, the default) every SKILL.md is
+// stored with CRLF. `findInsertionLine` compared `lines[0] === '---'` against
+// `'---\r'`, never matched, and returned 0 — so `doctor --fix` spliced the
+// brain-first Convention callout ABOVE the opening fence. That makes the YAML
+// unparseable, which drops the skill's `triggers:` and `brain_first:` and
+// empties its description in `list_skills` / `get_skill`.
+//
+// Observed 2026-07-28 on skills/functional-area-resolver + skills/
+// strategic-reading — both of which already declared `brain_first: exempt`,
+// invisible for the same CRLF reason.
+// ---------------------------------------------------------------------------
+
+describe("findInsertionLine — CRLF frontmatter", () => {
+  const LF = "---\nname: demo\ndescription: d\n---\n\n# Demo\n\nIntro paragraph.\n\n## Section\n";
+
+  test("LF: insertion lands after the frontmatter fence", () => {
+    expect(findInsertionLine(LF)).toBeGreaterThan(3);
+  });
+
+  test("CRLF: insertion lands after the frontmatter fence, never at byte 0", () => {
+    const crlf = LF.replace(/\n/g, "\r\n");
+    const at = findInsertionLine(crlf);
+    expect(at).toBeGreaterThan(3);
+    expect(at).toBe(findInsertionLine(LF));
+  });
+
+  test("CRLF file with no H1 still skips past the fence", () => {
+    const src = "---\r\nname: demo\r\n---\r\n\r\n## Section\r\n";
+    // 0:'---' 1:'name' 2:'---' -> first content line is 3
+    expect(findInsertionLine(src)).toBeGreaterThanOrEqual(3);
+  });
+
+  test("no frontmatter, leading H1: lands after the H1 paragraph", () => {
+    // 0:'# Title' 1:'' 2:'Body.' 3:'' -> 4
+    expect(findInsertionLine("# Title\n\nBody.\n")).toBe(4);
+  });
+
+  test("no frontmatter, no H1: lands at the top", () => {
+    expect(findInsertionLine("Body text.\n")).toBe(0);
+  });
+});
+
+describe("autoFixDryViolations — CRLF brain-first insert keeps frontmatter parseable", () => {
+  // A skill that trips brain-first detection (external pattern, no callout,
+  // no `brain_first: exempt`) so the INSERT path actually fires.
+  const BODY_LF =
+    "---\n" +
+    "name: crlf-demo\n" +
+    "description: A demo skill.\n" +
+    "triggers:\n" +
+    "  - \"crlf demo\"\n" +
+    "---\n" +
+    "\n" +
+    "# CRLF Demo\n" +
+    "\n" +
+    "Intro paragraph.\n" +
+    "\n" +
+    "## Steps\n" +
+    "\n" +
+    "Call perplexity to look things up.\n";
+
+  test("CRLF: callout is inserted BELOW the fence and frontmatter still parses", () => {
+    const dir = makeSkillsFixture(
+      { "crlf-demo": BODY_LF.replace(/\n/g, "\r\n") },
+      { gitInit: true }
+    );
+    autoFixDryViolations(dir);
+
+    const out = readFileSync(join(dir, "crlf-demo", "SKILL.md"), "utf-8");
+
+    // The load-bearing assertion: the file still opens with the fence.
+    expect(out.startsWith("---")).toBe(true);
+
+    // And the frontmatter is still machine-readable.
+    const fm = parseSkillFrontmatter(out);
+    expect(fm).not.toBeNull();
+    expect(fm!.name).toBe("crlf-demo");
+    expect(fm!.triggers).toEqual(["crlf demo"]);
+
+    // If a callout was added at all, it sits after the closing fence.
+    const calloutAt = out.indexOf("**Convention:**");
+    if (calloutAt !== -1) {
+      expect(calloutAt).toBeGreaterThan(out.indexOf("---", 3));
+      // and it matches the file's line endings rather than introducing a lone LF
+      expect(out).not.toMatch(/[^\r]\n>\s\*\*Convention:\*\*/);
+    }
+  }, 30_000); // git fixture init is slow on Windows
+
+  test("LF and CRLF inputs produce byte-identical output modulo line endings", () => {
+    const dirLf = makeSkillsFixture({ "crlf-demo": BODY_LF }, { gitInit: true });
+    const dirCrlf = makeSkillsFixture(
+      { "crlf-demo": BODY_LF.replace(/\n/g, "\r\n") },
+      { gitInit: true }
+    );
+    autoFixDryViolations(dirLf);
+    autoFixDryViolations(dirCrlf);
+
+    const a = readFileSync(join(dirLf, "crlf-demo", "SKILL.md"), "utf-8");
+    const b = readFileSync(join(dirCrlf, "crlf-demo", "SKILL.md"), "utf-8");
+    expect(b.replace(/\r\n/g, "\n")).toBe(a);
+  }, 30_000); // two git fixture inits
 });

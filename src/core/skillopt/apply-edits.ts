@@ -97,8 +97,12 @@ interface FrontmatterSplit {
  * fence, the whole text IS the body and bodyStart=0.
  */
 export function splitFrontmatter(text: string): FrontmatterSplit {
-  // Match the leading `---\n...frontmatter...\n---\n` block.
-  const m = text.match(/^---\n[\s\S]*?\n---\n/);
+  // Match the leading `---...frontmatter...---` block. CRLF-tolerant: on a
+  // Windows checkout an LF-only fence fails to match, bodyStart collapses to
+  // 0, and every subsequent body edit is free to land inside the YAML.
+  // Offsets are into the ORIGINAL text, so tolerate `\r` rather than
+  // normalizing it away (normalizing would shift every returned offset).
+  const m = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
   if (!m) return { body: text, bodyStart: 0 };
   return { body: text.slice(m[0].length), bodyStart: m[0].length };
 }

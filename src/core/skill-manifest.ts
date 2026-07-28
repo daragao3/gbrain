@@ -47,7 +47,10 @@ export interface ManifestLoadResult {
 function parseSkillName(skillMdPath: string): string | null {
   try {
     const content = readFileSync(skillMdPath, 'utf-8');
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    // CRLF-tolerant fence — see parseSkillFrontmatter. An LF-only pattern
+    // returns null for every SKILL.md in a Windows checkout, which silently
+    // drops each skill's declared `name:` and forces the dir-name fallback.
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!fmMatch) return null;
     const fm = fmMatch[1];
     // Match `name: foo` or `name: "foo"` or `name: 'foo'`
