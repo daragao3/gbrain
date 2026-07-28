@@ -2,6 +2,55 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.72.0] - 2026-07-28
+
+**Three GBrain features did nothing on Windows because a folder check compared paths using the wrong separator. All three work now.**
+
+Several parts of GBrain need to confirm that a file sits inside a folder they are allowed to touch. They do it by comparing the folder's path against the file's path. Windows separates folders with a backslash, while Mac and Linux use a forward slash. Three of these checks had the forward slash written directly into them. On Windows the comparison could never match, so the check concluded that a file was outside the folder even when it plainly sat inside, and the feature it guarded refused to do anything at all.
+
+Refusing is the safe direction for a check like this, so nothing slipped through. What happened instead is that three features quietly stopped working on Windows: syncing a subfolder of a repository, the archive crawler's list of folders it may scan, and copying skill files during harvest. Each one turned itself off and reported the refusal as though the user had asked for something out of bounds.
+
+The reason this went unnoticed for so long is in the test suite. Around twenty test files wrote their expected paths with forward slashes spelled out, so the tests agreed with the broken behavior instead of catching it. GBrain's automated tests run on Linux, where a forward slash is correct, so they could never have caught this on their own. Those expectations now build paths using whatever separator the machine actually uses, which makes the tests able to fail on Windows for the first time.
+
+### How to use it
+
+Nothing to configure. The three features work on Windows from this release:
+
+```bash
+gbrain sync --src-subpath docs
+```
+
+```bash
+gbrain doctor
+```
+
+If you are on Mac or Linux, this release changes nothing for you. The separator these checks now ask for is already the forward slash they had written in, so the behavior is identical.
+
+### Things to watch
+
+The test expectations now ask `path` for the separator, but the folder structure in each expectation stays written out by hand. That is deliberate. If an expectation built its whole path the same way the code under test does, it would stop being a check and start being a copy of the thing it is supposed to pin.
+
+This release fixes the three checks that had a feature visibly turned off behind them. Other places in the codebase still write the separator in the same way. Some of those are correct as written, because they compare page slugs rather than file paths, and a slug always uses a forward slash on every platform. The rest are listed in `TODOS.md` for a follow-up pass, so the remaining work is written down rather than rediscovered.
+
+### Itemized changes
+
+#### Fixed
+- **Syncing a subfolder of a repository refused every folder on Windows.** `src/commands/sync.ts` compared the sync scope against the repository root using a written-in forward slash, so every in-repository subfolder was read as sitting outside the repository. This is what made `gbrain sync --src-subpath` unusable on Windows.
+- **The archive crawler allowed nothing on Windows.** `normalizeOnePath` in `src/core/archive-crawler-config.ts` appended a forward slash to a resolved path, so the allowed-folders check matched nothing and denied every scan path it was given.
+- **Copying skill files refused every source on Windows.** The containment check in `src/core/skillpack/copy.ts` built its comparison prefix with a forward slash and compared it against a resolved native path, so harvest rejected every file it was asked to copy.
+
+#### Tests
+- **Path expectations across twenty two test files now use the machine's own separator.** This reconciles three separate passes over the suite into one form. Predicate groups build from the separator plus their parts, and single sites use it inline. Verified to produce the identical string on Mac and Linux, so this is a no-op there.
+- **New case pinning the containment boundary.** `test/skillpack-copy.test.ts` gained a sibling-folder case asserting that a folder named `foo` still does not match one named `foobar`. Without it, the separator fix could be mistaken for loosening the check rather than repairing it.
+- **Archive crawler coverage grew from nineteen cases to twenty six**, including the resolved-path comparison that the old expectations could not see.
+
+#### Documentation
+- `docs/architecture/KEY_FILES.md` updated for the archive crawler's path handling.
+
+## To take advantage of v0.42.72.0
+
+Nothing to do on Mac or Linux. If you run GBrain on Windows, the three features above start working after you upgrade, with no configuration change. If you had worked around the sync limitation by pointing GBrain at a subfolder as its own repository, you can go back to `--src-subpath` against the real repository root.
+
 ## [0.42.71.0] - 2026-07-28
 
 **A bug that silently blanked out every skill file on Windows has now been caught six times. This release adds a build check so it cannot come back a seventh.**
