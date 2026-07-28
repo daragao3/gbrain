@@ -29,7 +29,16 @@ const mockEngine: Partial<BrainEngine> = {
   executeRaw: async () => [],
 } as unknown as BrainEngine;
 
-describe('MinionSupervisor tini detection', () => {
+// POSIX-only: the fixtures below are a `#!/bin/sh` script named `tini` (no
+// .exe) discovered through a colon-separated PATH via `which`. None of that
+// is meaningful on Windows, where detectTini() short-circuits to '' by design
+// (tini is a POSIX container init with no Windows build).
+const describeTini = process.platform === 'win32' ? describe.skip : describe;
+if (process.platform === 'win32') {
+  console.log('Skipping supervisor tini tests (POSIX-only: which/shebang/PATH)');
+}
+
+describeTini('MinionSupervisor tini detection', () => {
   test('isTiniDetected = false when tini is not on PATH', async () => {
     // Empty PATH so `which tini` cannot find anything.
     await withEnv({ PATH: '' }, async () => {

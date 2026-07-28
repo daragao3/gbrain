@@ -2,6 +2,51 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.69.0] - 2026-07-28
+
+**On Windows, a test run now reports its results instead of coming back blank, and the background job supervisor stops looking for a program that has no Windows build.**
+
+Two Windows problems, both invisible on macOS and Linux. The first: a test run could stop partway through and report nothing at all. Not a list of failures, a blank report for every file in the batch, because the process died before it could print its summary. A batch of 253 files would come back as zero passed and zero failed, which meant the suite could not be used to tell whether a change was safe. The cause was a module being fetched on demand while the embedded database was running. That is fine on every other platform and wedges the test runner on Windows. The second: every time the background job supervisor started, it went looking for `tini`, a Linux container helper with no Windows build, by running a command that does not exist on Windows either. It printed noise on the way to concluding what it could have known immediately.
+
+### How to use it
+
+```bash
+gbrain upgrade
+```
+
+No schema migrations. Nothing to reconfigure.
+
+### Things to watch
+
+If you work on GBrain on Windows, a crashed batch no longer takes the surrounding results down with it. The unit runner now splits its file list into groups of 25 there, so a crash costs you one group instead of the whole shard, and the files in that group are named so you know what went unmeasured. On macOS and Linux the behavior is unchanged, with splitting off by default. Set the group size yourself if you want:
+
+```bash
+GBRAIN_TEST_CHUNK_SIZE=50 bash scripts/run-unit-shard.sh
+```
+
+`0` turns splitting off.
+
+The underlying crash has more triggers than the one fixed here. Splitting the file list is what keeps a remaining trigger from erasing an entire shard's results.
+
+### Itemized changes
+
+#### Fixed
+- **A test run on Windows reports its results.** `mergeOntologyFact` in `src/core/pglite-engine.ts` and `src/core/postgres-engine.ts` loaded `chronicle/ontology.ts` on demand from inside an async method. Issued while the embedded database instance was live, that load took the whole test process down before it could print a summary, discarding the pass and fail counts for every file in the run. Both engines now load the module up front, in step with each other. `test/chronicle-context.test.ts` went from crashing the run to 2 passing.
+- **The job supervisor stops probing for a Linux-only program on Windows.** `detectTini` in `src/core/minions/spawn-helpers.ts` shelled out to `which`, which is not a Windows command, to find `tini`, which has no Windows build. It now answers immediately on Windows, and elsewhere the probe no longer leaks its own "not found" chatter into output.
+
+#### Changed
+- **A crashed batch no longer erases a whole shard's results.** `scripts/run-unit-shard.sh` splits its file list into bounded groups on Windows and names the files in a group that crashed, instead of letting one crash silently report the entire shard as zero passed and zero failed. Off by default elsewhere, so existing behavior is unchanged. `GBRAIN_TEST_CHUNK_SIZE` overrides the group size.
+
+#### Tests
+- **The supervisor's `tini` tests skip where they cannot apply.** `test/supervisor-tini.test.ts` builds a shell script with no file extension and finds it through a colon separated search path. None of that means anything on Windows, where the probe is answered without looking, so the block now skips there rather than failing on fixtures the platform cannot represent.
+
+## To take advantage of v0.42.69.0
+
+`gbrain upgrade`. No new schema migrations.
+
+1. **If you run background jobs on Windows:** nothing to do. The startup probe is gone.
+2. **If you contribute to GBrain on Windows:** `bash scripts/run-unit-shard.sh` now splits its file list so one crashed batch cannot zero out a shard. Read the group numbers in the output to see what was measured.
+
 ## [0.42.68.0] - 2026-07-28
 
 **On Windows, the bundled schema packs load instead of coming back empty, and a new build check stops the underlying path bug from returning.**

@@ -14,6 +14,10 @@ import type {
   SourceRow,
 } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
+// Static import, mirroring pglite-engine.ts (engine parity): the former
+// `await import(...)` inside mergeOntologyFact deadlocks the bun test runner on
+// Windows. No cycle risk: ontology.ts only pulls ingestion/types.ts.
+import { valueHash, normalizeDimension, isNovelDimension } from './chronicle/ontology.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
@@ -3883,7 +3887,6 @@ export class PostgresEngine implements BrainEngine {
   async mergeOntologyFact(obs: OntologyObservationInput): Promise<OntologyMergeResult> {
     const sql = this.sql;
     const sourceId = obs.sourceId ?? 'default';
-    const { valueHash, normalizeDimension, isNovelDimension } = await import('./chronicle/ontology.ts');
     const dimension = normalizeDimension(obs.dimension);
     const vh = valueHash(obs.value);
     const conf = obs.confidence ?? 0.7;
