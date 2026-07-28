@@ -2,6 +2,60 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.71.0] - 2026-07-28
+
+**A bug that silently blanked out every skill file on Windows has now been caught six times. This release adds a build check so it cannot come back a seventh.**
+
+Skill files start with a block of settings fenced by three dashes and a line break. GBrain reads that block to learn a skill's name, its triggers, and what it is allowed to do. Windows ends lines with two characters where Mac and Linux use one, and several of GBrain's readers only looked for the one-character form. When they met a Windows file they did not report an error. They reported that the file had no settings at all. Skills lost their names, their declared triggers went unseen, and the checks meant to catch that reported everything was fine. The same mistake had been found and fixed five separate times in different files. It kept returning because nothing was watching for it, and because it is invisible on Mac and Linux, so the automated test suite could never see it either.
+
+A new check now reads the code itself and fails the build when it finds a reader written the fragile way. Six more places that still had the bug were fixed along with it.
+
+### How to use it
+
+The check runs as part of the normal gate:
+
+```bash
+bun run verify
+```
+
+To run just this one:
+
+```bash
+bash scripts/check-frontmatter-fence.sh
+```
+
+It prints the file, the line, and the two accepted fixes when it finds something.
+
+### What it looks at
+
+The three-dash-newline sequence appears in hundreds of places in the codebase that are perfectly fine, because building a file and reading one are different jobs. The check only looks at code that reads from the very start of a file, which is the only place the bug can hide. Everything that assembles content is left alone. Comments are stripped first, so the notes explaining this rule do not trip it.
+
+Some code is meant to require the one-character form, because it is checking GBrain's own output and that output is always written the one-character way. Those lines carry a `frontmatter-fence-guard-ok` comment with the reason, and the check honors it.
+
+### Things to watch
+
+This release is for people working on GBrain itself. Nothing changes for running GBrain, and there are no schema migrations.
+
+If you write a new file reader and the build stops on it, the message names both accepted fixes. Prefer converting line endings once up front when the values you read get used later, because that also strips a stray carriage return off the end of each one. Relax the pattern instead when your function hands back a position inside the original text, because converting would shift every position.
+
+### Itemized changes
+
+#### Added
+- **Build check for fragile settings-block readers.** `scripts/check-frontmatter-fence.sh` fails the build on the two shapes that read from the start of a file with a one-character line break. It is wired into `bun run verify` and `check:all`. A conversion on a nearby preceding line satisfies it, and a `frontmatter-fence-guard-ok` comment opts a line out, either at the end of the line or in the comment block directly above it.
+- **Test pinning the check.** `test/check-frontmatter-fence.test.ts` plants each broken shape and each acceptable shape in a temporary folder and asserts the check catches the first group and passes the second. It also asserts the check is wired into the gate, and that the real source tree is clean, because the automated test suite runs on Linux where this bug cannot be reproduced.
+
+#### Fixed
+- **Skill files kept their settings block in the body on Windows.** `stripFrontmatter` in `src/core/skill-brain-first.ts` returned the file unchanged instead of removing the block, so a tool listed in the settings counted as the skill reaching outside the brain. That is the exact false report the function exists to prevent.
+- **Leftover settings blocks survived in enriched pages.** `parseSynthesis` in `src/core/enrich/thin.ts` tested for the block in a way that is false for any Windows-style input.
+- **Two skill checks passed by reading nothing.** `test/resolver.test.ts` and `test/skills-conformance.test.ts` read real skill files off disk and now convert line endings first. Before this, on Windows one threw for every skill in the tree and the other silently let settings leak into the text it was scanning.
+
+#### Documentation
+- `CLAUDE.md` names the check under the existing rule, so the rule and the thing enforcing it sit together.
+
+## To take advantage of v0.42.71.0
+
+Nothing to do. This adds a build check and fixes readers behind it. If you develop on Windows, run `bun run verify` once to confirm the gate is green on your machine.
+
 ## [0.42.70.0] - 2026-07-28
 
 **On Windows, `bun run verify` now actually runs. All 32 build checks start, instead of quitting before they read a single file.**
