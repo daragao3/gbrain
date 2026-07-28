@@ -12,7 +12,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'fs';
-import { join } from 'path';
+import { join, sep } from 'path';
 import { tmpdir } from 'os';
 
 import { __testing, type PendingHostWorkEntry } from '../src/commands/migrations/v0_11_0.ts';
@@ -279,11 +279,13 @@ describe('findAgentsMdFiles + findCronManifests scoping', () => {
     writeFileSync(join(tmp, 'project', 'AGENTS.md'), '# project\n');
     // No --host-dir
     const found = findAgentsMdFiles(DEFAULT_OPTS);
-    expect(found.some(p => p.includes('/project/'))).toBe(false);
+    // Native separators: a '/project/' literal would match nothing on Windows,
+    // making this guard pass vacuously.
+    expect(found.some(p => p.includes(sep + 'project' + sep))).toBe(false);
 
     // With --host-dir
     const foundWithHostDir = findAgentsMdFiles({ ...DEFAULT_OPTS, hostDir: join(tmp, 'project') });
-    expect(foundWithHostDir.some(p => p.includes('/project/'))).toBe(true);
+    expect(foundWithHostDir.some(p => p.includes(sep + 'project' + sep))).toBe(true);
   });
 
   test('findCronManifests picks up cron/jobs.json under scoped roots', () => {

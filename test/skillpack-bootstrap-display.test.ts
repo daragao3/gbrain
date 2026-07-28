@@ -54,7 +54,7 @@ describe('buildBootstrapDisplay', () => {
       workspace: '/ws',
     });
     expect(r.shown).toBe(false);
-    expect(r.bootstrapPath).toContain('runbooks/bootstrap.md');
+    expect(r.bootstrapPath).toContain(join('runbooks', 'bootstrap.md'));
   });
 
   test('returns shown=false when bootstrap.md is empty (whitespace only)', () => {

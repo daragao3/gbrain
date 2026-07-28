@@ -3,6 +3,7 @@
 // so the cross-discriminator surface stays MECE.
 
 import { describe, test, expect } from 'bun:test';
+import { join } from 'path';
 import {
   detectArtifactKind,
   targetDirForKind,
@@ -17,8 +18,10 @@ describe('v0.39 T14 — artifact abstraction', () => {
   });
 
   test('targetDirForKind routes to distinct subdirectories', () => {
-    expect(targetDirForKind('schemapack', '/home/u/.gbrain')).toBe('/home/u/.gbrain/schema-packs');
-    expect(targetDirForKind('skillpack', '/home/u/.gbrain')).toBe('/home/u/.gbrain/skillpacks');
+    // Build the expectation with join(), the same way targetDirForKind does,
+    // so it carries native separators (byte-identical on POSIX).
+    expect(targetDirForKind('schemapack', '/home/u/.gbrain')).toBe(join('/home/u/.gbrain', 'schema-packs'));
+    expect(targetDirForKind('skillpack', '/home/u/.gbrain')).toBe(join('/home/u/.gbrain', 'skillpacks'));
   });
 
   test('validateManifestByKind: schemapack happy path', () => {
