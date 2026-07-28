@@ -97,8 +97,20 @@ interface FrontmatterSplit {
  * fence, the whole text IS the body and bodyStart=0.
  */
 export function splitFrontmatter(text: string): FrontmatterSplit {
-  // Match the leading `---\n...frontmatter...\n---\n` block.
-  const m = text.match(/^---\n[\s\S]*?\n---\n/);
+  // Match the leading `---\n...frontmatter...\n---\n` block, CRLF-tolerant.
+  //
+  // An LF-only fence cannot match a file that starts `---\r\n`, so on Windows
+  // (`core.autocrlf=true`) every SKILL.md parsed as "no frontmatter": bodyStart
+  // stayed 0 and the whole file — frontmatter included — became the mutable
+  // body, defeating the D5 frontmatter-immutability guarantee.
+  //
+  // Deliberately relaxing the fence rather than normalizing the text: bodyStart
+  // is an offset into the ORIGINAL `text` (the caller reassembles with
+  // `text.slice(0, bodyStart)`), so rewriting line endings here would corrupt
+  // every offset. Downstream body matching already tolerates a trailing `\r`
+  // (`findHeadingMatches` ends with `\s*$`; `findExactLineMatches` compares
+  // `line.trim()`).
+  const m = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
   if (!m) return { body: text, bodyStart: 0 };
   return { body: text.slice(m[0].length), bodyStart: m[0].length };
 }

@@ -47,7 +47,15 @@ export interface ManifestLoadResult {
 function parseSkillName(skillMdPath: string): string | null {
   try {
     const content = readFileSync(skillMdPath, 'utf-8');
-    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    // Normalize line endings BEFORE matching. An LF-only fence (`^---\n`)
+    // cannot match a CRLF file, so every SKILL.md checked out on Windows
+    // (`core.autocrlf=true` is the Git-for-Windows default) parses as
+    // "no frontmatter" — silently, with no error — and every derived
+    // manifest entry falls back to the dirname instead of `name:`.
+    // Normalizing (rather than just relaxing the fence to `\r?\n`) also
+    // keeps a trailing `\r` out of the captured value.
+    const normalized = content.replace(/\r\n/g, '\n');
+    const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---/);
     if (!fmMatch) return null;
     const fm = fmMatch[1];
     // Match `name: foo` or `name: "foo"` or `name: 'foo'`

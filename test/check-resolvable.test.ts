@@ -382,6 +382,73 @@ describe("DRY detection — checkResolvable", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// CRLF tolerance
+//
+// An LF-only frontmatter fence (`/^---\n/`) cannot match a file that starts
+// `---\r\n`, so a CRLF SKILL.md parsed as having NO frontmatter — silently,
+// with no error — and every skill was reported as missing its `triggers:`
+// array even though it declared one. On Windows `core.autocrlf=true` (the
+// Git-for-Windows installer default) makes EVERY checked-out SKILL.md CRLF,
+// so this fired for the whole skills tree.
+// ---------------------------------------------------------------------------
+
+/** Same shape as makeSkillsFixture, but writes SKILL.md with CRLF endings. */
+function makeCrlfSkillsFixture(files: Record<string, string>, opts?: { omitFrontmatter?: boolean }): string {
+  const dir = mkdtempSync(join(tmpdir(), "gbrain-crlf-"));
+  const skillNames = Object.keys(files);
+  const resolverRows = skillNames.map(n => `| "${n}" | \`skills/${n}/SKILL.md\` |`).join("\n");
+  writeFileSync(join(dir, "RESOLVER.md"), `## Test\n| Trigger | Skill |\n|-----|-----|\n${resolverRows}\n`);
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({ skills: skillNames.map(n => ({ name: n, path: `${n}/SKILL.md` })) }, null, 2)
+  );
+  for (const [name, body] of Object.entries(files)) {
+    mkdirSync(join(dir, name), { recursive: true });
+    const frontmatter = opts?.omitFrontmatter
+      ? ""
+      : `---\nname: ${name}\ndescription: test\ntriggers:\n  - "${name}"\n---\n`;
+    writeFileSync(join(dir, name, "SKILL.md"), (frontmatter + body).replace(/\n/g, "\r\n"));
+  }
+  return dir;
+}
+
+describe("checkResolvable — CRLF frontmatter", () => {
+  let dir: string;
+  afterEachCleanup(() => dir && rmSync(dir, { recursive: true, force: true }));
+
+  test("reads triggers: from a CRLF SKILL.md instead of reporting a gap", () => {
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" });
+    const report = checkResolvable(dir);
+    const gaps = report.issues.filter(i => i.type === "mece_gap");
+    // The bug: a mece_gap warning claiming 'alpha' declares no triggers,
+    // when the frontmatter declares exactly one.
+    expect(gaps).toEqual([]);
+  });
+
+  test("CRLF and LF fixtures produce identical issue sets", () => {
+    const body = { alpha: "# Alpha\n\nBody text.\n" };
+    const lfDir = makeSkillsFixture(body);
+    dir = makeCrlfSkillsFixture(body);
+    const norm = (d: string) =>
+      checkResolvable(d).issues.map(i => ({ type: i.type, severity: i.severity, skill: i.skill }));
+    try {
+      expect(norm(dir)).toEqual(norm(lfDir));
+    } finally {
+      rmSync(lfDir, { recursive: true, force: true });
+    }
+  });
+
+  test("still reports a gap when a CRLF SKILL.md genuinely has no frontmatter", () => {
+    // No fence at all — the checker MUST report absence, not invent triggers.
+    dir = makeCrlfSkillsFixture({ alpha: "# Alpha\n\nBody text.\n" }, { omitFrontmatter: true });
+    const report = checkResolvable(dir);
+    const gaps = report.issues.filter(i => i.type === "mece_gap");
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].skill).toBe("alpha");
+  });
+});
+
 describe("v0.22.4 regression — actual repo skills/ has 0 errors", () => {
   test("repo skills/ pass check-resolvable cleanly (zero errors AND zero warnings)", () => {
     // The v0.22.4 (Part A) contract was zero warnings AND zero errors.

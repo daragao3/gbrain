@@ -201,6 +201,28 @@ function resolveWorkspace(opts: { workspace?: string | null; skillsDir?: string 
 // list  — unchanged from v0.32; lightly reformatted
 // ---------------------------------------------------------------------------
 
+/**
+ * Pull `description:` out of a SKILL.md's YAML frontmatter.
+ * Returns null when there is no frontmatter fence or no `description:` key.
+ *
+ * Normalizes line endings first: an LF-only fence (`^---\n`) cannot match a
+ * file that starts `---\r\n`, so every SKILL.md checked out on Windows
+ * (`core.autocrlf=true` is the Git-for-Windows default) parsed as "no
+ * frontmatter" and `skillpack list --json` reported `description: null` for
+ * every bundled skill. Normalizing also keeps a trailing `\r` out of the
+ * captured value, which `[^\n"']+` would otherwise swallow.
+ *
+ * Exported for test; not part of the command surface.
+ */
+export function parseSkillDescription(body: string): string | null {
+  const normalized = body.replace(/\r\n/g, '\n');
+  const fm = normalized.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return null;
+  const descMatch = fm[1].match(/^description:\s*["']?([^\n"']+)/m);
+  if (!descMatch) return null;
+  return descMatch[1].trim();
+}
+
 async function cmdList(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     console.log('gbrain skillpack list [--json]\n\nPrint every skill bundled in openclaw.plugin.json.');
@@ -221,12 +243,7 @@ async function cmdList(args: string[]): Promise<void> {
       const skillMd = join(gbrainRoot, 'skills', slug, 'SKILL.md');
       let description: string | null = null;
       if (existsSync(skillMd)) {
-        const body = readFileSync(skillMd, 'utf-8');
-        const fm = body.match(/^---\n([\s\S]*?)\n---/);
-        if (fm) {
-          const descMatch = fm[1].match(/^description:\s*["']?([^\n"']+)/m);
-          if (descMatch) description = descMatch[1].trim();
-        }
+        description = parseSkillDescription(readFileSync(skillMd, 'utf-8'));
       }
       return { name: slug, description };
     });
