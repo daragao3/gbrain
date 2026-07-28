@@ -49,6 +49,21 @@ If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the
 | MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
 
 `GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
+### Stopping a run (process-tree teardown)
+
+Both runners tear down their own process trees when a run is stopped, via `scripts/lib/proc-tree.sh` (built from `ps` + `kill` only — `pkill`/`pgrep` are absent on Git-Bash and default Cygwin, where `pkill -P` was a silent no-op). `run-unit-parallel.sh` reaps shards, the serial pass, the heartbeat, and the watchdog from one EXIT/INT/TERM trap; `run-serial-tests.sh` runs each file's `bun test` as a tracked background child and kills its tree from the same trap. Both refuse to start (`exit 2`) if the helper is missing, rather than limping on with teardown silently doing nothing.
+
+A trap alone can't cover the orphan case (parent dies without signalling, so nothing is ever delivered), so each runner also polls the pid that owns the run and shuts down when it disappears. Knobs:
+
+| Env var | Default | What it does |
+|---|---|---|
+| `GBRAIN_TEST_WATCH_PID` | `$PPID` | Which pid counts as "the run". `run-unit-parallel.sh` passes its own pid to the serial pass so intermediate subshells can't mask a dead run. |
+| `GBRAIN_TEST_NO_PARENT_WATCH` | `0` | Set to `1` to disable the watchdog for deliberately detached runs (`nohup`, `setsid`). |
+| `GBRAIN_TEST_WATCH_INTERVAL` | `1` (serial) / `2` (parallel) | Poll seconds. Uses the `kill -0` builtin, never `ps`. |
+
+**Fail-safe, not fail-loud:** a watch pid that can't be observed at startup disables the watchdog instead of tripping it. On Windows `bun run test` gives its child bash `PPID=1` and `kill -0 1` fails, so a naive watchdog would abort every run instantly. `run-unit-parallel.sh` prints `watchdog=<pid>` or `watchdog=off` in its banner. Coverage doesn't depend on it: the parallel runner's trap still reaps the serial pass, and the serial pass still watches the parallel runner (a real, observable pid).
+
+**Teardown order matters for a reason:** known pids get the `kill` builtin *first*, and only then does a single shared `ps` snapshot sweep for grandchildren. One `ps -e` measured 9-12 seconds on a loaded Windows box, long enough for the child to finish the work being cancelled. The snapshot is skipped entirely when a builtin-only liveness check says nothing is alive, so a normal run never pays for it.
 
 ### File taxonomy
 
