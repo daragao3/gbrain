@@ -1,5 +1,28 @@
 # TODOS
 
+## v0.42.71.0 follow-ups (serial-pass teardown)
+
+- [ ] **P2 -- `test/scripts/run-serial-tests-teardown.serial.test.ts` is red-by-default on
+  Windows.** Three of its five tests carry time budgets below this platform's floor: two
+  declare no timeout at all and so inherit bun's 5000ms default while spawning a whole
+  nested `bun test` run, and the full-chain test budgets 240s for a fixture that needs
+  longer under load (the file measured 358s end to end on a box running several concurrent
+  agent sessions). The fourth, the orphan watchdog, asserts a teardown the runner
+  deliberately does not perform here: `run-serial-tests.sh` switches its parent check off
+  when the watch pid cannot be observed, which is exactly a Cygwin child whose parent was
+  killed from Node, so `a-done` is written and the assertion inverts. Size the three timing
+  budgets to the measured floor and gate the orphan-watchdog assertion behind a flat win32
+  skip, so the file reports honestly rather than failing for reasons unrelated to the
+  behavior it pins. Where: `test/scripts/run-serial-tests-teardown.serial.test.ts`.
+- [ ] **P3 -- shell-script tests spawn a bare `bash`, which is ambiguous on Windows.**
+  `C:\WINDOWS\system32\bash.exe` (WSL) ships with the OS and can precede Git-Bash on PATH.
+  WSL bash cannot open a Windows path, so every such test fails at exit 127 with
+  `No such file or directory` naming a path-mangled script, which reads as a missing
+  fixture rather than the wrong interpreter. Both `run-serial-tests-teardown.serial.test.ts`
+  and `run-unit-parallel.test.ts` are affected. Resolving the interpreter explicitly (or
+  skipping when the resolved `bash` cannot stat a Windows path) would turn a confusing
+  red into a clear skip. Where: `test/scripts/`.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
