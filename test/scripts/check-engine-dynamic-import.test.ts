@@ -173,6 +173,8 @@ describe('check-engine-dynamic-import.sh', () => {
       [
         "const first = import('./engine-dynamic-import-ok.ts');",
         "const marker = 'engine-dynamic-import-ok'; const second = import('./second.ts');",
+        'const template = `prefix',
+        '// engine-dynamic-import-ok ${import("./third.ts")}`;',
         '',
       ].join('\n'),
     );
@@ -180,6 +182,28 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain(`${basename(path)}:1:`);
     expect(result.stderr).toContain(`${basename(path)}:2:`);
+    expect(result.stderr).toContain(`${basename(path)}:4:`);
+  });
+
+  it('allows a marker in real multiline comment trivia on the import line', () => {
+    const path = fixture(
+      'multiline-marker.ts',
+      [
+        '/* rationale',
+        ' * engine-dynamic-import-ok */ const helper = import("./helper.ts");',
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(0);
+  });
+
+  it('fails on TypeScript parse diagnostics', () => {
+    const path = fixture('malformed.ts', 'const broken = ;\n');
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('cannot parse input file');
+    expect(result.stderr).toContain(basename(path));
   });
 
   it('reports readable-file violations alongside missing inputs', () => {

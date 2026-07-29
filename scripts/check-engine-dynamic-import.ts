@@ -26,28 +26,29 @@ for (const file of files) {
     ts.ScriptKind.TS,
   );
   const lines = sourceText.split(/\r?\n/);
+  const markerLines = new Set<number>();
 
-  function hasMarkerComment(sourceLine: string): boolean {
-    const scanner = ts.createScanner(
-      ts.ScriptTarget.Latest,
-      false,
-      ts.LanguageVariant.Standard,
-      sourceLine,
-    );
-    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-      if (
-        (token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia) &&
-        scanner.getTokenText().includes(MARKER)
-      ) return true;
+  if (sourceFile.parseDiagnostics.length > 0) {
+    const diagnostics = sourceFile.parseDiagnostics
+      .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '))
+      .join('; ');
+    readErrors.push(`ERROR: cannot parse input file ${file}: ${diagnostics}`);
+    continue;
+  }
+
+  for (let markerPos = sourceText.indexOf(MARKER); markerPos >= 0; markerPos = sourceText.indexOf(MARKER, markerPos + MARKER.length)) {
+    const token = ts.getTokenAtPosition(sourceFile, markerPos);
+    const insideToken = token.getStart(sourceFile) <= markerPos && markerPos < token.end;
+    if (!insideToken) {
+      markerLines.add(sourceFile.getLineAndCharacterOfPosition(markerPos).line);
     }
-    return false;
   }
 
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
       const { line } = sourceFile.getLineAndCharacterOfPosition(node.expression.getStart(sourceFile));
       const sourceLine = lines[line] ?? '';
-      if (!hasMarkerComment(sourceLine)) {
+      if (!markerLines.has(line)) {
         violations.push(`  ${file}:${line + 1}:${sourceLine}`);
       }
     }

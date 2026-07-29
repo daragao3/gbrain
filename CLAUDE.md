@@ -67,10 +67,10 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   text, the cast parses it). Guarded by `scripts/check-jsonb-pattern.sh` (template grep) +
   `scripts/check-jsonb-params.mjs` (positional AST scanner); the real backstop is the DATABASE_URL-gated
   e2e parity tests, since PGLite can't surface the bug. Full rule in `docs/ENGINES.md`.
-- **Engine-live paths avoid dynamic `import()` for helper dependencies.** In
+- **Engine-live paths avoid runtime dynamic `import()` for helper dependencies.** In
   `src/core/pglite-engine.ts`, `src/core/postgres-engine.ts`, and
-  `src/core/migrate.ts`, helper modules that participate in the live engine path
-  use static top-level imports. The only current dynamic-`import()` exceptions
+  `src/core/migrate.ts`, dependencies previously reached through runtime dynamic
+  imports use static top-level imports. The only current dynamic-`import()` exceptions
   are the four `ai/gateway.ts` lookups in both engines'
   `initSchema()` and `_upsertChunksOnce()` methods; each remains lazy inside a
   local `try/catch` because the gateway has a large provider/config closure and,

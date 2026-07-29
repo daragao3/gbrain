@@ -4,9 +4,9 @@
 
 **Goal:** Reconstruct the missing engine-path static-import hardening, preserve the four load-bearing lazy gateway fallbacks, and prevent unreviewed dynamic imports from returning.
 
-**Architecture:** Make the 13 safe engine/migration import statements static and leave only four line-marked `ai/gateway.ts` imports inside their existing soft-failure `try/catch` boundaries. Enforce that current state with one CRLF-safe shell guard, a hermetic Bun regression test, package/verify wiring, and current-state architecture documentation.
+**Architecture:** Make the 13 safe engine/migration import statements static and leave only four line-marked `ai/gateway.ts` imports inside their existing soft-failure `try/catch` boundaries. Enforce that current state with a repository-anchored Bash wrapper delegating to a fail-closed TypeScript AST scanner, a hermetic Bun regression test, package/verify wiring, and current-state architecture documentation.
 
-**Tech Stack:** TypeScript, Bun test runner, Bash, Git, generated llms documentation bundles.
+**Tech Stack:** TypeScript compiler API, Bun test runner, Bash, Git, generated llms documentation bundles.
 
 ## Global Constraints
 
@@ -28,8 +28,9 @@
 
 ## File Map
 
-- Create `scripts/check-engine-dynamic-import.sh` — line-oriented policy guard for the two engines and migration runner.
-- Create `test/scripts/check-engine-dynamic-import.test.ts` — hermetic positive/negative/CRLF/comment tests plus real-tree and wiring assertions.
+- Create `scripts/check-engine-dynamic-import.sh` — repository-anchored Bash wrapper for default and explicit input routing.
+- Create `scripts/check-engine-dynamic-import.ts` — TypeScript AST policy scanner for runtime `import()` expressions, parse/read failures, and exact-line comment-trivia opt-outs.
+- Create `test/scripts/check-engine-dynamic-import.test.ts` — 20 hermetic adversarial, CRLF, fail-closed, real-tree, and wiring tests.
 - Modify `src/core/pglite-engine.ts` — hoist three safe import statements and mark two deliberate gateway imports.
 - Modify `src/core/postgres-engine.ts` — hoist eight safe import statements and mark two deliberate gateway imports.
 - Modify `src/core/migrate.ts` — hoist two safe migration helper import statements.
@@ -45,6 +46,7 @@
 
 **Files:**
 - Create: `scripts/check-engine-dynamic-import.sh`
+- Create: `scripts/check-engine-dynamic-import.ts`
 - Create: `test/scripts/check-engine-dynamic-import.test.ts`
 - Modify: `src/core/pglite-engine.ts`
 - Modify: `src/core/postgres-engine.ts`
@@ -52,8 +54,9 @@
 
 **Interfaces:**
 - Consumes: shell positional arguments `FILE...`; without arguments, the guard scans the three repository files.
-- Produces: `scripts/check-engine-dynamic-import.sh [FILE...]`, exit `0` when every relevant line is allowed and exit `1` with every `file:line:text` violation on stderr.
-- Produces: one line-level opt-out token, `engine-dynamic-import-ok`, accepted only on the same line as the deliberately lazy import.
+- Produces: `scripts/check-engine-dynamic-import.sh [FILE...]`, exit `0` when every runtime dynamic import is allowed and exit `1` after reporting every `file:line:text` violation plus every read/parse error on stderr.
+- Produces: one line-level opt-out token, `engine-dynamic-import-ok`, accepted only in real comment trivia on the same physical line as the deliberately lazy import.
+- Fails closed on missing/unreadable inputs, TypeScript parse diagnostics, and scanner/process failures; comments, strings, templates, regex literals, and type-position `import(...)` syntax are not runtime imports.
 
 - [ ] **Step 1: Record call-graph blast radius before touching functions**
 
@@ -80,93 +83,19 @@ Use `depth: 5`, `max_nodes: 200`, and `limit: 100`. Expected: no caller requires
 
 - [ ] **Step 2: Write the failing guard regression test**
 
-Create `test/scripts/check-engine-dynamic-import.test.ts` with this complete test surface:
+Create `test/scripts/check-engine-dynamic-import.test.ts` as a hermetic subprocess suite. The completed 20-test surface covers:
 
-```ts
-import { afterEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+- unmarked runtime `import()` rejection, including bare and trivia-separated forms;
+- same-line markers in real line or multiline block-comment trivia;
+- rejection of markers on prior lines or inside strings, templates, and module paths;
+- comments and comment-like delimiters inside strings, templates, and regex literals;
+- live code after same-line or multiline block comments close;
+- CRLF input and complete multi-file violation aggregation;
+- missing/readable mixed inputs and TypeScript parse diagnostics;
+- default repository anchoring when invoked from a foreign Git repository;
+- the reconciled three-file source scan plus package/parallel-verifier wiring.
 
-const REPO_ROOT = resolve(import.meta.dir, '..', '..');
-const GUARD = resolve(REPO_ROOT, 'scripts', 'check-engine-dynamic-import.sh');
-const VERIFY_DISPATCHER = resolve(REPO_ROOT, 'scripts', 'run-verify-parallel.sh');
-const BASH = process.platform === 'win32'
-  ? resolve(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')
-  : 'bash';
-const tempDirs: string[] = [];
-
-function fixture(name: string, content: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'gbrain-engine-import-'));
-  tempDirs.push(dir);
-  const path = join(dir, name);
-  writeFileSync(path, content, 'utf8');
-  return path;
-}
-
-function runGuard(files: string[] = []) {
-  const result = spawnSync(BASH, [GUARD, ...files], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    timeout: 30_000,
-  });
-  return {
-    code: result.status ?? -1,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-  };
-}
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-describe('check-engine-dynamic-import.sh', () => {
-  it('exists', () => {
-    expect(existsSync(GUARD)).toBe(true);
-  });
-
-  it('rejects and reports an unmarked dynamic import', () => {
-    const path = fixture('violator.ts', "async function load() {\n  return await import('./helper.ts');\n}\n");
-    const result = runGuard([path]);
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain(`${basename(path)}:2:`);
-    expect(result.stderr).toContain("await import('./helper.ts')");
-  });
-
-  it('allows a same-line marker and ignores comment-only matches', () => {
-    const path = fixture(
-      'allowed.ts',
-      [
-        "// await import('./comment.ts')",
-        "/* await import('./block-open.ts') */",
-        " * await import('./block-body.ts')",
-        "const gateway = await import('./ai/gateway.ts'); // engine-dynamic-import-ok",
-        '',
-      ].join('\n'),
-    );
-    const result = runGuard([path]);
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain('check-engine-dynamic-import: ok (1 file(s) scanned)');
-  });
-
-  it('still catches a violation in CRLF input', () => {
-    const path = fixture('crlf.ts', "async function load() {\r\n  return await import('./helper.ts');\r\n}\r\n");
-    const result = runGuard([path]);
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain(`${basename(path)}:2:`);
-  });
-
-  it('passes on the reconciled repository sources', () => {
-    const result = runGuard();
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain('check-engine-dynamic-import: ok (3 file(s) scanned)');
-  });
-});
-```
+Use the TypeScript parser rather than a partial lexical reimplementation. On Windows, set the test default to 30 seconds because each case launches Git Bash and Bun, whose startup can exceed Bun's 5-second per-test default.
 
 - [ ] **Step 3: Run the test to prove the pre-implementation red state**
 
@@ -176,76 +105,20 @@ bun test test/scripts/check-engine-dynamic-import.test.ts > .context/engine-dyna
 
 Expected: non-zero Bun result captured inside the log. At minimum, the `exists` assertion fails because `scripts/check-engine-dynamic-import.sh` does not exist. Read `.context/engine-dynamic-import-red.txt`; do not infer the result from a truncated pipeline.
 
-- [ ] **Step 4: Add the CRLF-safe guard**
+- [ ] **Step 4: Add the CRLF-safe, fail-closed guard**
 
-Create `scripts/check-engine-dynamic-import.sh` with this implementation, retaining LF line endings:
+Create `scripts/check-engine-dynamic-import.sh` as a thin LF-terminated wrapper. Resolve its own directory first; when no explicit files are passed, anchor the repository with `git -C "$SCRIPT_DIR/.."` and scan the two engines plus `migrate.ts`. Delegate with `exec bun "$SCRIPT_DIR/check-engine-dynamic-import.ts" "${FILES[@]}"` so scanner failures propagate.
 
-```bash
-#!/usr/bin/env bash
-# Engine-live paths use static imports by default. A line-level
-# `engine-dynamic-import-ok` marker is required for a justified lazy import.
-#
-# Historical Windows runs associated imports on these paths with abrupt Bun
-# test-process exits, but system-wide commit exhaustion remained a confound.
-# This guard therefore enforces a reviewed engine-path hardening invariant; it
-# does not claim every dynamic import deterministically crashes Windows.
-#
-# Usage:
-#   bash scripts/check-engine-dynamic-import.sh
-#   bash scripts/check-engine-dynamic-import.sh FILE [FILE...]
+Create `scripts/check-engine-dynamic-import.ts` using the TypeScript compiler API:
 
-set -uo pipefail
+- read every requested file and aggregate read failures;
+- parse as TypeScript and aggregate parse diagnostics;
+- walk the AST for `CallExpression`s whose expression is `ImportKeyword`;
+- locate all marker occurrences in the full source and use `ts.getTokenAtPosition` to admit only occurrences outside AST tokens (real comment trivia), recording their physical source lines;
+- require each runtime import's line to have an admitted marker or report its original `file:line:text`;
+- print every read/parse error and every violation before exiting nonzero.
 
-if [ "$#" -gt 0 ]; then
-  FILES=("$@")
-else
-  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-  cd "$ROOT" || exit 1
-  FILES=(
-    src/core/pglite-engine.ts
-    src/core/postgres-engine.ts
-    src/core/migrate.ts
-  )
-fi
-
-OUT=""
-SCANNED=0
-
-for f in "${FILES[@]}"; do
-  [ -f "$f" ] || continue
-  SCANNED=$((SCANNED + 1))
-  hits="$(
-    sed 's/\r$//' "$f" |
-      grep -n "await import(" |
-      grep -v "engine-dynamic-import-ok" |
-      awk -F: '{ line = $0; sub(/^[0-9]+:/, "", line);
-                 sub(/^[ \t]+/, "", line);
-                 if (line ~ /^(\/\/|\*|\/\*)/) next;
-                 print }' || true
-  )"
-  if [ -n "$hits" ]; then
-    while IFS= read -r hit; do
-      [ -n "$hit" ] && OUT="$OUT  $f:$hit"$'\n'
-    done <<< "$hits"
-  fi
-done
-
-if [ -n "$OUT" ]; then
-  {
-    echo "ERROR: unreviewed dynamic import on an engine-live path:"
-    echo
-    printf '%s' "$OUT"
-    echo
-    echo "Prefer a static top-level import. If lazy loading is load-bearing,"
-    echo "append 'engine-dynamic-import-ok' to that exact line and document"
-    echo "the startup or soft-failure boundary that requires it."
-  } >&2
-  exit 1
-fi
-
-echo "check-engine-dynamic-import: ok ($SCANNED file(s) scanned)"
-```
+This preserves CRLF line accounting, ignores comment/literal/type-only false positives, catches every legal runtime `import()` shape the TypeScript parser recognizes, rejects marker spoofing, and fails closed.
 
 - [ ] **Step 5: Run the guard test to prove the source-tree midpoint is still red**
 
@@ -421,7 +294,7 @@ const { repairTimelineDedupIndex } = await import('./timeline-dedup-repair.ts');
 bun test test/scripts/check-engine-dynamic-import.test.ts > .context/engine-dynamic-import-green.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
 ```
 
-Expected: exit `0`; five tests pass.
+Expected: exit `0`; the full guard regression suite passes.
 
 ```bash
 bash scripts/check-engine-dynamic-import.sh > .context/engine-dynamic-import-guard.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
@@ -432,7 +305,7 @@ Expected: exit `0`; output contains `check-engine-dynamic-import: ok (3 file(s) 
 - [ ] **Step 12: Prove the guard leaves exactly four marked dynamic imports**
 
 ```bash
-git grep -n "await import(" -- src/core/pglite-engine.ts src/core/postgres-engine.ts src/core/migrate.ts > .context/engine-dynamic-import-sites.txt; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
+git grep -n -F "import('./ai/gateway.ts'); // engine-dynamic-import-ok" -- src/core/pglite-engine.ts src/core/postgres-engine.ts src/core/migrate.ts > .context/engine-dynamic-import-sites.txt; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
 ```
 
 Expected: exactly four lines, all importing `./ai/gateway.ts` and all carrying `engine-dynamic-import-ok`; no match in `src/core/migrate.ts`.
@@ -448,7 +321,7 @@ Expected: exit `0`. If Windows resource pressure aborts the process, record the 
 - [ ] **Step 14: Commit the source invariant locally**
 
 ```bash
-git add scripts/check-engine-dynamic-import.sh test/scripts/check-engine-dynamic-import.test.ts src/core/pglite-engine.ts src/core/postgres-engine.ts src/core/migrate.ts
+git add scripts/check-engine-dynamic-import.sh scripts/check-engine-dynamic-import.ts test/scripts/check-engine-dynamic-import.test.ts src/core/pglite-engine.ts src/core/postgres-engine.ts src/core/migrate.ts
 ```
 
 ```bash
@@ -744,6 +617,7 @@ Expected files only:
 ```text
 CLAUDE.md
 docs/architecture/KEY_FILES.md
+docs/superpowers/plans/2026-07-28-engine-dynamic-import-reconciliation.md
 llms-full.txt
 llms.txt
 package.json
@@ -770,9 +644,11 @@ Expected review findings:
 - Exactly four `ai/gateway.ts` imports remain, all marked on the same line.
 - All four gateway imports remain inside their original local `try/catch` fallback boundaries.
 - No accessor logic, fallback ordering, SQL, public signature, or engine parity behavior changes.
-- The guard reports all violations, strips CR, ignores comment-only lines, and requires line-level opt-outs.
+- The parser-backed guard reports all violations plus read/parse failures, preserves CRLF line accounting, ignores comments/literals/type-only syntax, detects every runtime `import()` call expression, and accepts opt-outs only from real comment trivia on the same physical line.
 - The package script invokes the shell guard through Bash; `check:all` invokes that shell guard directly, and the parallel verify dispatcher invokes the package check.
 - Documentation is current-state and makes no deterministic Windows-crash claim.
+
+**Observed Windows verification classification:** The authoritative aggregate completed with 25 of 33 checks passing. Individual reruns showed `check:test-names` and `typecheck` green; privacy/isolation exceeded Windows timing budgets; WASM failed in unrelated temporary-symlink setup; eval-glossary was CRLF/LF drift; resolver/brain-first findings predated and did not intersect this branch. The focused aggregate produced 103 pass / 5 fail: three setup-hook timeouts reproduced at the untouched base, and the known `migrate-retry` polling failure reproduced there. Its additional race-status assertion did not reproduce at base, so it remains an unresolved timing-sensitive limitation in untouched code—not evidence of an in-scope defect and not claimed as conclusively pre-existing.
 
 - [ ] **Step 8: Commit the approved plan document locally**
 
