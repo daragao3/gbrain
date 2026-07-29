@@ -92,6 +92,12 @@ async function oneRep(arm: Rep['arm']): Promise<Rep> {
     HOME: home,
     GBRAIN_HOME: home,
   };
+  // The benchmark must exercise the file-backed PGLite config above even when
+  // the parent shell carries a Postgres override. Config URL precedence would
+  // otherwise redirect both arms to Postgres and produce a plausible but
+  // meaningless comparison.
+  delete env.GBRAIN_DATABASE_URL;
+  delete env.DATABASE_URL;
   if (seed) {
     env.GBRAIN_PGLITE_SNAPSHOT = SNAPSHOT;
     env[SEED_FILE_ENV] = '1';

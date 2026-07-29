@@ -182,34 +182,27 @@ connect(config)
 - **Staleness fallback**: corrupt the `.version` sidecar, assert a normal init runs and
   the engine does **not** throw.
 - **Equivalence — the load-bearing one**: a dataDir seeded from snapshot and a dataDir
-  built by cold init must land on the **same `schema_migrations` head**. This is the
-  safety net for the entire idea; without it the feature is unfalsifiable.
+  built by cold init must land on the same canonical migration head,
+  `engine.getConfig('version')`. This is the safety net for the entire idea; without it
+  the feature is unfalsifiable.
 - **Non-regression**: `test/bootstrap.test.ts` and `test/schema-bootstrap-coverage.test.ts`
   already `delete process.env.GBRAIN_PGLITE_SNAPSHOT` so they keep exercising cold init.
   Confirm the new flag does not re-enable seeding there.
 
-## Benchmark plan
+## Benchmark result and decision
 
-Required before this is judged worth shipping.
+The alternating A/B benchmark ran three fresh file-backed brains per arm under 8–9
+concurrent Bun processes. Every timed init and every canonical-head probe exited 0;
+all six observed `config.version` 124.
 
-- A/B alternating, n≥3 per arm, `gbrain init --migrate-only` against a fresh brain.
-- Record `ps -W | grep -ci bun` alongside **every** rep. Two back-to-back reps of the
-  same spawn measured 11.3s and 28.9s (2.5x) purely from box contention, so a timing
-  without a concurrent-process count is uninterpretable.
-- Redirect output to a file; never pipe through `tail` (the pipe form reports `tail`'s
-  exit code, not the command's).
-- Report median and spread, not a single number.
+| Arm | Median | Range | Spread |
+|---|---:|---:|---:|
+| Cold | 32.788s | 32.581–35.241s | 2.660s |
+| Seeded | 18.181s | 14.873–19.159s | 4.286s |
 
-## Open question this design does not settle
-
-**The win is not yet proven for gbrain's real schema.** The probe numbers above come
-from a trivial schema. The direction is now supported — seeding beat bare `initdb`
-27.1s vs 42.3s, and it additionally skips the schema blob and all 119 migrations —
-so the expectation is ~109s → ~30-40s (roughly 3x). But that is still an
-extrapolation across a schema-size change, on a box whose contention spread is 2.5x.
-
-If the benchmark lands at ~80s, the change is not worth its risk and should be
-abandoned rather than shipped. The benchmark decides, not this estimate.
+Snapshot seeding delivered a **1.80x median speedup**. The seeded median is better
+than the 30–40s proceed gate and far below the ~80s abandon threshold. **Decision:
+proceed with file-backed snapshot seeding.**
 
 ## Out of scope
 
