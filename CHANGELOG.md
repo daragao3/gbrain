@@ -4,7 +4,7 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.42.72.1] - 2026-07-28
 
-**A partial migration now tells you exactly what failed and why.**
+**When a migration is partial because a phase failed, the terminal now tells you exactly which phase failed and why.**
 
 `gbrain apply-migrations` already tracked each migration phase in its ledger, including the phase name, whether it completed, and the failure detail. But when a migration finished as partial, the terminal only said `PARTIAL` and told you to run it again. The useful part stayed hidden in `~/.gbrain/migrations/completed.jsonl`, so diagnosing the problem meant opening the ledger or rerunning the migration's subprocesses by hand.
 
@@ -33,7 +33,7 @@ This changes the human-readable terminal output from one line to several lines w
 
 ## To take advantage of v0.42.72.1
 
-Nothing to configure. Upgrade and run migrations normally. If a migration is partial, the terminal now names the failed phase and reason before the retry instruction.
+Nothing to configure. Upgrade and run migrations normally. If a migration is partial because a phase failed, the terminal now names that phase and reason before the retry instruction.
 
 ### Itemized changes
 
@@ -42,7 +42,7 @@ Nothing to configure. Upgrade and run migrations normally. If a migration is par
 - **Every terminal failure path carries a reason.** Partial results and explicit failed results surface their phase arrays. Throwing orchestrators persist a synthetic failed phase with the exception message in `~/.gbrain/migrations/completed.jsonl`.
 
 #### Tests
-- **Formatter behavior and terminal-path wiring are pinned.** `test/apply-migrations.test.ts` covers missing phases, multiple failures, blank details, and trimmed subprocess output, then checks that partial results, explicit failures, and thrown orchestrators all route through the formatter.
+- **Formatter behavior and terminal-path wiring are pinned.** `test/apply-migrations.test.ts` covers missing phases, multiple failures, blank details, and trimmed subprocess output; it checks that partial and explicit-failure results route through the formatter, while thrown orchestrators synthesize and persist an `orchestrator` failure.
 
 #### Maintenance
 - **GitHub Actions pins are current.** Workflow references for checkout and release publishing were refreshed to their current immutable commits.
