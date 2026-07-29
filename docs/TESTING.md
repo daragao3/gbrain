@@ -154,7 +154,7 @@ Defaults are ~2x the worst observed value, not ~1.5x like `GBRAIN_TEST_SHARD_TIM
 
 `GBRAIN_SKIP_SUBPROCESS_TESTS=1` skips `apply-migrations-pglite-spawn` and `doctor-cli-smoke` for a fast inner loop — the two that cost minutes. CI never sets it. `admin-embed-spawn` runs unconditionally; sharing one server across its four cases brought it to ~93s, which is cheap enough not to need an opt-out.
 
-The helper also owns `makeGbrainShim()`/`withShimOnPath()`. Both matter on Windows: `execSync` goes through `cmd.exe`, which resolves commands via PATHEXT and therefore cannot see an extensionless `#!/bin/sh` shim, and PATH entries join with `path.delimiter` (`;`), not `:`. Get either wrong and `gbrain` silently resolves to a globally-linked binary from another checkout instead of the code under test.
+Executable-shim ownership is separate: `test/helpers/gbrain-shim.ts` creates the platform-specific shim and returns its complete `pathValue`. On Windows, `cmd.exe` resolves commands through PATHEXT and cannot see an extensionless `#!/bin/sh` shim, while PATH entries join with `path.delimiter` (`;`), not `:`. Tests must use `pathValue` rather than assembling PATH themselves; otherwise `gbrain` can silently resolve to a globally linked binary from another checkout instead of the code under test.
 
 ### Unit test inventory
 
