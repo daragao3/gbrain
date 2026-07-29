@@ -1,5 +1,16 @@
 # TODOS
 
+## v0.42.72.0 follow-ups (native path separators)
+
+- [ ] **P2 — audit remaining filesystem containment checks for native separators.**
+  v0.42.72.0 fixed three checks, but similar prefix comparisons may remain. Do NOT
+  bulk-replace: page slugs and git-relative paths correctly use forward slashes on every
+  platform. Classify each candidate by the value it actually holds, then fix filesystem
+  cases with a test that pins the directory boundary (`foo` must not match `foobar`), not
+  only that a valid path is accepted. The suite is Ubuntu-only, so the Windows branch needs
+  an explicit cross-platform proof.
+  Where: filesystem path-prefix comparisons in `src/`.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
@@ -43,15 +54,19 @@
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)
 
-- [ ] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.**
-  v0.42.68.1 fixed the fourth and fifth recurrence of the same defect: a frontmatter
-  matcher written `/^---\n/` instead of `/^---\r?\n/`, which silently parses every CRLF
-  `SKILL.md` as having no frontmatter. The repo's own convention is that a guard cures
-  what prose cannot (see `scripts/check-jsonb-pattern.sh`,
-  `scripts/check-url-pathname-fs.sh`). Add `scripts/check-frontmatter-fence.sh`: fail on
-  a `---\n` fence literal in `src/` and `test/` that is not preceded by `\r?`, with an
-  opt-out comment for a genuine LF-only case. Wire it into `bun run verify`. The bug is
-  invisible on Linux CI (LF checkouts), so only a static guard catches site number six.
+- [x] **P2 — add a CI guard for CRLF-intolerant YAML frontmatter fences.** Done in
+  v0.42.71.0. `scripts/check-frontmatter-fence.sh` fails on the two offset-0 matcher
+  shapes (`/^---\n` and `.startsWith('---\n')`) across `src/` and `test/`, wired into
+  `bun run verify` and `check:all` and pinned by `test/check-frontmatter-fence.test.ts`.
+  It keys on the MATCHER rather than the fence literal, because `---\n` appears in
+  hundreds of legitimate DATA sites (fixture bodies, page builders, markdown-HR joins)
+  that carry neither a `^` anchor nor `startsWith`, so those are excluded structurally
+  instead of by allowlist. A preceding `\r\n` normalize satisfies it; a genuine LF-only
+  case opts out with a `frontmatter-fence-guard-ok` comment, honored inline or in the
+  comment block directly above. It caught site number six on its first run
+  (`stripFrontmatter` in `src/core/skill-brain-first.ts`, which left the YAML in the
+  body so a declared tool counted as the skill's first external reference) plus five
+  more.
 - [ ] **P3 — `countOccurrences` in `src/core/skillopt/apply-edits.ts` is line-ending sensitive.**
   `replace`/`delete` edits match their `target` with a raw `indexOf` against the body, so a
   multi-line target authored with LF never matches a CRLF `SKILL.md` (and vice versa).

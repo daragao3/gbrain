@@ -230,6 +230,37 @@ describe('copyArtifacts — canonical-path containment (harvest path)', () => {
     const result = copyArtifacts(walkSourceDir(skillDir, dst), { confineRealpath: skillDir });
     expect(result.summary.wroteNew).toBe(1);
   });
+
+  // Both sides of the containment check are realpathSync() output, so the
+  // prefix separator has to be the native one. A hardcoded '/' never matches
+  // a win32 realpath, which rejected EVERY source as path_traversal and made
+  // harvest a dead feature there. These two pin the fix from both directions:
+  // an in-root source is accepted, and the sibling-prefix guard the separator
+  // exists to provide still holds. Asserting only the first would pass equally
+  // well with the containment check deleted.
+  it('containment boundary holds with native separators (foo does not match foobar)', () => {
+    const harvestRoot = scratch('copy-harvest-');
+    const skillDir = join(harvestRoot, 'skills', 'foo');
+    const siblingDir = join(harvestRoot, 'skills', 'foobar');
+    mkdirSync(skillDir, { recursive: true });
+    mkdirSync(siblingDir, { recursive: true });
+    writeFileSync(join(siblingDir, 'SKILL.md'), 'sibling');
+
+    const dst = scratch('copy-dst-');
+    // Sources live in `skills/foobar`, confinement root is `skills/foo`.
+    // Rejected only because the prefix carries a trailing separator.
+    const items = walkSourceDir(siblingDir, dst);
+
+    try {
+      copyArtifacts(items, { confineRealpath: skillDir });
+      throw new Error('expected copyArtifacts to reject the sibling-prefix source');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CopyError);
+      expect((err as CopyError).code).toBe('path_traversal');
+    }
+
+    expect(existsSync(join(dst, 'SKILL.md'))).toBe(false);
+  });
 });
 
 describe('copyArtifacts — atomic-refusal contract', () => {

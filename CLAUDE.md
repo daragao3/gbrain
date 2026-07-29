@@ -86,7 +86,12 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   normalizing once (`content.replace(/\r\n/g, '\n')`) when the parsed VALUES flow downstream
   — it also keeps a trailing `\r` out of them. Relax only the fence when the function returns
   a byte offset into the original text (`splitFrontmatter` in `src/core/skillopt/apply-edits.ts`),
-  since normalizing would corrupt every offset.
+  since normalizing would corrupt every offset. Guarded by
+  `scripts/check-frontmatter-fence.sh`, which flags the two offset-0 matcher shapes
+  (`/^---\n` and `.startsWith('---\n')`) while ignoring the hundreds of `---\n` DATA
+  uses; a preceding `\r\n` normalize satisfies it, and a genuinely LF-only case opts
+  out with a `frontmatter-fence-guard-ok` comment (its real users are assertions on
+  gbrain's OWN emitted markdown, where LF is the property under test).
 - **The repo's own shell scripts: LF-pinned, and invoked through `bash`.** Complementary to
   the rule above, and the case `.gitattributes` CAN fix — these are files the repo owns, not
   a runtime `skillsDir`. Two halves, and each hides the other: (1) `.gitattributes` sets

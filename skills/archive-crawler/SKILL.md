@@ -54,8 +54,9 @@ in gbrain.yml. Add explicit paths the agent is permitted to scan, then re-run.
 This is a safety fence — the agent will not infer what's safe to read.
 ```
 
-This contract is enforced by `src/core/storage-config.ts` (mirrors the
-`db_tracked` / `db_only` allow-list pattern from v0.22.11 storage tiering).
+`src/core/archive-crawler-config.ts` is the canonical parser, validator, and
+per-path policy helper for this contract (mirrors the `db_tracked` / `db_only`
+allow-list pattern from storage tiering).
 
 ## What this is
 

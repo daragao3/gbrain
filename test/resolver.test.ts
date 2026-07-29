@@ -88,7 +88,11 @@ describe("RESOLVER.md trigger round-trip (D5/C)", () => {
       const skillFullPath = join(SKILLS_DIR, "..", row.skillPath);
       expect(existsSync(skillFullPath)).toBe(true);
 
-      const skillContent = readFileSync(skillFullPath, "utf-8");
+      // Normalize line endings BEFORE matching. An LF-only fence cannot match a
+      // file that starts `---\r\n`, so on Windows (`core.autocrlf=true` is the
+      // Git-for-Windows default) every checked-out SKILL.md parsed as "no
+      // frontmatter" and this test threw for the entire skills corpus.
+      const skillContent = readFileSync(skillFullPath, "utf-8").replace(/\r\n/g, "\n");
       const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
       if (!fmMatch) {
         throw new Error(`No YAML frontmatter in ${row.skillPath}`);
@@ -184,7 +188,10 @@ describe("Skill example-name validator (D13)", () => {
   for (const skillFile of skillFiles) {
     const rel = skillFile.replace(SKILLS_DIR, "skills");
     test(`${rel}: every name="<word>" reference resolves to a real op or handler`, () => {
-      const content = readFileSync(skillFile, "utf-8");
+      // Normalized first: an LF-only strip is a silent no-op on a CRLF file, and
+      // the `name:` YAML it fails to remove is exactly what the comment below
+      // anticipates leaking into the body scan.
+      const content = readFileSync(skillFile, "utf-8").replace(/\r\n/g, "\n");
       // Strip YAML frontmatter so `name: <skillname>` isn't mis-captured.
       const body = content.replace(/^---\n[\s\S]*?\n---\n/, "");
       // Match only `name=` (with equals, not colon) to avoid YAML false positives
