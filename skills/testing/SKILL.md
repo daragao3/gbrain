@@ -109,7 +109,7 @@ Issues:
 
 | Tier | What it runs | Wall time | Gates |
 |------|--------------|-----------|-------|
-| **Unit** | `bun test` (deterministic, zero external calls) | <2s | Every commit |
+| **Unit** | `bun run test` (parallel unit shards + serial quarantine) | ~85s on a Mac dev box | Inner loop; authoritative only when every invocation reports totals |
 | **Evals** | LLM-judge or quality evals | ~60s | Daily |
 | **Integration** | E2E tests against real Postgres | ~5m | Pre-ship + nightly |
 | **System health** | Disk / memory / CPU / service liveness | <10s | Daily |
@@ -121,10 +121,15 @@ When the cron fires (or the user asks), do ALL of this:
 #### 1. Run unit tests
 
 ```bash
-bun test 2>&1
+bun run test > .context/daily-unit-tests.log 2>&1
 ```
 
-Parse: total passed, total failed, total skipped, file-level results.
+Record the command's actual exit code before reading or truncating the saved log.
+Parse totals only when Bun printed a totals block. Assertion failures remain
+classifiable as regression/stale/flake/new. On Windows, a non-zero run with no
+totals is indeterminate until system commit pressure and the `bun.exe` process
+count are checked; retained per-invocation PGLite memory is a known infrastructure
+signature, so do not automatically call that shape a code regression.
 
 #### 2. Run evals (if the project has an evals config)
 

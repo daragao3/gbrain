@@ -25,7 +25,7 @@
 
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
-- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 34
   checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
   bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
   `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
@@ -46,9 +46,9 @@
 
 ## v0.42.69.0 follow-ups (Windows bun test crash)
 
-- [x] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
-  instance is live.** DONE. Enumerated the engine-reachable sites and hoisted 11
-  of 13 to static top-level imports:
+- [x] **P1 — sweep direct `await import()` sites in the two engine implementations
+  and migration runner.** DONE. Audited those three files and hoisted 11 of 13
+  direct sites to static top-level imports:
   - `src/core/migrate.ts` (2) — `retry-matcher.ts`, `timeline-dedup-repair.ts`.
     The highest-value pair: `runMigrations()` is called from `initSchema()`, so
     these fired on **every PGLite boot** with WASM already live. Both are runtime
@@ -64,10 +64,11 @@
   the sweep the engines' depth-1 static closure contains no dynamic imports at all.
 - [x] **P3 — guard for dynamic imports on the engine hot path.** DONE:
   `scripts/check-engine-dynamic-import.sh`, wired into `check:all` and
-  `run-verify-parallel.sh`. Scans the two engines + `migrate.ts`, ignores comment
-  lines, and takes an `engine-dynamic-import-ok` opt-out marker. Verified in both
-  directions against a fixture (fires on a real violation, silent on commented-out
-  and opted-out lines) and on a CRLF copy.
+  `run-verify-parallel.sh`. Its line-oriented scan covers the two engines +
+  `migrate.ts`, ignores comment lines, and takes an `engine-dynamic-import-ok`
+  opt-out marker; it is not transitive call-graph analysis. Verified in both
+  directions against a fixture (fires on a direct unmarked site, silent on
+  commented-out and opted-out lines) and on a CRLF copy.
 
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)

@@ -4,11 +4,11 @@ All notable changes to GBrain will be documented in this file.
 
 ## [0.42.73.0] - 2026-07-28
 
-**Windows test runs get farther before the test runner disappears, and a new build check keeps this crash trigger from returning.**
+**Windows test runs get farther before the test runner disappears, and a new build check protects the audited engine files from direct unmarked lazy imports.**
 
-GBrain's embedded database runs inside WebAssembly. On Windows, loading another module from an active database method can take down the whole `bun test` process before it prints totals, so one bad file can erase the result of every file in the same invocation. This release moves 11 module loads to startup, where they are safe, and keeps the two intentionally lazy gateway loads explicit. A new check fails the build if another dynamic import reaches the engine path without a documented exception.
+GBrain's embedded database runs inside WebAssembly. On Windows, module loading from an active database method has appeared in the same failure class as `bun test` processes that disappear before printing totals, so one bad file can erase the result of every file in the same invocation. This release moves 11 direct module loads in the audited engine and migration files to startup and keeps the two intentionally lazy gateway loads explicit. A line-oriented check now rejects direct unmarked `await import(...)` lines in those three files; it is not a transitive call-graph or reachability proof.
 
-This narrows the crash class, but it does not make the full Windows unit suite a reliable ship gate yet. A 22-file PGLite batch completed and printed totals with 296 tests: 289 passed and 7 failed. Those 7 failures were reproduced without this change and are not caused by the import sweep. The remaining full-suite blocker is per-invocation memory retention, tracked separately in `TODOS.md`.
+This narrows a known crash class, but it does not make the full Windows unit suite a reliable ship gate yet. A 22-file PGLite batch completed and printed totals with 296 tests: 289 passed and 7 failed. Those 7 failures were reproduced without this change and are not caused by the import sweep. Per-invocation memory retention is the currently observed remaining full-suite blocker and is tracked separately in `TODOS.md`.
 
 ### How to use it
 
@@ -28,7 +28,7 @@ bun run check:engine-dynamic-import
 
 | Measure | Result |
 |---|---:|
-| Engine-reachable dynamic imports moved to startup | 11 |
+| Direct audited import sites moved to startup | 11 |
 | Deliberately lazy gateway imports retained | 2 |
 | PGLite files in the completed Windows batch | 22 |
 | Tests reported by that batch | 296 |

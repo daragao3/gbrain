@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# CI guard: fail if a new `await import(...)` lands on the PGLite-live path.
+# CI guard for direct, unmarked `await import(...)` sites in the engine and
+# migration implementation files audited after Windows `bun test` runs began
+# disappearing before their summary block.
 #
-# A dynamic import issued from an async method WHILE the PGLite WASM instance
-# is live takes the whole `bun test` process down on Windows with exit 127
-# (`ERROR_PROC_NOT_FOUND` — a WASM/native load failure, NOT shell "command not
-# found"). Bun dies BEFORE printing its summary block, so a single occurrence
-# discards the pass/fail totals for EVERY file in that invocation: a 253-file
-# shard reports `pass=0 fail=0 rc=127` and the suite cannot gate anything.
+# This is a deliberately line-oriented check. It catches direct matching lines
+# in the named files; it does NOT inspect transitive callees, build a call graph,
+# or prove that a particular site executes while PGLite is live. Its job is to
+# keep this small audited surface explicit while deeper Windows test-runner and
+# retained-memory work continues.
 #
-# The identical call under `bun run` always exits 0, which is why this only
-# ever surfaces in the test runner — and CI is ubuntu-only, so Linux never
-# surfaces it at all. That combination (invisible on CI, fatal on Windows) is
-# what makes it a silent-reintroduction risk and why this guard exists.
-#
-# WHAT IS SCANNED (the files an engine method can reach while WASM is live):
+# WHAT IS SCANNED:
 #   - src/core/pglite-engine.ts   — the engine itself
 #   - src/core/postgres-engine.ts — engine parity (CLAUDE.md invariant: a
 #     change lands in both engines or neither)
@@ -85,24 +81,18 @@ done
 
 if [ -n "$OUT" ]; then
   {
-    echo "ERROR: dynamic import on the PGLite-live path:"
+    echo "ERROR: direct unmarked dynamic import in an audited engine file:"
     echo
     printf '%s' "$OUT"
     echo
-    echo "An 'await import(...)' issued from an async method while the PGLite"
-    echo "WASM instance is live takes the whole 'bun test' process down on"
-    echo "Windows with exit 127, BEFORE Bun prints its summary — discarding"
-    echo "pass/fail totals for every file in that invocation."
+    echo "Prefer a static top-level import. Check whether the module is already"
+    echo "in the static graph or is a runtime leaf before assuming laziness helps."
     echo
-    echo "Hoist it to a static top-level import. Most candidates cost nothing:"
-    echo "check whether the module is already in the static graph, or is a"
-    echo "runtime leaf (no imports of its own)."
+    echo "If the lazy load is genuinely load-bearing, append an"
+    echo "'engine-dynamic-import-ok' comment to the line and explain why."
     echo
-    echo "If the lazy load is genuinely load-bearing for startup cost, append an"
-    echo "'engine-dynamic-import-ok' comment to the line with the reason."
-    echo
-    echo "This is invisible on CI (ubuntu-only) and under 'bun run' (always"
-    echo "exits 0). A green CI run does NOT mean this is safe on Windows."
+    echo "This guard is line-oriented. It does not inspect transitive callees or"
+    echo "prove that a matching site executes while PGLite is live."
   } >&2
   exit 1
 fi
