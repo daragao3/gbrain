@@ -91,8 +91,8 @@ a list of files written. JSON mode (`--json`) returns the full
 
 ## When to invoke
 
-- The user developed a skill in their host fork (Wintermute, Neuromancer,
-  Zion, etc.) and wants other gbrain clients to be able to use it
+- The user developed a skill in their OpenClaw deployment or another host
+  fork and wants other gbrain clients to be able to use it
 - A skill has proven itself in production and is ready to generalize
 - The user explicitly asks to "harvest" or "publish" a skill upstream
 
@@ -123,7 +123,7 @@ Ask the user:
 - What slug should the harvested skill have? (Slugs must be kebab-case,
   globally unique in the gbrain bundle.)
 - Which host repo is the source? (Path to repo root, not to the skill
-  directory — e.g. `~/git/wintermute`, not `~/git/wintermute/skills/foo`.)
+  directory — e.g. `~/git/my-openclaw`, not `~/git/my-openclaw/skills/foo`.)
 - Should paired source files come along? (Check the host SKILL.md's
   frontmatter `sources:` array.)
 
@@ -153,10 +153,9 @@ files and apply this checklist. If anything matches, edit the host
 file FIRST, then run harvest.
 
 1. **Fork-specific names → generic phrasing**
-   - `Wintermute` → `your OpenClaw` (or `OpenClaw deployment`)
-   - `Neuromancer`, `Zion`, `<personal-fork-name>` → same treatment
-   - Personal first names (`garry`, `jane`, etc.) → `the user` /
-     `you` / a generic placeholder
+   - `<personal-fork-name>` → `your OpenClaw` (or `OpenClaw deployment`)
+   - Other private deployment names → same treatment
+   - Personal first names → `the user` / `you` / a generic placeholder
 
 2. **Real entities → placeholders**
    - Real people, companies, deals, funds → placeholder slugs
@@ -197,7 +196,7 @@ gbrain skillpack harvest <slug> --from <host-repo-root>
 Default behavior:
 - Path-confinement + symlink rejection at file copy
 - Privacy linter runs against `~/.gbrain/harvest-private-patterns.txt`
-  (plus built-in defaults: `\bWintermute\b`, email, Slack channels)
+  plus built-in private-name, email, and Slack-channel checks
 - On any match → rollback (delete the harvested files) + exit non-zero
 - `openclaw.plugin.json` updated to add the slug, sorted
 
@@ -240,8 +239,8 @@ gbrain skillpack harvest <slug> --from <host-repo-root> --no-lint
 ```
 
 **Document the bypass in the commit message.** Future maintainers
-should be able to see WHY the lint was bypassed (e.g. "Wintermute
-appears in a citation, not a real reference — verified manually").
+should be able to see WHY the lint was bypassed (e.g. "the matched
+private-name token appears only in a citation — verified manually").
 
 Never bypass the linter on a casual basis. The whole point of the
 default-on lint is that real names occasionally slip through the

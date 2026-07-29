@@ -2,26 +2,71 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.72.1] - 2026-07-28
+
+**A partial migration now tells you exactly what failed and why.**
+
+`gbrain apply-migrations` already tracked each migration phase in its ledger, including the phase name, whether it completed, and the failure detail. But when a migration finished as partial, the terminal only said `PARTIAL` and told you to run it again. The useful part stayed hidden in `~/.gbrain/migrations/completed.jsonl`, so diagnosing the problem meant opening the ledger or rerunning the migration's subprocesses by hand.
+
+The terminal now prints only the failed phases directly under the partial result. Each line includes the phase name and its detail when one is available. A migration that reports `status=failed` uses the same readable format. If an orchestrator throws before it can return phases, the runner records a synthetic `orchestrator` failure with the exception message, so the ledger no longer contains a reasonless partial attempt.
+
+### How to use it
+
+Run migrations as before:
+
+```bash
+gbrain apply-migrations --yes
+```
+
+A partial result now looks like this:
+
+```text
+Migration v0.12.0 finished as PARTIAL.
+Failed phase(s):
+  - verify: could not read gbrain stats
+Re-run `gbrain apply-migrations --yes` after resolving any pending host-work items.
+```
+
+### Things to watch
+
+This changes the human-readable terminal output from one line to several lines when failed phases are available. The stable `finished as PARTIAL` text remains present. Repository consumers use exit status or the documented progress JSON stream rather than parsing this banner, so no in-repository integration needs an update.
+
+## To take advantage of v0.42.72.1
+
+Nothing to configure. Upgrade and run migrations normally. If a migration is partial, the terminal now names the failed phase and reason before the retry instruction.
+
+### Itemized changes
+
+#### Fixed
+- **Partial migrations name the failed work.** `formatFailedPhases()` in `src/commands/apply-migrations.ts` filters out completed and skipped phases, trims subprocess detail, and renders each failed phase for the terminal.
+- **Every terminal failure path carries a reason.** Partial results and explicit failed results surface their phase arrays. Throwing orchestrators persist a synthetic failed phase with the exception message in `~/.gbrain/migrations/completed.jsonl`.
+
+#### Tests
+- **Formatter behavior and terminal-path wiring are pinned.** `test/apply-migrations.test.ts` covers missing phases, multiple failures, blank details, and trimmed subprocess output, then checks that partial results, explicit failures, and thrown orchestrators all route through the formatter.
+
+#### Maintenance
+- **GitHub Actions pins are current.** Workflow references for checkout and release publishing were refreshed to their current immutable commits.
+
 ## [0.42.72.0] - 2026-07-28
 
-**Three GBrain features did nothing on Windows because a folder check compared paths using the wrong separator. All three work now.**
+**Two Windows workflows and one shared path-policy helper rejected valid folders because they compared paths using the wrong separator. All three checks now understand native paths.**
 
-Several parts of GBrain need to confirm that a file sits inside a folder they are allowed to touch. They do it by comparing the folder's path against the file's path. Windows separates folders with a backslash, while Mac and Linux use a forward slash. Three of these checks had the forward slash written directly into them. On Windows the comparison could never match, so the check concluded that a file was outside the folder even when it plainly sat inside, and the feature it guarded refused to do anything at all.
+Several parts of GBrain need to confirm that a file sits inside a folder they are allowed to touch. They do it by comparing the folder's path against the file's path. Windows separates folders with a backslash, while Mac and Linux use a forward slash. Three of these checks had the forward slash written directly into them. On Windows the comparison could never match, so the check concluded that a file was outside the folder even when it plainly sat inside.
 
-Refusing is the safe direction for a check like this, so nothing slipped through. What happened instead is that three features quietly stopped working on Windows: syncing a subfolder of a repository, the archive crawler's list of folders it may scan, and copying skill files during harvest. Each one turned itself off and reported the refusal as though the user had asked for something out of bounds.
+Refusing is the safe direction for a check like this, so nothing slipped through. What happened instead is that syncing a repository subfolder and copying skill files during harvest stopped working on Windows. The archive crawler's shared path-policy helper had the same platform bug and now evaluates native paths correctly for callers that use it.
 
 The reason this went unnoticed for so long is in the test suite. Around twenty test files wrote their expected paths with forward slashes spelled out, so the tests agreed with the broken behavior instead of catching it. GBrain's automated tests run on Linux, where a forward slash is correct, so they could never have caught this on their own. Those expectations now build paths using whatever separator the machine actually uses, which makes the tests able to fail on Windows for the first time.
 
 ### How to use it
 
-Nothing to configure. The three features work on Windows from this release:
+Nothing to configure. Existing Windows workflows now accept valid native paths:
 
 ```bash
 gbrain sync --src-subpath docs
 ```
 
 ```bash
-gbrain doctor
+gbrain skillpack harvest <slug> --from <host-repo-root>
 ```
 
 If you are on Mac or Linux, this release changes nothing for you. The separator these checks now ask for is already the forward slash they had written in, so the behavior is identical.
@@ -30,13 +75,13 @@ If you are on Mac or Linux, this release changes nothing for you. The separator 
 
 The test expectations now ask `path` for the separator, but the folder structure in each expectation stays written out by hand. That is deliberate. If an expectation built its whole path the same way the code under test does, it would stop being a check and start being a copy of the thing it is supposed to pin.
 
-This release fixes the three checks that had a feature visibly turned off behind them. Other places in the codebase still write the separator in the same way. Some of those are correct as written, because they compare page slugs rather than file paths, and a slug always uses a forward slash on every platform. The rest are listed in `TODOS.md` for a follow-up pass, so the remaining work is written down rather than rediscovered.
+This release fixes the three checks covered by the sweep. Other places in the codebase still write the separator in the same way. Some are correct as written because they compare page slugs or git-relative paths, which always use a forward slash. `TODOS.md` records a classified follow-up rather than suggesting a blind replacement.
 
 ### Itemized changes
 
 #### Fixed
 - **Syncing a subfolder of a repository refused every folder on Windows.** `src/commands/sync.ts` compared the sync scope against the repository root using a written-in forward slash, so every in-repository subfolder was read as sitting outside the repository. This is what made `gbrain sync --src-subpath` unusable on Windows.
-- **The archive crawler allowed nothing on Windows.** `normalizeOnePath` in `src/core/archive-crawler-config.ts` appended a forward slash to a resolved path, so the allowed-folders check matched nothing and denied every scan path it was given.
+- **The archive crawler's path-policy helper rejected valid Windows paths.** `normalizeOnePath` in `src/core/archive-crawler-config.ts` appended a forward slash to a resolved path, so its allow-list comparison matched nothing on Windows. The shared helper now compares both sides using platform-correct semantics.
 - **Copying skill files refused every source on Windows.** The containment check in `src/core/skillpack/copy.ts` built its comparison prefix with a forward slash and compared it against a resolved native path, so harvest rejected every file it was asked to copy.
 
 #### Tests
@@ -49,7 +94,7 @@ This release fixes the three checks that had a feature visibly turned off behind
 
 ## To take advantage of v0.42.72.0
 
-Nothing to do on Mac or Linux. If you run GBrain on Windows, the three features above start working after you upgrade, with no configuration change. If you had worked around the sync limitation by pointing GBrain at a subfolder as its own repository, you can go back to `--src-subpath` against the real repository root.
+Nothing to do on Mac or Linux. If you run GBrain on Windows, sync subpaths and skillpack harvest start accepting valid native paths after you upgrade, with no configuration change. If you had worked around the sync limitation by pointing GBrain at a subfolder as its own repository, you can go back to `--src-subpath` against the real repository root.
 
 ## [0.42.71.0] - 2026-07-28
 
@@ -6149,7 +6194,7 @@ built-in registry covering the most common chat-export shapes on Earth, plus an
 opt-in LLM fallback for the long tail. The dream cycle picks the right parser
 per page automatically — no config, no waiting for the next release.
 
-The same wave introduces a new `progressive-batch` primitive (Wintermute-inspired
+The same wave introduces a new `progressive-batch` primitive (production-inspired
 ramp-up: trial 10 → 100 → 500 → full with verification at each stage) so future
 batch operations get the discipline for free instead of each reinventing it.
 
@@ -8339,7 +8384,7 @@ No action required — this is a docs-only release. The wave commitments below l
 Five items duplicate older entries lower in TODOS.md (`.sql` indexing, Magika, doc_comment, CJK items) — duplication noted inline. The new top section is the canonical wave-commitment register; historical entries stay as detail.
 ## [0.40.7.0] - 2026-05-23
 
-**Your agents can now author your brain's schema pack themselves — no more shell-out, no more hand-editing YAML.** If you've ever opened `gbrain` and noticed thousands of pages stuck as untyped "notes" under `meetings/` or `research/`, this release closes that loop. Tell Wintermute (or any agent connected via MCP) "my brain has 4000 untyped meetings pages — add a `meeting` type and backfill them," and it does the whole thing safely: locks the pack file so two agents can't race, validates the change won't create dangling references, writes atomically so a crash never leaves the pack half-written, audits the mutation with the agent's identity, then updates every matching page in 1000-row batches that never wedge concurrent writers. The cathedral that was bundled but unreachable in v0.39 is now reachable from the outside.
+**Your agents can now author your brain's schema pack themselves — no more shell-out, no more hand-editing YAML.** If you've ever opened `gbrain` and noticed thousands of pages stuck as untyped "notes" under `meetings/` or `research/`, this release closes that loop. Tell your OpenClaw (or any agent connected via MCP) "my brain has 4000 untyped meetings pages — add a `meeting` type and backfill them," and it does the whole thing safely: locks the pack file so two agents can't race, validates the change won't create dangling references, writes atomically so a crash never leaves the pack half-written, audits the mutation with the agent's identity, then updates every matching page in 1000-row batches that never wedge concurrent writers. The cathedral that was bundled but unreachable in v0.39 is now reachable from the outside.
 
 This release rebuilds the design from a closed community PR ([#1321](https://github.com/garrytan/gbrain/pull/1321)) by `@garrytan-agents` into a production-grade `gbrain schema` cathedral. The four mutation verbs that PR proposed (`add-type`, `remove-type`, `stats`, `sync`) all ship — hardened with atomic+locked+audited writes, pack-aware fallback semantics that fail loud instead of silently re-introducing types you removed, and a batched MCP op (`schema_apply_mutations`) that lets a remote agent compose multi-step refactors as one atomic transaction. The lint surface grew from 2 rules to 11. The graph visualization renders link verbs. And the agent on-ramp story — RESOLVER routing, a `schema-author` skill with explicit boundary callouts to `brain-taxonomist` and `eiirp`, a `conventions/schema-evolution.md` decision tree for "when to add a type vs alias vs prefix" — means agents will actually FIND this surface instead of inventing their own ad-hoc YAML edits.
 
@@ -8364,8 +8409,8 @@ gbrain schema sync --apply     # backfills page.type on matching pages
 gbrain whoknows "machine learning"   # researcher-typed pages now route through expert routing
 
 # 4. If you run `gbrain serve --http` for remote MCP, register a client
-#    with admin scope so Wintermute or any other agent can author packs remotely:
-gbrain auth register-client wintermute --scopes admin
+#    with admin scope so your OpenClaw or any other agent can author packs remotely:
+gbrain auth register-client my-openclaw --scopes admin
 ```
 
 If any step fails or numbers look wrong, please file an issue with the output of `gbrain doctor` and `tail -20 ~/.gbrain/audit/schema-mutations-*.jsonl` so we can debug the mutation chain.
@@ -8393,7 +8438,7 @@ If any step fails or numbers look wrong, please file an issue with the output of
 - `schema_graph` (read) — JSON `{nodes, edges}` derived from link types and frontmatter_links.
 - `schema_explain_type` (read) — resolved settings for one declared type.
 - `schema_review_orphans` (read) — drilldown into untyped pages.
-- `schema_apply_mutations` (admin scope, NOT localOnly) — **batched** atomic mutation op. One call applies a list of mutations (`add_type`, `add_link_type`, `set_extractable`, etc.) inside a single `withPackLock` scope. Remote agents like Wintermute can compose multi-step refactors as one transaction. Audit log records `actor: mcp:<clientId8>` per mutation.
+- `schema_apply_mutations` (admin scope, NOT localOnly) — **batched** atomic mutation op. One call applies a list of mutations (`add_type`, `add_link_type`, `set_extractable`, etc.) inside a single `withPackLock` scope. Remote agents such as your OpenClaw can compose multi-step refactors as one transaction. Audit log records `actor: mcp:<clientId8>` per mutation.
 - `reload_schema_pack` (admin) — flush cache + extends-chain cascade.
 
 **Lint rules grew from 2 to 11:**
@@ -14995,7 +15040,7 @@ Tests: 4570 unit pass / 1 pre-existing master flake (`BrainRegistry — lazy ini
 **Thin-client mode actually works now. `gbrain init --mcp-only` is no longer a half-built bridge.**
 **Every read + write + admin op routes through MCP; refused commands carry pinpoint hints.**
 
-Hermes/Neuromancer hit this in production: thin-client install of PR #1137 author (102k pages,
+A production OpenClaw hit this in thin-client mode on a large brain (102k pages,
 265k chunks). Every CLI search returned zero rows. Exit code 0. No warning. The agent
 configured `gbrain init --mcp-only`, then walked into a wall of "no results found" against
 a brain that had everything it needed. The CLI was opening the empty local PGLite,
