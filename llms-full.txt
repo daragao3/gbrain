@@ -261,6 +261,11 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   CI can never catch it. When you add a check, prefix it. Note `.gitattributes` only changes
   what a FUTURE checkout materializes; an existing clone keeps its CRLF copies until you
   replace them (`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`).
+- **Dependency security floors move as one compatible unit.** When a fixed transitive
+  version falls outside its current direct parent's declared range, upgrade the direct
+  parent to a release that explicitly admits the fixed line before raising the override.
+  Keep direct pins, `package.json` overrides, and `bun.lock` synchronized; regenerate the
+  lockfile rather than hand-editing it. Pinned by `test/dependency-security-floors.test.ts`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
