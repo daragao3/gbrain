@@ -546,7 +546,7 @@ In `scripts/run-verify-parallel.sh`, add this stable `CHECKS` entry near the oth
 bun test test/scripts/check-engine-dynamic-import.test.ts > .context/engine-dynamic-import-wiring-green.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
 ```
 
-Expected: exit `0`; seven tests pass.
+Expected: exit `0`; the full guard regression suite passes.
 
 ```bash
 bun run check:engine-dynamic-import > .context/engine-dynamic-import-package-check.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
@@ -687,7 +687,7 @@ Expected: one local documentation commit. If one generated bundle is byte-identi
 bun test test/scripts/check-engine-dynamic-import.test.ts > .context/engine-dynamic-import-final-test.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
 ```
 
-Expected: exit `0`; seven tests pass.
+Expected: exit `0`; the full guard regression suite passes.
 
 ```bash
 bash scripts/check-engine-dynamic-import.sh > .context/engine-dynamic-import-final-guard.txt 2>&1; rc=$?; printf 'EXIT=%s\n' "$rc"; exit "$rc"
@@ -748,6 +748,7 @@ llms-full.txt
 llms.txt
 package.json
 scripts/check-engine-dynamic-import.sh
+scripts/check-engine-dynamic-import.ts
 scripts/run-verify-parallel.sh
 src/core/migrate.ts
 src/core/pglite-engine.ts
@@ -770,7 +771,7 @@ Expected review findings:
 - All four gateway imports remain inside their original local `try/catch` fallback boundaries.
 - No accessor logic, fallback ordering, SQL, public signature, or engine parity behavior changes.
 - The guard reports all violations, strips CR, ignores comment-only lines, and requires line-level opt-outs.
-- Package and verify wiring both call the guard through its package script; the package script itself invokes Bash explicitly.
+- The package script invokes the shell guard through Bash; `check:all` invokes that shell guard directly, and the parallel verify dispatcher invokes the package check.
 - Documentation is current-state and makes no deterministic Windows-crash claim.
 
 - [ ] **Step 8: Commit the approved plan document locally**

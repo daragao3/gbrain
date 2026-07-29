@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -23,9 +23,9 @@ function fixture(name: string, content: string): string {
   return path;
 }
 
-function runGuard(files: string[] = []) {
+function runGuard(files: string[] = [], cwd = REPO_ROOT) {
   const result = spawnSync(BASH, [GUARD, ...files], {
-    cwd: REPO_ROOT,
+    cwd,
     encoding: 'utf8',
     timeout: 30_000,
   });
@@ -167,6 +167,31 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(`${basename(path)}:2:`);
   });
 
+  it('does not accept marker text outside comment trivia', () => {
+    const path = fixture(
+      'marker-text.ts',
+      [
+        "const first = import('./engine-dynamic-import-ok.ts');",
+        "const marker = 'engine-dynamic-import-ok'; const second = import('./second.ts');",
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+    expect(result.stderr).toContain(`${basename(path)}:2:`);
+  });
+
+  it('reports readable-file violations alongside missing inputs', () => {
+    const path = fixture('mixed-violator.ts', "const helper = import('./helper.ts');\n");
+    const missing = join(tmpdir(), `gbrain-engine-import-missing-${process.pid}.ts`);
+    const result = runGuard([path, missing]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+    expect(result.stderr).toContain('cannot read input file');
+    expect(result.stderr).toContain(basename(missing));
+  });
+
   it('fails when an explicit input file is missing', () => {
     const missing = join(tmpdir(), `gbrain-engine-import-missing-${process.pid}.ts`);
     const result = runGuard([missing]);
@@ -174,6 +199,26 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain('cannot read input file');
     expect(result.stderr).toContain(basename(missing));
   });
+
+  it('resolves default inputs from the guard repository', () => {
+    const foreign = mkdtempSync(join(tmpdir(), 'gbrain-engine-import-foreign-'));
+    tempDirs.push(foreign);
+    const foreignCore = join(foreign, 'src', 'core');
+    mkdirSync(foreignCore, { recursive: true });
+    expect(spawnSync('git', ['init', '-q'], { cwd: foreign }).status).toBe(0);
+    writeFileSync(
+      join(foreignCore, 'pglite-engine.ts'),
+      "const foreign = import('./foreign.ts');\n",
+      'utf8',
+    );
+    for (const name of ['postgres-engine.ts', 'migrate.ts']) {
+      writeFileSync(join(foreignCore, name), '', 'utf8');
+    }
+
+    const result = runGuard([], foreign);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('check-engine-dynamic-import: ok (3 file(s) scanned)');
+  }, 30_000);
 
   it('still catches a violation in CRLF input', () => {
     const path = fixture('crlf.ts', "async function load() {\r\n  return await import('./helper.ts');\r\n}\r\n");

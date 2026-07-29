@@ -13,11 +13,13 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
+
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
-  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "$ROOT" ] || ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$ROOT" ] || ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
   cd "$ROOT" || exit 1
   FILES=(
     src/core/pglite-engine.ts
@@ -26,5 +28,4 @@ else
   )
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 1
 exec bun "$SCRIPT_DIR/check-engine-dynamic-import.ts" "${FILES[@]}"
