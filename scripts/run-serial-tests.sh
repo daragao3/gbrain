@@ -41,7 +41,17 @@ echo "[serial-tests] running ${#files[@]} file(s), one bun process per file"
 fail_count=0
 failed_files=()
 for f in "${files[@]}"; do
-  if ! bun test --max-concurrency=1 --timeout=60000 "$f"; then
+  test_timeout=60000
+  if [ "$f" = "test/pglite-snapshot-file-seeding.serial.test.ts" ]; then
+    test_timeout=900000
+    echo "[serial-tests] building PGLite snapshot fixture for $f"
+    if ! bun run build:pglite-snapshot; then
+      fail_count=$((fail_count + 1))
+      failed_files+=("$f (fixture build)")
+      continue
+    fi
+  fi
+  if ! bun test --max-concurrency=1 --timeout="$test_timeout" "$f"; then
     fail_count=$((fail_count + 1))
     failed_files+=("$f")
   fi
