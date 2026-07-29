@@ -50,7 +50,7 @@ export function getMigration(version: string): Migration | null {
   return migrations.find(m => m.version === version) ?? null;
 }
 
-export type { Migration, FeaturePitch, OrchestratorOpts, OrchestratorResult } from './types.ts';
+export type { Migration, FeaturePitch, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 
 /**
  * Compare two semver strings (MAJOR.MINOR.PATCH). Returns -1 / 0 / 1.

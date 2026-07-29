@@ -2,6 +2,51 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.72.1] - 2026-07-28
+
+**A partial migration now tells you exactly what failed and why.**
+
+`gbrain apply-migrations` already tracked each migration phase in its ledger, including the phase name, whether it completed, and the failure detail. But when a migration finished as partial, the terminal only said `PARTIAL` and told you to run it again. The useful part stayed hidden in `~/.gbrain/migrations/completed.jsonl`, so diagnosing the problem meant opening the ledger or rerunning the migration's subprocesses by hand.
+
+The terminal now prints only the failed phases directly under the partial result. Each line includes the phase name and its detail when one is available. A migration that reports `status=failed` uses the same readable format. If an orchestrator throws before it can return phases, the runner records a synthetic `orchestrator` failure with the exception message, so the ledger no longer contains a reasonless partial attempt.
+
+### How to use it
+
+Run migrations as before:
+
+```bash
+gbrain apply-migrations --yes
+```
+
+A partial result now looks like this:
+
+```text
+Migration v0.12.0 finished as PARTIAL.
+Failed phase(s):
+  - verify: could not read gbrain stats
+Re-run `gbrain apply-migrations --yes` after resolving any pending host-work items.
+```
+
+### Things to watch
+
+This changes the human-readable terminal output from one line to several lines when failed phases are available. The stable `finished as PARTIAL` text remains present. Repository consumers use exit status or the documented progress JSON stream rather than parsing this banner, so no in-repository integration needs an update.
+
+## To take advantage of v0.42.72.1
+
+Nothing to configure. Upgrade and run migrations normally. If a migration is partial, the terminal now names the failed phase and reason before the retry instruction.
+
+### Itemized changes
+
+#### Fixed
+- **Partial migrations name the failed work.** `formatFailedPhases()` in `src/commands/apply-migrations.ts` filters out completed and skipped phases, trims subprocess detail, and renders each failed phase for the terminal.
+- **Every terminal failure path carries a reason.** Partial results and explicit failed results surface their phase arrays. Throwing orchestrators persist a synthetic failed phase with the exception message in `~/.gbrain/migrations/completed.jsonl`.
+
+#### Tests
+- **Formatter behavior and terminal-path wiring are pinned.** `test/apply-migrations.test.ts` covers missing phases, multiple failures, blank details, and trimmed subprocess output, then checks that partial results, explicit failures, and thrown orchestrators all route through the formatter.
+
+#### Maintenance
+- **GitHub Actions pins are current.** Workflow references for checkout and release publishing were refreshed to their current immutable commits.
+
 ## [0.42.72.0] - 2026-07-28
 
 **Two Windows workflows and one shared path-policy helper rejected valid folders because they compared paths using the wrong separator. All three checks now understand native paths.**
