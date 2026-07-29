@@ -37,8 +37,12 @@ events — they return in under a second.
 - Data results (`--json` payloads from each command): **`stdout`**.
 - Final human summaries: **`stdout`**.
 
+Failure diagnostics may also be written to `stderr` and are not progress events.
+Consumers should recognize progress records by parsing a JSON object with an
+`event` field rather than treating every `stderr` line as JSON.
+
 Agents can safely capture stdout for their result parsing and read stderr
-separately for progress.
+separately for progress and failure diagnostics.
 
 ## Flags
 
