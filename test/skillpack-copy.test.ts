@@ -224,6 +224,7 @@ describe('copyArtifacts — canonical-path containment (harvest path)', () => {
     const dst = scratch('copy-dst-');
     const result = copyArtifacts(walkSourceDir(skillDir, dst), { confineRealpath: skillDir });
     expect(result.summary.wroteNew).toBe(1);
+    expect(readFileSync(join(dst, 'SKILL.md'), 'utf-8')).toBe('safe');
   });
 
   // Both sides of the containment check are realpathSync() output, so the

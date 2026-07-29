@@ -108,8 +108,8 @@ describe('#2607 — git fast path excludes what incremental sync excludes', () =
         includeGitignored: true,
       }));
 
-      expect(defaultFiles).not.toContain('Meetings/weekly.md');
-      expect(includeIgnored).toContain('Meetings/weekly.md');
+      expect(defaultFiles).not.toContain(join('Meetings', 'weekly.md'));
+      expect(includeIgnored).toContain(join('Meetings', 'weekly.md'));
     } finally {
       rmSync(ignoredRepo, { recursive: true, force: true });
     }
