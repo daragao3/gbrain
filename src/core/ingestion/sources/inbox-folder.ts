@@ -42,6 +42,7 @@ import { watch, type FSWatcher, type ChokidarOptions } from 'chokidar';
 import { mkdir, rename, readFile, stat, lstat } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { resolve, basename, join, dirname, extname } from 'node:path';
+import { isPathInside } from '../../path-confine.ts';
 import {
   computeContentHash,
   type IngestionContentType,
@@ -155,8 +156,11 @@ export function createInboxFolderSource(opts: InboxFolderSourceOpts): IngestionS
    *  Finder copy operations. */
   const pending: Map<string, NodeJS.Timeout> = new Map();
 
+  // Fail-OPEN if this is wrong: it feeds chokidar's `ignored:` predicate, so a
+  // false negative means the watcher re-discovers everything we just archived
+  // and re-emits it — an ingest loop, not a missed file.
   function isUnderArchive(absPath: string): boolean {
-    return absPath.startsWith(archiveDirAbs + '/') || absPath === archiveDirAbs;
+    return isPathInside(absPath, archiveDirAbs);
   }
 
   async function handleAdd(absPath: string, ctx: IngestionSourceContext): Promise<void> {

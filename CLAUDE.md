@@ -75,6 +75,15 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   `node:url` or `import.meta.dir`; in tests use `REPO_ROOT`/`repoPath()` from
   `test/helpers/repo-root.ts`. Guarded by `scripts/check-url-pathname-fs.sh` (opt out a
   genuine URL-path use with a `url-pathname-guard-ok` comment).
+- **Native filesystem directory boundaries use the shared path helpers.** Never implement
+  them with `child.startsWith(parent + '/')`. Use `isPathInside()` for inclusive lexical
+  checks, `isPathStrictlyInside()` when equality must be excluded, `isPathContained()` for
+  existing symlink-resolved paths, or `isWriteTargetContained()` for a write target that may
+  not exist yet. These helpers live in `src/core/path-confine.ts` and use native
+  `path.relative()` semantics. They apply only to filesystem paths: page slugs, object keys,
+  URL paths, and Git-relative paths retain `/` as their platform-independent separator.
+  `scripts/check-path-sep-boundary.sh` guards this invariant; use `path-sep-guard-ok` only
+  for a documented logical `/` contract.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows

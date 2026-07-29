@@ -894,6 +894,7 @@ import {
   appendFileSync as fsAppendFileSync,
 } from 'node:fs';
 import { resolve as pathResolve, dirname as pathDirname } from 'node:path';
+import { isPathInside } from '../core/path-confine.ts';
 
 interface ManifestFileEntry {
   src: string;
@@ -980,7 +981,10 @@ function validateTargetRepo(
   } catch {
     // ignore — non-fatal
   }
-  if (gbrainRoot && (resolvedTarget === gbrainRoot || gbrainRoot.startsWith(resolvedTarget + '/'))) {
+  // Fail-OPEN if this is wrong: a missed match lets the installer write manifest
+  // files into gbrain's own checkout or an ancestor of it. `isPathInside` covers
+  // both arms (target === gbrain, and target is an ANCESTOR of gbrain).
+  if (gbrainRoot && isPathInside(gbrainRoot, resolvedTarget)) {
     return `refusing to install into gbrain itself (or a parent dir): ${resolvedTarget}`;
   }
 

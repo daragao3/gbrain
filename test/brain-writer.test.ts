@@ -8,6 +8,7 @@ import {
   scanBrainSources,
   BrainWriterError,
 } from '../src/core/brain-writer.ts';
+import { isPathInside } from '../src/core/path-confine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -174,7 +175,7 @@ describe('writeBrainPage', () => {
       expect(backupPath).toBeDefined();
       // Centralized — under the test-injected backupRoot, NOT a sibling .bak.
       expect(existsSync(file + '.bak')).toBe(false);
-      expect(backupPath!.startsWith(backupRoot + '/')).toBe(true);
+      expect(isPathInside(backupPath!, backupRoot)).toBe(true);
       expect(backupPath!.endsWith('.bak')).toBe(true);
       expect(existsSync(backupPath!)).toBe(true);
       expect(readFileSync(backupPath!, 'utf8')).toBe(original);

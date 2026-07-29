@@ -12,12 +12,12 @@ Seven test command tiers, each with a clear scope:
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
 | `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
-| `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (32 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
+| `bun run verify` | CI's authoritative pre-test gate, fanned out by `scripts/run-verify-parallel.sh`. It runs every entry in that script's `CHECKS` array: the complete `check:*` battery plus typecheck. CI calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
 | `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation). | ~1s per quarantined file | Debugging a specific quarantined file. |
 | `bun run test:e2e` | Real Postgres E2E. Requires Docker + `DATABASE_URL`. Sequential. | ~5-10min | Pre-ship; nightly. |
-| `bun run check:all` | The historical pre-check scripts (23, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (32 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+| `bun run check:all` | The historical sequential check chain. It overlaps `verify` heavily but is not a superset; the `CHECKS` array in `scripts/run-verify-parallel.sh` remains authoritative, while `check:all` keeps a few local-only extras. | ~10s | Local-only sweep for the extras. |
 
 ### Adding a check to `verify`
 
@@ -41,8 +41,8 @@ over this codebase is legitimately longer than the cap the grep-style guards sha
 the shared default tight is what makes a hung or accidentally-quadratic check fail fast
 rather than stall the run.
 
-All 32 checks are spawned at once with no concurrency cap. On a heavily loaded machine that
-can exhaust the process table and produce failures unrelated to the code — the signature is
+Every entry in the `CHECKS` array is spawned at once with no concurrency cap. On a heavily
+loaded machine that can exhaust the process table and produce failures unrelated to the code — the signature is
 `fork: retry: Resource temporarily unavailable` or `dofork: child -1` in the output. Re-run
 when the machine is quieter, or run the single check directly (`bash scripts/check-foo.sh`)
 to confirm.
@@ -173,6 +173,8 @@ Bun.spawnSync([process.execPath, repoPath('src', 'cli.ts')], { cwd: REPO_ROOT })
 `scripts/check-url-pathname-fs.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on that pattern. It leaves alone the cases where `.pathname` is the right accessor — reading a database name out of a connection string, routing an HTTP request, assigning `u.pathname` — and a `url-pathname-guard-ok` comment opts out a line that genuinely wants a URL path. Outside tests, use `fileURLToPath()` from `node:url` or `import.meta.dir`.
 
 Same class, same fix: build expected paths with `join()` rather than a hardcoded forward-slash literal when the code under test joins them, or the assertion can only pass on POSIX.
+
+Filesystem directory-boundary tests should exercise the shared helpers in `src/core/path-confine.ts`, including equality, sibling-prefix separation, upward traversal, and platform-specific separator and case behavior. `bun run check:path-sep` rejects separator-sensitive filesystem prefix checks. Do not convert page slugs, object keys, URL paths, or Git-relative paths to native separators; those contracts deliberately use `/`.
 
 **Never match a YAML frontmatter fence with an LF-only `---\n`.** `content.match(/^---\n…/)` has no `m` flag, so `^` anchors at offset 0 only and a file starting `---\r\n` matches nowhere. Nothing throws: the parser returns null or an empty array, and every caller concludes the file has no frontmatter. On Windows `core.autocrlf=true` makes every checked-out `SKILL.md` CRLF, so it fires for the whole skills tree at once, and it is an identity transform on POSIX, so Linux CI cannot catch it. `.gitattributes` cannot fix it either, because `skillsDir` is a runtime parameter and gbrain parses `SKILL.md` files it does not own.
 

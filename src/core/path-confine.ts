@@ -20,11 +20,62 @@
  */
 
 import { realpathSync, existsSync, type Stats } from 'fs';
-import { resolve as resolvePath, relative, isAbsolute, dirname, basename, join } from 'path';
+import { resolve as resolvePath, relative, isAbsolute, sep, dirname, basename, join } from 'path';
+
+/**
+ * LEXICAL directory-boundary test: true iff `child` is `parent` itself or lives
+ * inside it. Pure string/path math — does NOT touch the filesystem, so callers
+ * that already hold realpath-resolved (or deliberately unresolved) paths can use
+ * it directly. For symlink-safe confinement of raw input, use `isPathContained`.
+ *
+ * THE ONE CORRECT IDIOM — do not hand-roll `child.startsWith(parent + '/')`.
+ * That spelling has been reintroduced and fixed four separate times (sync ×3,
+ * archive-crawler ×1) because it is an IDENTITY TRANSFORM on POSIX and therefore
+ * invisible to gbrain's ubuntu-only CI. On Windows `resolve()`/`realpathSync()`
+ * emit `\`, so a hardcoded `/` can never match at the boundary and the test is
+ * pinned to `false` forever — silently turning an allow-fence into a dead
+ * feature, or (worse) a deny-fence into a permanent pass. `scripts/check-path-
+ * sep-boundary.sh` is the CI guard that keeps it from coming back a fifth time.
+ *
+ * `path.relative()` does the platform-specific work for us, which is precisely
+ * why it beats a hand-rolled comparator:
+ *   - separators: emits native `\` on win32 and accepts mixed input, so
+ *     `C:/repo` and `C:\repo` compare equal;
+ *   - case: win32 `relative()` is case-INSENSITIVE, matching NTFS — so a
+ *     deny-list spelled `Private` still catches a candidate under `private`
+ *     (the fail-open that 2847b60f called out). On POSIX it stays
+ *     case-SENSITIVE and treats `\` as an ordinary filename character, which is
+ *     the correct semantics there. No `process.platform` branch needed.
+ *   - boundary: `/foo` does not match `/foobar`, because `relative()` returns
+ *     `../foobar` rather than a `bar` suffix.
+ *
+ * The `..` test is spelled `rel === '..' || rel.startsWith('..' + sep)` rather
+ * than a bare `rel.startsWith('..')` so a legitimately-named sibling directory
+ * like `..config` is not misread as an escape.
+ *
+ * `isAbsolute(rel)` catches the win32 different-drive case: `relative('C:\\a',
+ * 'D:\\b')` returns the absolute `D:\b`, since no relative path spans volumes.
+ */
+export function isPathInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  if (rel === '') return true;                              // same directory
+  if (isAbsolute(rel)) return false;                        // different volume (win32)
+  if (rel === '..' || rel.startsWith('..' + sep)) return false; // escapes upward
+  return true;
+}
+
+/**
+ * As `isPathInside`, but STRICT: `child` must live below `parent`, not be it.
+ * Use where equality is meaningless or wrong — e.g. "is ~/.gbrain inside a git
+ * worktree", where the worktree walk must start above `~/.gbrain` itself.
+ */
+export function isPathStrictlyInside(child: string, parent: string): boolean {
+  return relative(parent, child) !== '' && isPathInside(child, parent);
+}
 
 /**
  * Symlink-safe path confinement: realpath BOTH sides, then a separator-aware
- * prefix check. A plain `startsWith()` on un-resolved paths would let a
+ * boundary check. A plain `startsWith()` on un-resolved paths would let a
  * `parent/skills` symlink → `/etc` (or `$GBRAIN_HOME/clones/<id>` → `/etc`)
  * bypass the boundary; resolving first defeats that.
  *
@@ -41,9 +92,7 @@ export function isPathContained(child: string, parent: string): boolean {
   } catch {
     return false; // missing / unresolvable path → not contained
   }
-  // Append a separator so /foo doesn't match /foobar.
-  const parentWithSep = resolvedParent.endsWith('/') ? resolvedParent : resolvedParent + '/';
-  return resolvedChild === resolvedParent || resolvedChild.startsWith(parentWithSep);
+  return isPathInside(resolvedChild, resolvedParent);
 }
 
 /**
@@ -116,6 +165,5 @@ export function isWriteTargetContained(target: string, root: string): boolean {
   }
   const base = realpathOrResolve(existing);
   const finalPath = tail.length ? join(base, ...tail) : base;
-  const rel = relative(resolvedRoot, finalPath);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return isPathInside(finalPath, resolvedRoot);
 }

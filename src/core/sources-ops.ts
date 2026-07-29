@@ -38,7 +38,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, lstatSync } from 'fs';
 import { join, dirname, basename, resolve as resolvePath } from 'path';
-import { isPathContained } from './path-confine.ts';
+import { isPathContained, isPathInside } from './path-confine.ts';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import {
@@ -389,13 +389,20 @@ export async function addSource(
       [opts.id],
     );
     for (const other of others) {
-      const a = finalPath;
-      const b = other.local_path;
-      if (a === b || a.startsWith(b + '/') || b.startsWith(a + '/')) {
+      // Resolve both sides before comparing. The raw strings are a user-supplied
+      // flag on one side and a stored registration on the other, so they can
+      // disagree on spelling ('~/brain' vs an absolute path, a trailing slash, a
+      // '.' segment) while naming the same directory — an unnormalized compare
+      // misses the overlap and admits exactly the nested source this refuses.
+      // Lexical resolve, not realpath: a not-yet-cloned `--url` target and a
+      // stale registration both legitimately point at paths that don't exist yet.
+      const a = resolvePath(finalPath);
+      const b = resolvePath(other.local_path);
+      if (isPathInside(a, b) || isPathInside(b, a)) {
         throw new SourceOpError(
           'overlapping_path',
-          `path "${a}" overlaps with existing source "${other.id}" at "${b}". ` +
-            `Overlapping sources are not allowed.`,
+          `path "${finalPath}" overlaps with existing source "${other.id}" at ` +
+            `"${other.local_path}". Overlapping sources are not allowed.`,
         );
       }
     }

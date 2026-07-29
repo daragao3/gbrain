@@ -29,6 +29,7 @@ import { gbrainPath, loadConfig } from '../core/config.ts';
 import { reflexEnabled } from '../core/context/reflex.ts';
 import { resolveSocketPath } from '../core/context/resolve-ipc.ts';
 import { homedir } from 'os';
+import { isPathInside, isPathStrictlyInside } from '../core/path-confine.ts';
 import { dirname, isAbsolute, join, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
@@ -5058,14 +5059,24 @@ export async function buildChecks(
   // Honors GBRAIN_HOME via gbrainPath().
   try {
     const gbrainHome = gbrainPath();
-    const home = process.env.HOME || '';
+    // Fall back to homedir() when HOME is unset. Stock Windows does not set
+    // HOME (it uses USERPROFILE), so `home` was '' and this entire check
+    // short-circuited to a no-op there — the warning could never fire on the
+    // platform that most needs it. Git Bash does set HOME, which is why it
+    // looked fine from a shell. $HOME still wins when present: that is POSIX
+    // semantics (and what homedir() itself does there), and it is the seam the
+    // hermetic doctor tests use to stub a fake home on both platforms.
+    const home = process.env.HOME || homedir();
     let worktreeRoot: string | null = null;
-    if (gbrainHome && home && gbrainHome.startsWith(home + '/')) {
-      // Walk up from gbrainHome's parent toward $HOME, stopping at $HOME.
+    if (gbrainHome && home && isPathStrictlyInside(gbrainHome, home)) {
+      // Walk up from gbrainHome's parent toward $HOME, stopping once we leave it.
       // We don't check gbrainHome itself: a `.git` directly inside ~/.gbrain
       // isn't a containing-worktree, it would be a brain repo cloned there.
+      // Loop bound is a path-boundary test rather than the old `cur.length >=
+      // home.length` string-length proxy, which compared native paths and could
+      // walk past $HOME on a case- or separator-differing spelling.
       let cur = dirname(gbrainHome);
-      while (cur && cur.length >= home.length) {
+      while (isPathInside(cur, home)) {
         const gitPath = join(cur, '.git');
         try {
           const st = statSync(gitPath);
@@ -5077,7 +5088,6 @@ export async function buildChecks(
         } catch {
           // No .git at this level; continue.
         }
-        if (cur === home) break;
         const parent = dirname(cur);
         if (parent === cur) break;
         cur = parent;

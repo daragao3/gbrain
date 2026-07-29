@@ -44,6 +44,7 @@ CHECKS=(
   "check:progress"
   "check:url-pathname"
   "check:frontmatter-fence"
+  "check:path-sep"
   "check:test-isolation"
   "check:wasm"
   "check:admin-build"
