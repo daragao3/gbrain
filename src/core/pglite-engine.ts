@@ -31,6 +31,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { snapshotEligible, resolveSnapshotPath } from './pglite-snapshot.ts';
 import { getFtsLanguage } from './fts-language.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
@@ -301,14 +302,18 @@ export class PGLiteEngine implements BrainEngine {
       throw new Error('Could not acquire PGLite lock. Another gbrain process is using the database.');
     }
 
-    // Tier 3: optional snapshot fast-restore. Only applies to in-memory
-    // engines (no persistent dataDir). The snapshot was built from a fresh
-    // `initSchema()` run; if the version file matches the current MIGRATIONS
-    // hash, load the dump and skip the schema replay. Mismatch or missing
-    // file silently falls back to normal init.
+    // Tier 3: optional snapshot fast-restore. In-memory brains have always
+    // been eligible. A FILE-BACKED dataDir is eligible only behind
+    // GBRAIN_PGLITE_SNAPSHOT_SEED_FILE=1 and only while it holds no cluster
+    // yet — see snapshotEligible(). Mismatched or missing snapshot files
+    // silently fall back to a normal init; the snapshot is an optimization,
+    // never authoritative.
+    this._snapshotLoaded = false; // reset: a file-backed reconnect() re-opens
     let loadDataDir: Blob | undefined;
-    if (!dataDir && process.env.GBRAIN_PGLITE_SNAPSHOT) {
-      const snapshotResult = tryLoadSnapshot(process.env.GBRAIN_PGLITE_SNAPSHOT);
+    if (process.env.GBRAIN_PGLITE_SNAPSHOT && snapshotEligible(dataDir)) {
+      const snapshotResult = tryLoadSnapshot(
+        resolveSnapshotPath(process.env.GBRAIN_PGLITE_SNAPSHOT),
+      );
       if (snapshotResult) {
         loadDataDir = snapshotResult;
         this._snapshotLoaded = true;
@@ -330,23 +335,51 @@ export class PGLiteEngine implements BrainEngine {
         }),
       );
     } catch (err) {
-      // v0.13.1: any PGLite.create() failure becomes actionable. v0.41.8.0
-      // (#1340): the previous error hint hardcoded the macOS 26.3 link, but
-      // the same crash shape can come from Bun's vfs (`/$$bunfs/root` is
-      // read-only on older macOS + Bun 1.3.x, so PGLite can't extract its
-      // pglite.data WASM payload). Route the hint by failure shape so
-      // users get the right next step.
-      const original = stringifyPgliteInitError(err); // #2674
-      const verdict = classifyPgliteInitError(original);
-      const wrapped = new Error(buildPgliteInitErrorMessage(verdict, original));
-      // Release the lock so a fresh process can try again; leaking the lock
-      // here turns a recoverable init error into a stuck-brain state.
-      if (this._lock?.acquired) {
-        try { await releaseLock(this._lock); } catch { /* ignore cleanup error */ }
-        this._lock = null;
+      // Narrow retry, on all three conditions: we passed a snapshot, AND
+      // PGLite refused because the dataDir already holds a cluster. That is
+      // the TOCTOU window between snapshotEligible()'s emptiness check and
+      // this open. Without the retry, a race turns a slow boot into a crash.
+      //
+      // Every OTHER failure — and any failure of the retry itself — falls
+      // through to the classification path, which produces the actionable
+      // bunfs / macos-26-3 / corrupt hint. A broad catch here would swallow
+      // genuine init failures and regress that diagnostic surface.
+      const original = stringifyPgliteInitError(err);
+      const raced = loadDataDir !== undefined
+        && /Database already exists, cannot load from tarball/i.test(original);
+      if (!raced) {
+        throw await this._wrapAndReleaseInitError(err);
       }
-      throw wrapped;
+      loadDataDir = undefined;
+      this._snapshotLoaded = false;
+      try {
+        this._db = await preservingProcessExitCode(() =>
+          PGlite.create({
+            dataDir,
+            extensions: { vector, pg_trgm },
+          }),
+        );
+      } catch (retryErr) {
+        throw await this._wrapAndReleaseInitError(retryErr);
+      }
     }
+  }
+
+  /**
+   * Wrap a `PGlite.create()` failure into the actionable message and release
+   * the lock. Extracted so the snapshot retry can reuse it without duplicating
+   * the lock-release — leaking the lock turns a recoverable init error into a
+   * stuck-brain state.
+   */
+  private async _wrapAndReleaseInitError(err: unknown): Promise<Error> {
+    const original = stringifyPgliteInitError(err); // #2674
+    const verdict = classifyPgliteInitError(original);
+    const wrapped = new Error(buildPgliteInitErrorMessage(verdict, original));
+    if (this._lock?.acquired) {
+      try { await releaseLock(this._lock); } catch { /* ignore cleanup error */ }
+      this._lock = null;
+    }
+    return wrapped;
   }
 
   async disconnect(): Promise<void> {
