@@ -187,6 +187,29 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(`${basename(path)}:5:`);
   });
 
+  it('does not accept markers adjacent to Unicode identifier characters', () => {
+    const path = fixture(
+      'unicode-marker-text.ts',
+      [
+        "const first = import('./first.ts'); // noéengine-dynamic-import-ok: not approved",
+        "const second = import('./second.ts'); // engine-dynamic-import-oké: not approved",
+        "const third = import('./third.ts'); // éengine-dynamic-import-oké: not approved",
+        "const fourth = import('./fourth.ts'); // nóengine-dynamic-import-ok: not approved",
+        "const fifth = import('./fifth.ts'); // 𐐀engine-dynamic-import-ok: not approved",
+        "const sixth = import('./sixth.ts'); // engine-dynamic-import-ok𐐀: not approved",
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+    expect(result.stderr).toContain(`${basename(path)}:2:`);
+    expect(result.stderr).toContain(`${basename(path)}:3:`);
+    expect(result.stderr).toContain(`${basename(path)}:4:`);
+    expect(result.stderr).toContain(`${basename(path)}:5:`);
+    expect(result.stderr).toContain(`${basename(path)}:6:`);
+  });
+
   it('allows a marker in real multiline comment trivia on the import line', () => {
     const path = fixture(
       'multiline-marker.ts',

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
 const MARKER = 'engine-dynamic-import-ok';
-const MARKER_TOKEN_CHAR = /[A-Za-z0-9_$-]/;
+const MARKER_TOKEN_CHAR = /[\p{ID_Continue}$-]/u;
 const files = process.argv.slice(2);
 const violations: string[] = [];
 const readErrors: string[] = [];
@@ -37,8 +37,8 @@ for (const file of files) {
   }
 
   for (let markerPos = sourceText.indexOf(MARKER); markerPos >= 0; markerPos = sourceText.indexOf(MARKER, markerPos + MARKER.length)) {
-    const before = sourceText[markerPos - 1];
-    const after = sourceText[markerPos + MARKER.length];
+    const before = Array.from(sourceText.slice(0, markerPos)).at(-1);
+    const after = Array.from(sourceText.slice(markerPos + MARKER.length))[0];
     const standaloneMarker = (!before || !MARKER_TOKEN_CHAR.test(before))
       && (!after || !MARKER_TOKEN_CHAR.test(after));
     const token = ts.getTokenAtPosition(sourceFile, markerPos);
