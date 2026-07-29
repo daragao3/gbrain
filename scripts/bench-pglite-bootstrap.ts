@@ -26,7 +26,7 @@ const SNAPSHOT = join(REPO, 'test', 'fixtures', 'pglite-snapshot.tar');
 const SNAPSHOT_VERSION = SNAPSHOT.replace(/\.tar$/, '.version');
 const REPS = Number(process.argv[2] ?? 3);
 
-type Rep = {
+export type BenchmarkRep = {
   arm: 'cold' | 'seeded';
   ms: number;
   bunProcs: number;
@@ -74,7 +74,7 @@ async function runCli(
   return { stdout, stderr, exit };
 }
 
-async function oneRep(arm: Rep['arm']): Promise<Rep> {
+async function oneRep(arm: BenchmarkRep['arm']): Promise<BenchmarkRep> {
   const seed = arm === 'seeded';
   const home = mkdtempSync(join(tmpdir(), `gbrain-bench-${arm}-`));
   mkdirSync(join(home, '.gbrain'), { recursive: true });
@@ -147,6 +147,24 @@ async function oneRep(arm: Rep['arm']): Promise<Rep> {
   }
 }
 
+export function canonicalMigrationHead(
+  migrations: Array<{ version: number }>,
+): number {
+  return Math.max(...migrations.map((migration) => migration.version));
+}
+
+export function invalidBenchmarkReps(
+  reps: BenchmarkRep[],
+  expectedHead: number,
+): BenchmarkRep[] {
+  return reps.filter(
+    (rep) => rep.exit !== 0
+      || rep.headExit !== 0
+      || rep.head !== expectedHead
+      || rep.bunProcs < 0,
+  );
+}
+
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -157,64 +175,67 @@ function median(values: number[]): number {
 
 type Stats = { n: number; median: number; min: number; max: number; spread: number };
 
-function stats(reps: Rep[]): Stats {
+function stats(reps: BenchmarkRep[]): Stats {
   const values = reps.map((rep) => rep.ms);
   const min = Math.min(...values);
   const max = Math.max(...values);
   return { n: values.length, median: median(values), min, max, spread: max - min };
 }
 
-function summary(arm: Rep['arm'], values: Stats): string {
+function summary(arm: BenchmarkRep['arm'], values: Stats): string {
   return `${arm.padEnd(6)} n=${values.n} median=${values.median}ms  ` +
     `min=${values.min}ms max=${values.max}ms spread=${values.spread}ms`;
 }
 
-if (!Number.isInteger(REPS) || REPS < 3) {
-  console.error(`reps must be an integer >= 3 (got ${process.argv[2] ?? 'default'})`);
-  process.exit(1);
-}
-if (!existsSync(SNAPSHOT) || !existsSync(SNAPSHOT_VERSION)) {
-  console.error(`missing snapshot fixture — run: bun run build:pglite-snapshot`);
-  process.exit(1);
-}
-const { computeSnapshotSchemaHash } = await import('../src/core/pglite-engine.ts');
-const { MIGRATIONS } = await import('../src/core/migrate.ts');
-const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
-const crypto = await import('node:crypto');
-const expectedSnapshotVersion = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
-const actualSnapshotVersion = readFileSync(SNAPSHOT_VERSION, 'utf8').trim();
-if (actualSnapshotVersion !== expectedSnapshotVersion) {
-  console.error(`stale snapshot fixture — run: bun run build:pglite-snapshot`);
-  process.exit(1);
-}
-
-const results: Rep[] = [];
-for (let index = 0; index < REPS; index++) {
-  for (const arm of ['cold', 'seeded'] as const) {
-    const result = await oneRep(arm);
-    results.push(result);
-    console.log(
-      `rep ${index + 1} ${result.arm.padEnd(6)}: ${result.ms}ms  ` +
-      `bun_procs=${result.bunProcs} exit=${result.exit} ` +
-      `head=${result.head ?? 'INVALID'} head_exit=${result.headExit}`,
-    );
+async function main(): Promise<void> {
+  if (!Number.isInteger(REPS) || REPS < 3) {
+    console.error(`reps must be an integer >= 3 (got ${process.argv[2] ?? 'default'})`);
+    process.exit(1);
   }
+  if (!existsSync(SNAPSHOT) || !existsSync(SNAPSHOT_VERSION)) {
+    console.error(`missing snapshot fixture — run: bun run build:pglite-snapshot`);
+    process.exit(1);
+  }
+  const { computeSnapshotSchemaHash } = await import('../src/core/pglite-engine.ts');
+  const { MIGRATIONS } = await import('../src/core/migrate.ts');
+  const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
+  const crypto = await import('node:crypto');
+  const expectedSnapshotVersion = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+  const actualSnapshotVersion = readFileSync(SNAPSHOT_VERSION, 'utf8').trim();
+  if (actualSnapshotVersion !== expectedSnapshotVersion) {
+    console.error(`stale snapshot fixture — run: bun run build:pglite-snapshot`);
+    process.exit(1);
+  }
+
+  const results: BenchmarkRep[] = [];
+  for (let index = 0; index < REPS; index++) {
+    for (const arm of ['cold', 'seeded'] as const) {
+      const result = await oneRep(arm);
+      results.push(result);
+      console.log(
+        `rep ${index + 1} ${result.arm.padEnd(6)}: ${result.ms}ms  ` +
+        `bun_procs=${result.bunProcs} exit=${result.exit} ` +
+        `head=${result.head ?? 'INVALID'} head_exit=${result.headExit}`,
+      );
+    }
+  }
+
+  const expectedHead = canonicalMigrationHead(MIGRATIONS);
+  const invalid = invalidBenchmarkReps(results, expectedHead);
+  if (invalid.length > 0) {
+    console.error(
+      `benchmark invalid: invalid_reps=${invalid.length} expected_head=${expectedHead} ` +
+      `migration_heads=${JSON.stringify(results.map((rep) => rep.head))}`,
+    );
+    process.exit(1);
+  }
+
+  const cold = stats(results.filter((rep) => rep.arm === 'cold'));
+  const seeded = stats(results.filter((rep) => rep.arm === 'seeded'));
+  console.log('');
+  console.log(summary('cold', cold));
+  console.log(summary('seeded', seeded));
+  console.log(`speedup (median): ${(cold.median / seeded.median).toFixed(2)}x`);
 }
 
-const invalid = results.filter(
-  (rep) => rep.exit !== 0 || rep.headExit !== 0 || rep.head === null || rep.bunProcs < 0,
-);
-const heads = new Set(results.map((rep) => rep.head));
-if (invalid.length > 0 || heads.size !== 1) {
-  console.error(
-    `benchmark invalid: invalid_reps=${invalid.length} migration_heads=${JSON.stringify([...heads])}`,
-  );
-  process.exit(1);
-}
-
-const cold = stats(results.filter((rep) => rep.arm === 'cold'));
-const seeded = stats(results.filter((rep) => rep.arm === 'seeded'));
-console.log('');
-console.log(summary('cold', cold));
-console.log(summary('seeded', seeded));
-console.log(`speedup (median): ${(cold.median / seeded.median).toFixed(2)}x`);
+if (import.meta.main) await main();

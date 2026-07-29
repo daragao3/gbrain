@@ -8,15 +8,28 @@
  *     bun run build:pglite-snapshot
  */
 import { describe, test, expect, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import * as crypto from 'node:crypto';
+import {
+  PGLiteEngine,
+  computeSnapshotSchemaHash,
+} from '../src/core/pglite-engine.ts';
+import { MIGRATIONS } from '../src/core/migrate.ts';
+import { PGLITE_SCHEMA_SQL } from '../src/core/pglite-schema.ts';
 import { repoPath } from './helpers/repo-root.ts';
 
 const SNAPSHOT = repoPath('test', 'fixtures', 'pglite-snapshot.tar');
-const HAVE_FIXTURE =
-  existsSync(SNAPSHOT) && existsSync(SNAPSHOT.replace(/\.tar$/, '.version'));
+const SNAPSHOT_VERSION = SNAPSHOT.replace(/\.tar$/, '.version');
+if (!existsSync(SNAPSHOT) || !existsSync(SNAPSHOT_VERSION)) {
+  throw new Error('snapshot fixture missing; run bun run build:pglite-snapshot before this test');
+}
+const expectedSnapshotVersion = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+const actualSnapshotVersion = readFileSync(SNAPSHOT_VERSION, 'utf8').trim();
+if (actualSnapshotVersion !== expectedSnapshotVersion) {
+  throw new Error('snapshot fixture stale; run bun run build:pglite-snapshot before this test');
+}
 
 const dirs: string[] = [];
 function freshDataDir(): string {
@@ -74,28 +87,38 @@ const SEEDED: EnvPatch = {
   GBRAIN_PGLITE_SNAPSHOT: SNAPSHOT,
   GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: '1',
 };
-const COLD: EnvPatch = {
-  GBRAIN_PGLITE_SNAPSHOT: undefined,
-  GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: undefined,
-};
 /** Base var set, seed flag absent — the ci:local blast-radius guard. */
 const BASE_ONLY: EnvPatch = {
   GBRAIN_PGLITE_SNAPSHOT: SNAPSHOT,
   GBRAIN_PGLITE_SNAPSHOT_SEED_FILE: undefined,
 };
 
-describe.if(HAVE_FIXTURE)('file-backed snapshot seeding', () => {
-  test('seeded dataDir reaches the same migration head as cold init and reopens', async () => {
-    const seededDataDir = freshDataDir();
-    const seeded = await headUnder(seededDataDir, SEEDED);
-    const reopened = await headUnder(seededDataDir, SEEDED);
-    const cold = await headUnder(freshDataDir(), COLD);
-    expect(seeded).toBeGreaterThan(0);
-    expect(reopened).toBe(seeded);
-    expect(seeded).toBe(cold);
+describe('file-backed snapshot seeding', () => {
+  test('seeded fresh dataDir exposes canonical version before initSchema and reopens', async () => {
+    const dataDir = freshDataDir();
+    const seeded = await withEnv(SEEDED, async () => {
+      const engine = new PGLiteEngine();
+      try {
+        await engine.connect({ database_path: dataDir });
+        return await migrationHead(engine);
+      } finally {
+        await engine.disconnect();
+      }
+    });
+    const canonicalHead = Math.max(...MIGRATIONS.map((migration) => migration.version));
+    expect(seeded).toBe(canonicalHead);
+    expect(await headUnder(dataDir, SEEDED)).toBe(canonicalHead);
   }, 900_000);
 
-  test('seeding is skipped when the opt-in flag is absent', async () => {
-    expect(await headUnder(freshDataDir(), BASE_ONLY)).toBeGreaterThan(0);
+  test('base-only fresh dataDir has no initialized config schema before initSchema', async () => {
+    await withEnv(BASE_ONLY, async () => {
+      const engine = new PGLiteEngine();
+      try {
+        await engine.connect({ database_path: freshDataDir() });
+        await expect(engine.getConfig('version')).rejects.toThrow(/config|relation/i);
+      } finally {
+        await engine.disconnect();
+      }
+    });
   }, 900_000);
 });

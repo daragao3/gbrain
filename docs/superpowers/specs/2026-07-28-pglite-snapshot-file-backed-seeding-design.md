@@ -1,7 +1,7 @@
 # PGLite snapshot seeding for fresh file-backed dataDirs
 
 **Date:** 2026-07-28
-**Status:** design approved, pending implementation
+**Status:** implemented and validated — proceed (1.80x measured median speedup)
 **Area:** `src/core/pglite-engine.ts`, test bootstrap cost
 
 ## Problem
