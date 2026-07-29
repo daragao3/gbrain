@@ -55,7 +55,7 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain("await import('./helper.ts')");
   });
 
-  it('allows a same-line marker and ignores comment-only matches', () => {
+  it('allows a same-line marker for multiple non-gateway imports and ignores comment-only matches', () => {
     const path = fixture(
       'allowed.ts',
       [
@@ -63,7 +63,7 @@ describe('check-engine-dynamic-import.sh', () => {
         '/*',
         " * await import('./block-body.ts')",
         ' */',
-        "const gateway = await import('./ai/gateway.ts'); // engine-dynamic-import-ok",
+        "const first = import('./first.ts'); const second = import('./second.ts'); // engine-dynamic-import-ok",
         '',
       ].join('\n'),
     );
@@ -167,7 +167,7 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(`${basename(path)}:2:`);
   });
 
-  it('does not accept marker text outside comment trivia', () => {
+  it('does not accept marker text outside comment trivia or within longer comment tokens', () => {
     const path = fixture(
       'marker-text.ts',
       [
@@ -175,6 +175,7 @@ describe('check-engine-dynamic-import.sh', () => {
         "const marker = 'engine-dynamic-import-ok'; const second = import('./second.ts');",
         'const template = `prefix',
         '// engine-dynamic-import-ok ${import("./third.ts")}`;',
+        "const fourth = import('./fourth.ts'); // no-engine-dynamic-import-ok: not approved",
         '',
       ].join('\n'),
     );
@@ -183,6 +184,7 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(`${basename(path)}:1:`);
     expect(result.stderr).toContain(`${basename(path)}:2:`);
     expect(result.stderr).toContain(`${basename(path)}:4:`);
+    expect(result.stderr).toContain(`${basename(path)}:5:`);
   });
 
   it('allows a marker in real multiline comment trivia on the import line', () => {
