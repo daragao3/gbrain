@@ -2,6 +2,51 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.75.0] - 2026-07-28
+
+**Folder safety checks now agree on what “inside this folder” means on Windows, Mac, and Linux.**
+
+GBrain confines file reads and writes to approved folders. Several checks implemented that rule with their own string comparisons, which could mistake a nearby folder for a child or reject a valid Windows path because its separator or letter case looked different. The checks now share one native path rule built on the operating system's path semantics.
+
+This is a fail-closed repair. Paths outside the approved folder remain blocked. Valid paths inside it, including child names such as `..config`, are accepted consistently, while similarly named sibling folders such as `foo` and `foobar` remain separate.
+
+### How to use it
+
+Nothing to configure. Upgrade and run the same commands as before. Contributors can run the dedicated regression check with:
+
+```bash
+bun run check:path-sep
+```
+
+The check also runs as part of:
+
+```bash
+bun run verify
+```
+
+### Things to watch
+
+This change applies only to native filesystem paths. Page slugs, object keys, URL paths, and paths reported by Git still use forward slashes by design.
+
+## To take advantage of v0.42.75.0
+
+Nothing to configure or migrate. Upgrade normally. Existing folder-confinement checks begin using the shared native rule immediately.
+
+### Itemized changes
+
+#### Fixed
+- **Filesystem confinement is centralized and boundary-safe.** `src/core/path-confine.ts` provides inclusive and strict helpers based on `path.relative()`, including equality, sibling-prefix, traversal, mixed-separator, case, and cross-drive behavior.
+- **File operations use the shared rule.** Sync, integrations, doctor checks, source resolution, brain writing, inbox ingestion, skillpack copying, and local storage no longer maintain separate containment comparisons.
+- **Windows path behavior stays native without changing logical identifiers.** Filesystem callers use native semantics while page slugs, object keys, URL paths, and Git-relative paths keep their forward-slash contracts.
+
+#### Tests
+- **Boundary behavior is pinned directly.** `test/path-boundary.test.ts` covers `foo` versus `foobar`, equality, traversal, legitimate `..config` children, mixed separators, case handling, and cross-drive paths.
+- **The source tree is guarded against separator-sensitive containment.** `scripts/check-path-sep-boundary.sh` and `test/check-path-sep-boundary.test.ts` detect fragile filesystem-prefix patterns and are wired into `bun run verify`.
+- **Generated documentation checks tolerate checkout line endings.** `test/build-llms.test.ts` normalizes CRLF and LF before comparison while continuing to detect content drift.
+
+#### Maintenance
+- **GitHub Actions pins are current.** Workflow references for checkout and release publishing were refreshed to their current immutable commits.
+
 ## [0.42.72.1] - 2026-07-28
 
 **When a migration is partial because a phase failed, the terminal now tells you exactly which phase failed and why.**
