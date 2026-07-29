@@ -36,7 +36,7 @@ Nothing to configure or migrate. Upgrade normally. Existing folder-confinement c
 
 #### Fixed
 - **Filesystem confinement is centralized and boundary-safe.** `src/core/path-confine.ts` provides inclusive and strict helpers based on `path.relative()`, including equality, sibling-prefix, traversal, mixed-separator, case, and cross-drive behavior.
-- **File operations use the shared rule.** Sync, integrations, doctor checks, source resolution, brain writing, inbox ingestion, skillpack copying, and local storage no longer maintain separate containment comparisons.
+- **Affected filesystem confinement checks use the shared rule.** Native read, write, routing, and storage boundaries now use the common path primitive instead of ad hoc prefix comparisons.
 - **Windows path behavior stays native without changing logical identifiers.** Filesystem callers use native semantics while page slugs, object keys, URL paths, and Git-relative paths keep their forward-slash contracts.
 
 #### Tests

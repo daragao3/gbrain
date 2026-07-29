@@ -1,20 +1,9 @@
 # TODOS
 
-## v0.42.72.0 follow-ups (native path separators)
-
-- [ ] **P2 — audit remaining filesystem containment checks for native separators.**
-  v0.42.72.0 fixed three checks, but similar prefix comparisons may remain. Do NOT
-  bulk-replace: page slugs and git-relative paths correctly use forward slashes on every
-  platform. Classify each candidate by the value it actually holds, then fix filesystem
-  cases with a test that pins the directory boundary (`foo` must not match `foobar`), not
-  only that a valid path is accepted. The suite is Ubuntu-only, so the Windows branch needs
-  an explicit cross-platform proof.
-  Where: filesystem path-prefix comparisons in `src/`.
-
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
-- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
-  checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns every
+  entry in the verify `CHECKS` array at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
   bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
   `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
   a spurious timeout. Observed repeatedly on a box running several concurrent agent
