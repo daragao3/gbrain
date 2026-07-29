@@ -8,7 +8,7 @@ All notable changes to GBrain will be documented in this file.
 
 Several subprocess tests built a repository path from a URL. On Windows that produces a path shaped like `/C:/...`, which cannot be used as a working directory. Other tests put a Unix-only shim on PATH with the wrong separator, so the intended test binary was invisible and a globally installed `gbrain` could answer instead. Fresh PGLite tests also used timeout literals below the measured Windows startup floor.
 
-This release gives those tests one native repository-root helper, one platform-specific command shim, and shared cold-start budgets. The same path correction also lets bundled schema packs resolve on Windows. Nothing changes for normal CLI use, stored brain data, macOS, or Linux.
+This release gives those tests one native repository-root helper, one platform-specific command shim, and shared cold-start budgets. Upgrade migrations also give their short Windows CLI probes enough wall-clock room and perform command fallbacks without POSIX-only shell syntax. The same path correction lets bundled schema packs resolve on Windows. Nothing changes for normal CLI use, stored brain data, macOS, or Linux.
 
 ### What to expect
 
