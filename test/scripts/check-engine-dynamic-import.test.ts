@@ -206,6 +206,26 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(basename(path));
   });
 
+  it('reports recovered-AST violations alongside parse diagnostics', () => {
+    const path = fixture(
+      'malformed-violator.ts',
+      "const helper = import('./helper.ts');\nconst broken = ;\n",
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('cannot parse input file');
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+  });
+
+  it('ignores type-position imports', () => {
+    const path = fixture(
+      'type-import.ts',
+      "type Helper = import('./helper.ts').Helper;\n",
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(0);
+  });
+
   it('reports readable-file violations alongside missing inputs', () => {
     const path = fixture('mixed-violator.ts', "const helper = import('./helper.ts');\n");
     const missing = join(tmpdir(), `gbrain-engine-import-missing-${process.pid}.ts`);

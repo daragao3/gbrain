@@ -30,7 +30,7 @@
 
 - Create `scripts/check-engine-dynamic-import.sh` — repository-anchored Bash wrapper for default and explicit input routing.
 - Create `scripts/check-engine-dynamic-import.ts` — TypeScript AST policy scanner for runtime `import()` expressions, parse/read failures, and exact-line comment-trivia opt-outs.
-- Create `test/scripts/check-engine-dynamic-import.test.ts` — 20 hermetic adversarial, CRLF, fail-closed, real-tree, and wiring tests.
+- Create `test/scripts/check-engine-dynamic-import.test.ts` — 22 hermetic adversarial, CRLF, fail-closed, real-tree, and wiring tests.
 - Modify `src/core/pglite-engine.ts` — hoist three safe import statements and mark two deliberate gateway imports.
 - Modify `src/core/postgres-engine.ts` — hoist eight safe import statements and mark two deliberate gateway imports.
 - Modify `src/core/migrate.ts` — hoist two safe migration helper import statements.
@@ -83,7 +83,7 @@ Use `depth: 5`, `max_nodes: 200`, and `limit: 100`. Expected: no caller requires
 
 - [ ] **Step 2: Write the failing guard regression test**
 
-Create `test/scripts/check-engine-dynamic-import.test.ts` as a hermetic subprocess suite. The completed 20-test surface covers:
+Create `test/scripts/check-engine-dynamic-import.test.ts` as a hermetic subprocess suite. The completed 22-test surface covers:
 
 - unmarked runtime `import()` rejection, including bare and trivia-separated forms;
 - same-line markers in real line or multiline block-comment trivia;

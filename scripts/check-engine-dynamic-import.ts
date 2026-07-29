@@ -33,7 +33,6 @@ for (const file of files) {
       .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, ' '))
       .join('; ');
     readErrors.push(`ERROR: cannot parse input file ${file}: ${diagnostics}`);
-    continue;
   }
 
   for (let markerPos = sourceText.indexOf(MARKER); markerPos >= 0; markerPos = sourceText.indexOf(MARKER, markerPos + MARKER.length)) {
