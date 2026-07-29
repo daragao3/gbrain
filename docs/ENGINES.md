@@ -268,7 +268,15 @@ and assert `jsonb_typeof` — the assertion PGLite cannot make.
      }
    }
    ```
-   The factory uses dynamic imports so engines are only loaded when selected.
+   The factory may use dynamic imports because engine selection finishes before the
+   selected engine is activated. That boundary is intentional: once engine methods or
+   `runMigrations()` may execute with PGLite active, helper dependencies default to
+   static top-level imports. The marked `ai/gateway.ts` imports are exceptions because
+   they preserve a local caught fallback and avoid loading provider packages for commands
+   that never use them. `scripts/check-engine-dynamic-import.sh` line-scans direct
+   `await import(...)` sites in the two engine implementations and `migrate.ts`; it is not
+   transitive call-graph or reachability analysis. See `docs/TESTING.md` for the remaining
+   Windows test-runner limitations.
 3. Store engine type in `~/.gbrain/config.json`: `{ "engine": "myengine", ... }`
 4. Add tests. The test suite should be engine-agnostic where possible... same test cases, different engine constructor.
 5. Document in this file + add a design doc in `docs/`

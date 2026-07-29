@@ -103,6 +103,12 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   CI can never catch it. When you add a check, prefix it. Note `.gitattributes` only changes
   what a FUTURE checkout materializes; an existing clone keeps its CRLF copies until you
   replace them (`git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .`).
+- **Engine activation boundary.** `src/core/engine-factory.ts` may dynamically import the
+  selected engine before activation. Once engine methods or `src/core/migrate.ts` can run
+  with PGLite active, helper dependencies default to static top-level imports. A genuinely
+  load-bearing lazy exception needs an inline reason plus `engine-dynamic-import-ok`.
+  `scripts/check-engine-dynamic-import.sh` line-scans those three implementation files for
+  direct unmarked `await import(...)` sites; it is not transitive call-graph analysis.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by

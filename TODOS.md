@@ -1,5 +1,17 @@
 # TODOS
 
+## v0.42.73.0 follow-ups (Windows PGLite test memory)
+
+- [ ] **P1 — make the full Windows unit suite finish within a bounded commit budget.**
+  The engine dynamic-import sweep narrowed one crash class, but a full `bun run test`
+  still cannot be used as a Windows ship gate. Roughly **146 MB is retained per PGLite
+  test file** within one `bun test` invocation, so a 253-file shard needs about 37 GB
+  of commit charge before it can print totals. The next lever is per-invocation memory:
+  reduce the chunk size in `scripts/run-unit-shard.sh`, or start a fresh process per
+  chunk so PGLite instances are reclaimed. Any Windows rc=127 / exit-3 diagnosis must
+  record `Win32_OperatingSystem.FreeVirtualMemory` and the `bun.exe` process count so
+  system-wide commit exhaustion is not mistaken for a code regression.
+
 ## v0.42.72.0 follow-ups (native path separators)
 
 - [ ] **P2 — audit remaining filesystem containment checks for native separators.**
@@ -13,7 +25,7 @@
 
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
-- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 32
+- [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns all 34
   checks at once. On a loaded machine that exhausts the process table; under Cygwin/MSYS
   bash the failure surfaces as `dofork: child -1 ... died unexpectedly` /
   `fork: retry: Resource temporarily unavailable`, and affected checks report rc=126/127 or
@@ -34,23 +46,30 @@
 
 ## v0.42.69.0 follow-ups (Windows bun test crash)
 
-- [ ] **P1 — sweep the remaining `await import()` sites reachable while a PGLite
-  instance is live.** v0.42.69.0 fixed exactly one (`mergeOntologyFact` in both
-  engines), which was enough to take `test/chronicle-context.test.ts` from
-  crashing the run to 2 pass. The crash class is not closed: a dynamic import
-  issued from an async method while the PGLite WASM instance is live can still
-  take the whole `bun test` process down on Windows with error 127
-  (`ERROR_PROC_NOT_FOUND`) before it prints a summary, discarding pass/fail for
-  every file in that invocation. Chunking in `scripts/run-unit-shard.sh` bounds
-  the damage; it does not cure it. Enumerate the `await import(` sites in
-  `src/core/` that an engine method can reach and hoist the ones that are not
-  load-bearing for startup cost. The full unit suite cannot be a Windows ship
-  gate until this is done.
-- [ ] **P3 — consider a guard for dynamic imports on the engine hot path.** Once
-  the sweep above establishes which sites are legitimately lazy, a
-  `scripts/check-*.sh` in the repo's usual shape could keep a new
-  `await import()` from landing inside an engine method. Only worth writing after
-  the sweep, since the allowlist is the hard part, not the grep.
+- [x] **P1 — sweep direct `await import()` sites in the two engine implementations
+  and migration runner.** DONE. Audited those three files and hoisted 11 of 13
+  direct sites to static top-level imports:
+  - `src/core/migrate.ts` (2) — `retry-matcher.ts`, `timeline-dedup-repair.ts`.
+    The highest-value pair: `runMigrations()` is called from `initSchema()`, so
+    these fired on **every PGLite boot** with WASM already live. Both are runtime
+    leaves (one has no imports, the other only a type), so the hoist is free.
+  - `src/core/pglite-engine.ts` (2) — `retry.ts`, `search/recency-decay.ts`.
+  - `src/core/postgres-engine.ts` (7) — `retry.ts`, `retry-matcher.ts`,
+    `search/recency-decay.ts`, `audit/db-disconnect-audit.ts`, and
+    `audit/pool-recovery-audit.ts` (×3). Engine parity per CLAUDE.md.
+
+  Most cost literally nothing: `retry.ts` was **already statically imported at
+  the top of both engines**, so those were pure redundancy, and the audit modules'
+  dependencies were already in the graph via `audit/batch-retry-audit.ts`. After
+  the sweep the engines' depth-1 static closure contains no dynamic imports at all.
+- [x] **P3 — guard for dynamic imports on the engine hot path.** DONE:
+  `scripts/check-engine-dynamic-import.sh`, wired into `check:all` and
+  `run-verify-parallel.sh`. Its line-oriented scan covers the two engines +
+  `migrate.ts`, ignores comment lines, and takes an `engine-dynamic-import-ok`
+  opt-out marker; it is not transitive call-graph analysis. Verified in both
+  directions against a fixture (fires on a direct unmarked site, silent on
+  commented-out and opted-out lines) and on a CRLF copy.
+
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)
 

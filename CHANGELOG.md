@@ -2,6 +2,60 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.73.0] - 2026-07-28
+
+**Windows test runs get farther before the test runner disappears, and a new build check protects the audited engine files from direct unmarked lazy imports.**
+
+GBrain's embedded database runs inside WebAssembly. On Windows, module loading from an active database method has appeared in the same failure class as `bun test` processes that disappear before printing totals, so one bad file can erase the result of every file in the same invocation. This release moves 11 direct module loads in the audited engine and migration files to startup and keeps the two intentionally lazy gateway loads explicit. A line-oriented check now rejects direct unmarked `await import(...)` lines in those three files; it is not a transitive call-graph or reachability proof.
+
+This narrows a known crash class, but it does not make the full Windows unit suite a reliable ship gate yet. A 22-file PGLite batch completed and printed totals with 296 tests: 289 passed and 7 failed. Those 7 failures were reproduced without this change and are not caused by the import sweep. Per-invocation memory retention is the currently observed remaining full-suite blocker and is tracked separately in `TODOS.md`.
+
+### How to use it
+
+The check runs as part of the normal gate:
+
+```bash
+bun run verify
+```
+
+To run only the engine-path check:
+
+```bash
+bun run check:engine-dynamic-import
+```
+
+### Numbers that matter
+
+| Measure | Result |
+|---|---:|
+| Direct audited import sites moved to startup | 11 |
+| Deliberately lazy gateway imports retained | 2 |
+| PGLite files in the completed Windows batch | 22 |
+| Tests reported by that batch | 296 |
+| Pass / pre-existing fail | 289 / 7 |
+
+### Things to watch
+
+The two `ai/gateway.ts` imports remain lazy by design. Loading that graph at engine startup would pull in provider packages for commands that never use them and would turn a caught "gateway not configured" condition into an early module-load failure. Those lines carry an `engine-dynamic-import-ok` marker that the check recognizes.
+
+A full `bun run test` on Windows can still end before the totals line because PGLite memory is retained across files in one invocation. Do not read that as proof that the import sweep failed. The follow-up is to bound memory with smaller test chunks or fresh processes between chunks.
+
+### Itemized changes
+
+#### Fixed
+- **PGLite migrations no longer load retry and timeline-repair code while WebAssembly is live.** `src/core/migrate.ts` imports both modules at startup instead of during `runMigrations()`.
+- **Both engines keep runtime helpers out of live async import paths.** `src/core/pglite-engine.ts` and `src/core/postgres-engine.ts` statically import retry, recency, and audit helpers while preserving engine parity.
+- **Intentional gateway laziness is documented.** Both engine gateway imports carry the same exception marker and explanation, so startup behavior stays unchanged.
+
+#### Added
+- **Build check for engine-path dynamic imports.** `scripts/check-engine-dynamic-import.sh` scans both engines and migrations, ignores comments, and requires an explicit marker for an allowed lazy import.
+- **Guard wired into both verification entry points.** `package.json` adds `check:engine-dynamic-import`, while `check:all` and `scripts/run-verify-parallel.sh` run it automatically.
+- **Windows memory follow-up stays open.** `TODOS.md` separates the remaining per-invocation memory ceiling from the completed dynamic-import work.
+
+## To take advantage of v0.42.73.0
+
+Nothing to configure. Upgrade normally. Contributors can run `bun run verify`, or `bun run check:engine-dynamic-import` for this guard alone.
+
 ## [0.42.72.1] - 2026-07-28
 
 **When a migration is partial because a phase failed, the terminal now tells you exactly which phase failed and why.**

@@ -17,7 +17,11 @@ import type {
   SourceRow,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
-import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
+import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, isRetryableConnError, type BatchAuditSite } from './retry.ts';
+// Static for the same reason as `chronicle/ontology.ts` below. Pure leaf (no
+// imports of its own), so hoisting it off the engine's async paths costs
+// nothing at startup.
+import { resolveRecencyDecayMap, DEFAULT_FALLBACK } from './search/recency-decay.ts';
 // Static (not `await import(...)` inside mergeOntologyFact): a dynamic import
 // issued from an async method while the PGLite WASM instance is live
 // deadlocks the bun test runner on Windows — the file then either times out or
@@ -423,7 +427,11 @@ export class PGLiteEngine implements BrainEngine {
     let dims: number = DEFAULT_EMBEDDING_DIMENSIONS;
     let model: string = DEFAULT_EMBEDDING_MODEL;
     try {
-      const gw = await import('./ai/gateway.ts');
+      // engine-dynamic-import-ok: deliberate lazy load. Transitive closure is the
+      // whole `ai` SDK + 4 provider packages + zod; hoisting it would balloon CLI
+      // cold-start and turn the caught "not configured" soft-fail below into a
+      // module-load-time hard failure.
+      const gw = await import('./ai/gateway.ts'); // engine-dynamic-import-ok
       dims = gw.getEmbeddingDimensions();
       model = gw.getEmbeddingModel() || model;
     } catch { /* gateway not configured — use defaults */ }
@@ -2229,7 +2237,6 @@ export class PGLiteEngine implements BrainEngine {
       });
     } catch (err) {
       if (err instanceof Error && err.name === 'RetryAbortError') throw err;
-      const { isRetryableConnError } = await import('./retry.ts');
       if (isRetryableConnError(err)) {
         auditLogBatchExhausted(auditSite, batchSize, opts.maxRetries + 1, err);
       }
@@ -5850,7 +5857,6 @@ export class PGLiteEngine implements BrainEngine {
     const recencyBias = opts.recency_bias ?? 'flat';
     let recencySql: string;
     if (recencyBias === 'on') {
-      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
       recencySql = buildRecencyComponentSql({
         slugColumn: 'p.slug',
         dateExpr: 'COALESCE(p.effective_date, p.updated_at)',
