@@ -34,12 +34,50 @@ for f in "${FILES[@]}"; do
   SCANNED=$((SCANNED + 1))
   hits="$(
     sed 's/\r$//' "$f" |
-      grep -n "await import(" |
-      grep -v "engine-dynamic-import-ok" |
-      awk -F: '{ line = $0; sub(/^[0-9]+:/, "", line);
-                 sub(/^[ \t]+/, "", line);
-                 if (line ~ /^(\/\/|\*|\/\*)/) next;
-                 print }' || true
+      awk '
+        {
+          original = $0
+          code = $0
+
+          while (length(code) > 0) {
+            if (in_block_comment) {
+              comment_end = index(code, "*/")
+              if (comment_end == 0) {
+                code = ""
+                break
+              }
+              code = substr(code, comment_end + 2)
+              in_block_comment = 0
+              continue
+            }
+
+            line_comment = index(code, "//")
+            open = index(code, "/*")
+            if (line_comment > 0 && (open == 0 || line_comment < open)) {
+              code = substr(code, 1, line_comment - 1)
+              break
+            }
+            if (open == 0) break
+
+            before = substr(code, 1, open - 1)
+            after = substr(code, open + 2)
+            comment_end = index(after, "*/")
+            if (comment_end == 0) {
+              code = before
+              in_block_comment = 1
+              break
+            }
+            code = before substr(after, comment_end + 2)
+          }
+
+          trimmed = code
+          sub(/^[ \t]+/, "", trimmed)
+          if (trimmed ~ /^\*/) next
+          if (index(code, "await import(") == 0) next
+          if (index(original, "engine-dynamic-import-ok") > 0) next
+          print NR ":" original
+        }
+      ' || true
   )"
   if [ -n "$hits" ]; then
     while IFS= read -r hit; do

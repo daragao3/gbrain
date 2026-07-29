@@ -69,6 +69,49 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stdout).toContain('check-engine-dynamic-import: ok (1 file(s) scanned)');
   });
 
+  it('rejects live code after a closed leading block comment', () => {
+    const path = fixture(
+      'leading-block-comment.ts',
+      "/* load only when needed */ const helper = await import('./helper.ts');\n",
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+    expect(result.stderr).toContain("await import('./helper.ts')");
+  });
+
+  it('ignores dynamic-import text wholly inside a multiline block comment', () => {
+    const path = fixture(
+      'multiline-block-comment.ts',
+      [
+        '/*',
+        " * await import('./comment-only.ts')",
+        ' */',
+        'const value = 1;',
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('check-engine-dynamic-import: ok (1 file(s) scanned)');
+  });
+
+  it('reports every violation across multiple files', () => {
+    const first = fixture(
+      'first-violator.ts',
+      "const first = await import('./first.ts');\nconst second = await import('./second.ts');\n",
+    );
+    const second = fixture(
+      'second-violator.ts',
+      "/* explanation */ const third = await import('./third.ts');\n",
+    );
+    const result = runGuard([first, second]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(first)}:1:`);
+    expect(result.stderr).toContain(`${basename(first)}:2:`);
+    expect(result.stderr).toContain(`${basename(second)}:1:`);
+  }, 30_000);
+
   it('still catches a violation in CRLF input', () => {
     const path = fixture('crlf.ts', "async function load() {\r\n  return await import('./helper.ts');\r\n}\r\n");
     const result = runGuard([path]);
@@ -80,7 +123,7 @@ describe('check-engine-dynamic-import.sh', () => {
     const result = runGuard();
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('check-engine-dynamic-import: ok (3 file(s) scanned)');
-  });
+  }, 30_000);
 });
 
 describe('engine dynamic-import guard wiring', () => {
