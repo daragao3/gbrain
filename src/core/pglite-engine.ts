@@ -467,6 +467,8 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='pages') AS pages_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='revision') AS pages_revision_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='deleted_at') AS deleted_at_exists,
@@ -551,6 +553,7 @@ export class PGLiteEngine implements BrainEngine {
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
+      pages_revision_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
       links_exists: boolean;
@@ -595,6 +598,7 @@ export class PGLiteEngine implements BrainEngine {
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
+    const needsPagesRevision = probe.pages_exists && !probe.pages_revision_exists;
     const needsLinksBootstrap = probe.links_exists
       && (!probe.link_source_exists || !probe.origin_page_id_exists);
     const needsChunksBootstrap = probe.chunks_exists
@@ -672,7 +676,8 @@ export class PGLiteEngine implements BrainEngine {
     const needsTimelineEventPageId = probe.timeline_entries_exists && !probe.timeline_event_page_id_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+    if (!needsPagesBootstrap && !needsPagesRevision
+        && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsChunksEmbeddingImage
         && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsPagesRecency && !needsIngestLogSourceId
@@ -711,6 +716,13 @@ export class PGLiteEngine implements BrainEngine {
           ON CONFLICT (id) DO NOTHING;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
           NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsPagesRevision) {
+      await this.db.exec(`
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
       `);
     }
 
@@ -981,7 +993,7 @@ export class PGLiteEngine implements BrainEngine {
       where.push('deleted_at IS NULL');
     }
     const { rows } = await this.db.query(
-      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
               source_kind, source_uri, ingested_via, ingested_at
        FROM pages WHERE ${where.join(' AND ')} LIMIT 1`,
       params
@@ -1063,7 +1075,7 @@ export class PGLiteEngine implements BrainEngine {
          source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
          ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
          ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
       [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     return rowToPage(rows[0] as Record<string, unknown>);

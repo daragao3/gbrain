@@ -489,6 +489,7 @@ export class PostgresEngine implements BrainEngine {
     // which matches schema-embedded.ts's `public.` references.
     const probeRows = await conn<{
       pages_exists: boolean;
+      pages_revision_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
       effective_date_exists: boolean;
@@ -520,6 +521,8 @@ export class PostgresEngine implements BrainEngine {
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'pages') AS pages_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'revision') AS pages_revision_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -606,6 +609,7 @@ export class PostgresEngine implements BrainEngine {
     const probe = probeRows[0]!;
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
+    const needsPagesRevision = probe.pages_exists && !probe.pages_revision_exists;
     const needsLinksBootstrap = probe.links_exists
       && (!probe.link_source_exists || !probe.origin_page_id_exists);
     const needsChunksBootstrap = probe.chunks_exists
@@ -703,7 +707,8 @@ export class PostgresEngine implements BrainEngine {
     const needsTimelineEventPageId = probeCr.timeline_entries_exists === true
       && !probeCr.timeline_event_page_id_exists;
 
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+    if (!needsPagesBootstrap && !needsPagesRevision
+        && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsChunksEmbeddingImage && !needsPagesRecency
         && !needsIngestLogSourceId && !needsFilesBootstrap
@@ -742,6 +747,13 @@ export class PostgresEngine implements BrainEngine {
           ON CONFLICT (id) DO NOTHING;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
           NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsPagesRevision) {
+      await conn.unsafe(`
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
       `);
     }
 
@@ -1031,7 +1043,7 @@ export class PostgresEngine implements BrainEngine {
             : tx``;
       const deletedCondition = includeDeleted ? tx`` : tx`AND deleted_at IS NULL`;
       const rows = await tx`
-        SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+        SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
                source_kind, source_uri, ingested_via, ingested_at
         FROM pages
         WHERE slug = ${slug} ${sourceCondition} ${deletedCondition}
@@ -1123,7 +1135,7 @@ export class PostgresEngine implements BrainEngine {
         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
         ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
+      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
     `;
     return rowToPage(rows[0]);
   }

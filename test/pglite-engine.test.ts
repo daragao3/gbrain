@@ -32,11 +32,11 @@ beforeAll(async () => {
   );
   // pgvector stores dim in atttypmod directly (no -4 offset like varchar).
   CHUNK_EMBED_DIM = (r.rows[0] as { atttypmod: number }).atttypmod;
-});
+}, 30000);
 
 afterAll(async () => {
   await engine.disconnect();
-});
+}, 30000);
 
 // Helper to reset data between test groups
 async function truncateAll() {
@@ -73,6 +73,25 @@ describe('PGLiteEngine: Pages', () => {
     expect(fetched).not.toBeNull();
     expect(fetched!.title).toBe('Test Page');
     expect(fetched!.content_hash).toBeTruthy();
+  });
+
+  test('putPage starts at revision 1 and getPage projects it as a number', async () => {
+    const written = await engine.putPage('test/revision-read', testPage);
+    expect(written.revision).toBe(1);
+    const read = await engine.getPage('test/revision-read');
+    expect(read?.revision).toBe(1);
+    expect(typeof read?.revision).toBe('number');
+  });
+
+  test('legacy putPage still upserts and advances revision on page-state changes', async () => {
+    const first = await engine.putPage('test/revision-upsert', testPage);
+    const second = await engine.putPage('test/revision-upsert', {
+      ...testPage,
+      title: 'Updated Title',
+    });
+    expect(first.revision).toBe(1);
+    expect(second.title).toBe('Updated Title');
+    expect(second.revision).toBe(2);
   });
 
   test('putPage upserts on conflict', async () => {

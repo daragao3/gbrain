@@ -91,6 +91,8 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** Page-local optimistic concurrency token. Starts at 1 and advances on client-observable page-state changes. */
+  revision: number;
   /** v0.29 — deterministic 0..1 score; populated by the recompute_emotional_weight cycle phase. */
   emotional_weight?: number;
   created_at: Date;

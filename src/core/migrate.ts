@@ -5671,6 +5671,51 @@ export const MIGRATIONS: Migration[] = [
 `);
     },
   },
+  {
+    version: 125,
+    name: 'page_revision_cas',
+    sql: `
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+
+      CREATE OR REPLACE FUNCTION bump_page_revision_fn() RETURNS trigger
+      SET search_path = pg_catalog, public AS $func$
+      BEGIN
+        IF (TG_OP = 'INSERT') THEN
+          NEW.revision := 1;
+        ELSIF (OLD.type IS DISTINCT FROM NEW.type)
+           OR (OLD.page_kind IS DISTINCT FROM NEW.page_kind)
+           OR (OLD.title IS DISTINCT FROM NEW.title)
+           OR (OLD.compiled_truth IS DISTINCT FROM NEW.compiled_truth)
+           OR (OLD.timeline IS DISTINCT FROM NEW.timeline)
+           OR (OLD.frontmatter IS DISTINCT FROM NEW.frontmatter)
+           OR (OLD.content_hash IS DISTINCT FROM NEW.content_hash)
+           OR (OLD.deleted_at IS DISTINCT FROM NEW.deleted_at)
+           OR (OLD.effective_date IS DISTINCT FROM NEW.effective_date)
+           OR (OLD.effective_date_source IS DISTINCT FROM NEW.effective_date_source)
+           OR (OLD.import_filename IS DISTINCT FROM NEW.import_filename)
+           OR (OLD.source_path IS DISTINCT FROM NEW.source_path)
+           OR (OLD.chunker_version IS DISTINCT FROM NEW.chunker_version)
+           OR (OLD.source_kind IS DISTINCT FROM NEW.source_kind)
+           OR (OLD.source_uri IS DISTINCT FROM NEW.source_uri)
+           OR (OLD.ingested_via IS DISTINCT FROM NEW.ingested_via)
+           OR (OLD.ingested_at IS DISTINCT FROM NEW.ingested_at)
+        THEN
+          NEW.revision := OLD.revision + 1;
+        ELSE
+          NEW.revision := OLD.revision;
+        END IF;
+        RETURN NEW;
+      END;
+      $func$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages;
+      CREATE TRIGGER bump_page_revision_trg
+        BEFORE INSERT OR UPDATE ON pages
+        FOR EACH ROW
+        EXECUTE FUNCTION bump_page_revision_fn();
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

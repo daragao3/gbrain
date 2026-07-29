@@ -225,6 +225,42 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
     }
   }, 30000);
 
+  test('pre-v125 brain installs page revision state idempotently', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      const db = (engine as any).db;
+      await db.exec(`
+        DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages;
+        DROP FUNCTION IF EXISTS bump_page_revision_fn;
+        ALTER TABLE pages DROP COLUMN IF EXISTS revision;
+      `);
+      await engine.setConfig('version', '124');
+
+      await engine.initSchema();
+      await engine.initSchema();
+
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const page = await engine.putPage('test/upgraded-revision', {
+        type: 'concept',
+        title: 'v1',
+        compiled_truth: '',
+        timeline: '',
+      });
+      expect(page.revision).toBe(1);
+      const updated = await engine.putPage('test/upgraded-revision', {
+        type: 'concept',
+        title: 'v2',
+        compiled_truth: '',
+        timeline: '',
+      });
+      expect(updated.revision).toBe(2);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
   test('pre-v121 partial bootstrap resumes without skipping migration work', async () => {
     const engine = new PGLiteEngine();
     await engine.connect({});

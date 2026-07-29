@@ -158,6 +158,7 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // pages_generation_idx (CREATE INDEX ON pages (generation)) so bootstrap
   // probes guard pre-v91 brains.
   { kind: 'column', table: 'pages', column: 'generation' },
+  { kind: 'column', table: 'pages', column: 'revision' },
   // v0.41.31 (v108) — pages.embedding_signature TEXT for real stale
   // semantics. No SCHEMA_SQL index references it; bootstrap probe is
   // defense-in-depth (and satisfies the MIGRATIONS ADD COLUMN coverage gate).
@@ -254,6 +255,9 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       DROP FUNCTION IF EXISTS bump_page_generation_fn;
       DROP INDEX IF EXISTS pages_generation_idx;
       ALTER TABLE pages DROP COLUMN IF EXISTS generation;
+      DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages;
+      DROP FUNCTION IF EXISTS bump_page_revision_fn;
+      ALTER TABLE pages DROP COLUMN IF EXISTS revision;
       ALTER TABLE pages DROP COLUMN IF EXISTS contextual_retrieval_mode;
       ALTER TABLE pages DROP COLUMN IF EXISTS corpus_generation;
     `);
