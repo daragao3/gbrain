@@ -140,6 +140,67 @@ describe('LocalStorage path traversal', () => {
       rmSync(tmpDir, { recursive: true });
     }
   });
+
+  test('blocks a sibling directory that shares a name prefix with the root', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-traversal-'));
+    const sibling = tmpDir + '-sibling';
+    mkdirSync(sibling, { recursive: true });
+    try {
+      const storage = new LocalStorage(tmpDir);
+      await expect(storage.upload(join(sibling, 'evil.txt'), Buffer.from('x'))).rejects.toThrow(
+        'Path traversal blocked',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+      rmSync(sibling, { recursive: true });
+    }
+  });
+
+  test.if(process.platform === 'win32')('win32: accepts a backslash-separated relative path', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-traversal-'));
+    try {
+      const storage = new LocalStorage(tmpDir);
+      await storage.upload('pages\\people\\a-founder\\avatar.png', Buffer.from('img'));
+      expect(await storage.exists('pages\\people\\a-founder\\avatar.png')).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  test.if(process.platform === 'win32')('win32: still blocks backslash traversal', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-traversal-'));
+    try {
+      const storage = new LocalStorage(tmpDir);
+      await expect(storage.upload('..\\..\\etc\\evil', Buffer.from('pwned'))).rejects.toThrow(
+        'Path traversal blocked',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  test.if(process.platform === 'win32')('win32: accepts an in-root absolute path spelled with different case', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-traversal-'));
+    try {
+      const storage = new LocalStorage(tmpDir);
+      await storage.upload(join(tmpDir, 'cased.txt').toUpperCase(), Buffer.from('x'));
+      expect(await storage.exists('cased.txt')).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  test.if(process.platform !== 'win32')('posix: backslash is a filename character, not a separator', async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-traversal-'));
+    try {
+      const storage = new LocalStorage(tmpDir);
+      await storage.upload('..\\..\\etc\\evil', Buffer.from('inert'));
+      const data = await storage.download('..\\..\\etc\\evil');
+      expect(data.toString()).toBe('inert');
+    } finally {
+      rmSync(tmpDir, { recursive: true });
+    }
+  });
 });
 
 describe('createStorage', () => {
