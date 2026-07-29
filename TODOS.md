@@ -1,5 +1,17 @@
 # TODOS
 
+## v0.42.73.0 follow-ups (Windows PGLite test memory)
+
+- [ ] **P1 — make the full Windows unit suite finish within a bounded commit budget.**
+  The engine dynamic-import sweep narrowed one crash class, but a full `bun run test`
+  still cannot be used as a Windows ship gate. Roughly **146 MB is retained per PGLite
+  test file** within one `bun test` invocation, so a 253-file shard needs about 37 GB
+  of commit charge before it can print totals. The next lever is per-invocation memory:
+  reduce the chunk size in `scripts/run-unit-shard.sh`, or start a fresh process per
+  chunk so PGLite instances are reclaimed. Any Windows rc=127 / exit-3 diagnosis must
+  record `Win32_OperatingSystem.FreeVirtualMemory` and the `bun.exe` process count so
+  system-wide commit exhaustion is not mistaken for a code regression.
+
 ## v0.42.72.0 follow-ups (native path separators)
 
 - [ ] **P2 — audit remaining filesystem containment checks for native separators.**
@@ -57,21 +69,6 @@
   directions against a fixture (fires on a real violation, silent on commented-out
   and opted-out lines) and on a CRLF copy.
 
-- [ ] **P1 (NEW) — the full unit suite still cannot gate a Windows ship, and the
-  remaining blocker is NOT dynamic imports.** The sweep closed the enumerable
-  dynamic-import class, but the definition of done ("a full `bun run test` prints
-  a totals line") is blocked by a separate, memory-shaped ceiling that no source
-  edit fixes: roughly **146 MB is retained per PGLite test file** and never
-  reclaimed within a single `bun test` invocation, so a 253-file shard needs
-  ~37 GB of commit charge. This box shares a 79 GB commit limit across ~10
-  concurrent agent worktrees. Measured directly during this work: free commit fell
-  from 6.0 GB → 1.9 GB while other sessions ran, and `bash` itself then failed to
-  fork with **`0xC000012D` (`STATUS_COMMITMENT_LIMIT`)**, killing a 12-file run
-  mid-flight. Any single-run rc=127 / exit-3 verdict on this box is uninterpretable
-  unless `Win32_OperatingSystem.FreeVirtualMemory` and the `bun.exe` count are
-  sampled alongside it. Next lever is per-invocation memory (chunk size in
-  `scripts/run-unit-shard.sh`, or a fresh process per chunk so PGLite instances are
-  actually reclaimed), not further import hoisting.
 
 ## v0.42.68.1 follow-ups (CRLF frontmatter fence)
 
