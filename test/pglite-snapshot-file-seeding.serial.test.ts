@@ -3,9 +3,8 @@
  *
  * Serial + slow: each arm boots a WASM Postgres against a fresh dataDir. On
  * Windows under load that is ~30-110s per arm, hence the generous budget.
- * Skips unless the snapshot fixture exists — build it with:
- *
- *     bun run build:pglite-snapshot
+ * The serial runner builds the gitignored snapshot fixture automatically. For
+ * direct invocation, build it first with `bun run build:pglite-snapshot`.
  */
 import { describe, test, expect, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
@@ -94,12 +93,12 @@ const BASE_ONLY: EnvPatch = {
 };
 
 describe('file-backed snapshot seeding', () => {
-  test('seeded fresh dataDir exposes canonical version before initSchema and reopens', async () => {
-    const dataDir = freshDataDir();
+  test('seeded and cold-init fresh dataDirs reach the same canonical head', async () => {
+    const seededDataDir = freshDataDir();
     const seeded = await withEnv(SEEDED, async () => {
       const engine = new PGLiteEngine();
       try {
-        await engine.connect({ database_path: dataDir });
+        await engine.connect({ database_path: seededDataDir });
         return await migrationHead(engine);
       } finally {
         await engine.disconnect();
@@ -107,18 +106,19 @@ describe('file-backed snapshot seeding', () => {
     });
     const canonicalHead = Math.max(...MIGRATIONS.map((migration) => migration.version));
     expect(seeded).toBe(canonicalHead);
-    expect(await headUnder(dataDir, SEEDED)).toBe(canonicalHead);
-  }, 900_000);
+    expect(await headUnder(seededDataDir, SEEDED)).toBe(canonicalHead);
 
-  test('base-only fresh dataDir has no initialized config schema before initSchema', async () => {
-    await withEnv(BASE_ONLY, async () => {
+    const cold = await withEnv(BASE_ONLY, async () => {
       const engine = new PGLiteEngine();
       try {
         await engine.connect({ database_path: freshDataDir() });
         await expect(engine.getConfig('version')).rejects.toThrow(/config|relation/i);
+        await engine.initSchema();
+        return await migrationHead(engine);
       } finally {
         await engine.disconnect();
       }
     });
+    expect(cold).toBe(seeded);
   }, 900_000);
 });
