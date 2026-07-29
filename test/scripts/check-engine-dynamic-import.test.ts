@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
+const PACKAGE_JSON = resolve(REPO_ROOT, 'package.json');
 const GUARD = resolve(REPO_ROOT, 'scripts', 'check-engine-dynamic-import.sh');
 const VERIFY_DISPATCHER = resolve(REPO_ROOT, 'scripts', 'run-verify-parallel.sh');
 const BASH = process.platform === 'win32'
@@ -79,5 +80,31 @@ describe('check-engine-dynamic-import.sh', () => {
     const result = runGuard();
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('check-engine-dynamic-import: ok (3 file(s) scanned)');
+  });
+});
+
+describe('engine dynamic-import guard wiring', () => {
+  it('is invoked through bash by check:all', () => {
+    const pkg = JSON.parse(readFileSync(PACKAGE_JSON, 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts['check:engine-dynamic-import']).toBe(
+      'bash scripts/check-engine-dynamic-import.sh',
+    );
+    expect(pkg.scripts['check:all']).toContain(
+      'bash scripts/check-engine-dynamic-import.sh',
+    );
+  });
+
+  it('is listed by the authoritative verify dispatcher', () => {
+    const result = spawnSync(BASH, [VERIFY_DISPATCHER, '--dry-list'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    expect(result.status).toBe(0);
+    expect(new Set((result.stdout ?? '').trim().split('\n'))).toContain(
+      'check:engine-dynamic-import',
+    );
   });
 });
