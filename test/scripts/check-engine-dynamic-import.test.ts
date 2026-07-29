@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -12,6 +12,8 @@ const BASH = process.platform === 'win32'
   ? resolve(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')
   : 'bash';
 const tempDirs: string[] = [];
+
+setDefaultTimeout(30_000);
 
 function fixture(name: string, content: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-engine-import-'));
@@ -58,8 +60,9 @@ describe('check-engine-dynamic-import.sh', () => {
       'allowed.ts',
       [
         "// await import('./comment.ts')",
-        "/* await import('./block-open.ts') */",
+        '/*',
         " * await import('./block-body.ts')",
+        ' */',
         "const gateway = await import('./ai/gateway.ts'); // engine-dynamic-import-ok",
         '',
       ].join('\n'),
@@ -111,6 +114,66 @@ describe('check-engine-dynamic-import.sh', () => {
     expect(result.stderr).toContain(`${basename(first)}:2:`);
     expect(result.stderr).toContain(`${basename(second)}:1:`);
   }, 30_000);
+
+  it('does not mistake comment delimiters inside literals for comments', () => {
+    const path = fixture(
+      'literal-delimiters.ts',
+      [
+        'const url = "https://example.test";',
+        'const block = "/* not a comment";',
+        'const template = `https://example.test`;',
+        'const pattern = /\\/\\//;',
+        "const helper = await import('./helper.ts');",
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:5:`);
+  }, 30_000);
+
+  it('detects bare and trivia-separated dynamic imports', () => {
+    const path = fixture(
+      'dynamic-import-syntax.ts',
+      [
+        "const first = import('./first.ts');",
+        "const second = await import /* explanation */ ('./second.ts');",
+        '',
+      ].join('\n'),
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:1:`);
+    expect(result.stderr).toContain(`${basename(path)}:2:`);
+  }, 30_000);
+
+  it('detects live code after a multiline block comment closes', () => {
+    const path = fixture(
+      'after-multiline-comment.ts',
+      "/*\n * explanation\n */ const helper = await import('./helper.ts');\n",
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:3:`);
+  });
+
+  it('requires the allow marker on the import line', () => {
+    const path = fixture(
+      'marker-line.ts',
+      "// engine-dynamic-import-ok\nconst helper = await import('./helper.ts');\n",
+    );
+    const result = runGuard([path]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`${basename(path)}:2:`);
+  });
+
+  it('fails when an explicit input file is missing', () => {
+    const missing = join(tmpdir(), `gbrain-engine-import-missing-${process.pid}.ts`);
+    const result = runGuard([missing]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('cannot read input file');
+    expect(result.stderr).toContain(basename(missing));
+  });
 
   it('still catches a violation in CRLF input', () => {
     const path = fixture('crlf.ts', "async function load() {\r\n  return await import('./helper.ts');\r\n}\r\n");
