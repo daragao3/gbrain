@@ -82,7 +82,9 @@ type PGLiteDB = PGlite;
 // silently fall through to a normal initSchema (snapshot is just an
 // optimization, never authoritative).
 let _snapshotWarnLogged = false;
-function tryLoadSnapshot(snapshotPath: string): Blob | null {
+// Exported for test: the staleness guard is safety-critical (a stale snapshot
+// would restore an out-of-date schema) and cannot be pinned while private.
+export function tryLoadSnapshot(snapshotPath: string): Blob | null {
   try {
     // Lazy require so production builds without these imports don't crash.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
