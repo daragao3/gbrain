@@ -210,6 +210,22 @@ export function isCRMode(value: unknown): value is CRMode {
   return typeof value === 'string' && (CR_MODES as readonly string[]).includes(value);
 }
 
+export type ConditionalPageConflictReason =
+  | 'already_exists'
+  | 'not_found'
+  | 'soft_deleted'
+  | 'revision_mismatch';
+
+export type ConditionalPageWriteResult =
+  | { status: 'created' | 'updated'; page: Page }
+  | {
+      status: 'conflict';
+      slug: string;
+      reason: ConditionalPageConflictReason;
+      expected_revision?: number;
+      current_revision?: number;
+    };
+
 export interface PageInput {
   type: PageType;
   title: string;
