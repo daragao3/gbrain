@@ -116,7 +116,7 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   version falls outside its current direct parent's declared range, upgrade the direct
   parent to a release that explicitly admits the fixed line before raising the override.
   Keep direct pins, `package.json` overrides, and `bun.lock` synchronized; regenerate the
-  lockfile rather than hand-editing it. Pinned by `test/dependency-security-floors.test.ts`.
+  lockfile rather than hand-editing it. Pinned by `test/dependency-security.test.ts`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
