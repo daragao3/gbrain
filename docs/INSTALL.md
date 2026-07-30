@@ -90,7 +90,7 @@ Per-client setup guides live in [`docs/mcp/`](mcp/):
 - [`docs/mcp/PERPLEXITY.md`](mcp/PERPLEXITY.md)
 - [`docs/mcp/DEPLOY.md`](mcp/DEPLOY.md) — production deploy patterns
 
-The HTTP server ships with an admin SPA at `/admin`, an SSE activity feed at `/admin/events`, DCR-style client registration, scope-gated `read`/`write`/`admin` access, and rate limiting.
+The HTTP server ships with an admin SPA at `/admin`, an SSE activity feed at `/admin/events`, optional Dynamic Client Registration (disabled by default), scope-gated `read`/`write`/`admin` access, and rate limiting.
 
 ## Thin-client mode
 
