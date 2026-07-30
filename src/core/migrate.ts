@@ -5672,7 +5672,7 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 125,
+    version: 126,
     name: 'page_revision_cas',
     sql: `
       ALTER TABLE pages

@@ -6,8 +6,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-describe('migrate v125 — page_revision_cas', () => {
-  const migration = MIGRATIONS.find(m => m.version === 125);
+describe('migrate v126 — page_revision_cas', () => {
+  const migration = MIGRATIONS.find(m => m.version === 126);
 
   test('adds revision and installs an idempotent page-state trigger', () => {
     expect(migration?.name).toBe('page_revision_cas');
@@ -23,7 +23,7 @@ describe('migrate v125 — page_revision_cas', () => {
   });
 });
 
-describe('migrate v125 — page revision trigger behavior on PGLite', () => {
+describe('migrate v126 — page revision trigger behavior on PGLite', () => {
   let engine: PGLiteEngine;
 
   beforeAll(async () => {
