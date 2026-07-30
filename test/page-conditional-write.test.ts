@@ -301,10 +301,11 @@ describe('conditional import transaction', () => {
       writePrecondition: { mode: 'create_only' },
     });
     const before = await stateFor('notes/import-rollback');
-    const originalAddTag = engine.addTag.bind(engine);
+    const originalAddTagDescriptor = Object.getOwnPropertyDescriptor(engine, 'addTag');
+    const originalAddTag = engine.addTag;
     engine.addTag = async (...args: Parameters<typeof engine.addTag>) => {
       if (args[1] === 'explode') throw new Error('injected addTag failure');
-      return originalAddTag(...args);
+      return originalAddTag.call(engine, ...args);
     };
 
     try {
@@ -315,14 +316,18 @@ describe('conditional import transaction', () => {
         { noEmbed: true, writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 } },
       )).rejects.toThrow('injected addTag failure');
     } finally {
-      engine.addTag = originalAddTag;
+      if (originalAddTagDescriptor) {
+        Object.defineProperty(engine, 'addTag', originalAddTagDescriptor);
+      } else {
+        delete (engine as unknown as { addTag?: typeof originalAddTag }).addTag;
+      }
     }
 
     expect(await stateFor('notes/import-rollback')).toEqual(before);
   });
 
   test('chunk projection failure after create rolls back the inserted page', async () => {
-    const originalUpsertChunks = engine.upsertChunks.bind(engine);
+    const originalUpsertChunksDescriptor = Object.getOwnPropertyDescriptor(engine, 'upsertChunks');
     engine.upsertChunks = async () => {
       throw new Error('injected upsertChunks failure');
     };
@@ -335,7 +340,11 @@ describe('conditional import transaction', () => {
         { noEmbed: true, writePrecondition: { mode: 'create_only' } },
       )).rejects.toThrow('injected upsertChunks failure');
     } finally {
-      engine.upsertChunks = originalUpsertChunks;
+      if (originalUpsertChunksDescriptor) {
+        Object.defineProperty(engine, 'upsertChunks', originalUpsertChunksDescriptor);
+      } else {
+        delete (engine as unknown as { upsertChunks?: typeof engine.upsertChunks }).upsertChunks;
+      }
     }
 
     expect(await stateFor('notes/import-create-rollback')).toBeNull();
