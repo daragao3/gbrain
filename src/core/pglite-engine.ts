@@ -1136,6 +1136,9 @@ export class PGLiteEngine implements BrainEngine {
        LIMIT 1`,
       [opts.sourceId, slug],
     );
+    if (diagnostic.rows.length === 0) {
+      return { status: 'conflict', slug, reason: 'already_exists' };
+    }
     const row = diagnostic.rows[0] as { revision: number | string; deleted_at: Date | string | null };
     return {
       status: 'conflict',

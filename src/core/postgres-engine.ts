@@ -1184,6 +1184,9 @@ export class PostgresEngine implements BrainEngine {
       WHERE source_id = ${opts.sourceId} AND slug = ${slug}
       LIMIT 1
     `;
+    if (existing.length === 0) {
+      return { status: 'conflict', slug, reason: 'already_exists' };
+    }
     const row = existing[0] as { revision: number | string; deleted_at: Date | string | null };
     return {
       status: 'conflict',
