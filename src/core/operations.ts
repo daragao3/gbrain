@@ -1048,6 +1048,7 @@ async function runPutPageSuccessHooks(
           if (entries.length > 0) {
             const batch = entries.map(e => ({
               slug,
+              source_id: writeSourceId,
               date: e.date,
               summary: e.summary,
               detail: e.detail || '',
