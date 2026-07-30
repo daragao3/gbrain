@@ -2,6 +2,76 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.77.0] - 2026-07-30
+
+**The security guide now tells operators what is safe today without publishing a playbook for old weaknesses.**
+
+`SECURITY.md` keeps the private reporting channel and the practical steps operators need to secure an internet-reachable brain. It now describes Dynamic Client Registration and browser-origin controls in terms of their current behavior, rather than preserving historical request sequences and probe details that are not needed to operate the product safely. The guide still makes the trust boundaries explicit: keep self-service registration off unless the deployment requires it, configure an origin allowlist for browser clients, and protect tokens and the underlying network.
+
+No server behavior, authentication default, database schema, migration, or upgrade path changes in this release.
+
+### How to use it
+
+Keep reporting vulnerabilities through the private GitHub security-advisory form, not a public issue. For remote deployments, keep Dynamic Client Registration disabled unless self-service registration is part of the trust model, and configure the existing origin allowlist for browser clients.
+
+### Things to watch
+
+`--enable-dcr-insecure` remains an explicit high-trust option for deployments that intentionally permit self-registered machine-to-machine clients. The guide still documents OAuth, token management, network isolation, proxy trust, rate limiting, and audit redaction.
+
+## To take advantage of v0.42.77.0
+
+Nothing to configure or migrate. The release changes public guidance only; existing secure defaults and deployment controls continue to work as before.
+
+### Itemized changes
+
+#### Security guidance
+- **Private vulnerability reporting remains the required path.** Reports go through GitHub security advisories rather than public issues.
+- **Remote deployment guidance describes current protections without retaining historical probe instructions.** Operators still get actionable DCR, OAuth, CORS, token, network, proxy, rate-limit, and audit-redaction guidance.
+
+## [0.42.76.0] - 2026-07-29
+
+**Fresh installs and upgrades now keep the MCP and HTTP dependency graph on compatible patched releases.**
+
+GBrain's automated dependency scan found fixes available in packages used by its transport stack. This release moves the affected graph to fixed version lines while keeping every selected release inside the compatibility range declared by its parent. The direct parent moves first where necessary, so no transitive override exceeds the support its parent promises.
+
+Normal GBrain commands and configuration stay the same. The resulting lockfile passes the same official dependency scanner used by pull requests.
+
+### How to use it
+
+Nothing to configure or migrate. Upgrade normally, then run:
+
+```bash
+gbrain doctor
+```
+
+Contributors can verify the dependency policy with:
+
+```bash
+bun test test/dependency-security.test.ts
+```
+
+### Things to watch
+
+The updated server line requires Node 20 or newer. GBrain itself runs on Bun, and its HTTP and stdio MCP paths are covered by focused tests. Applications that reuse GBrain's dependency tree from Node 18 should move to Node 20 or newer.
+
+## To take advantage of v0.42.76.0
+
+Nothing to configure or migrate. Upgrade normally. The patched dependency graph takes effect when the new package and lockfile are installed.
+
+### Itemized changes
+
+#### Security
+- **The MCP transport stack stays on compatible patched releases.** Direct and transitive dependency constraints now move together so every selected line is admitted by its parent.
+- **The dependency scan is clean again.** The same pinned scanner used by pull requests reports no issues in the committed dependency graph.
+- **The committed dependency graph is reproducible.** `bun.lock` records the audited resolutions for every install.
+
+#### Tests
+- **Security floors cannot silently regress.** `test/dependency-security.test.ts` checks the manifest policy and the versions resolved in `bun.lock`.
+- **Transport compatibility is exercised.** Focused HTTP, OAuth, and real stdio MCP round-trip tests cover the updated SDK and server adapter.
+
+#### Maintenance
+- **GitHub Actions pins are current.** The gitleaks workflow reference now resolves to the current immutable v2 commit.
+
 ## [0.42.75.0] - 2026-07-28
 
 **Folder safety checks now agree on what “inside this folder” means on Windows, Mac, and Linux.**
@@ -8111,11 +8181,11 @@ gbrain config set models.dream.synthesize_verdict deepseek:deepseek-chat
 
 ## [0.41.3.0] - 2026-05-24
 
-**Pre-register Claude and ChatGPT clients without `--enable-dcr` — the SECURITY.md-recommended setup actually works now.**
+**Pre-register browser clients while keeping Dynamic Client Registration disabled.**
 
-If you run `gbrain serve --http` to expose your brain over the network, the safe shape SECURITY.md recommends has always been "leave Dynamic Client Registration off, pre-register every browser-based client by hand." Before this release that path was broken at step one: `gbrain auth register-client` hard-coded no redirect URIs and no auth method, so claude.ai's first probe returned `Unregistered redirect_uri` and the only fix was hand-editing `oauth_clients` rows in psql. v0.41.3 makes the documented path actually usable.
+`gbrain auth register-client` now accepts the redirect URIs and authentication method that browser-based clients need, so operators can follow the recommended pre-registration path without editing OAuth database rows by hand.
 
-While the SECURITY.md-recommended pre-registration shape was being plumbed, an independent code review found that the live Express OAuth server (`/mcp`, `/token`, `/authorize`, `/register`, `/revoke`) was using default-wide-open `cors()` middleware — every web origin could complete a token exchange from a logged-in operator's browser. That's now closed by default; OAuth endpoints reject all cross-origin requests unless `GBRAIN_HTTP_CORS_ORIGIN` lists the origin explicitly.
+The HTTP MCP and OAuth surface also uses one default-deny browser-origin policy. Cross-origin requests are authorized only when `GBRAIN_HTTP_CORS_ORIGIN` explicitly lists the origin, and the same policy applies to browser preflight requests.
 
 ### How to use the new shape
 
@@ -8149,14 +8219,10 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 ### What you get
 
-| Surface | Before | After |
-|---|---|---|
-| `gbrain auth register-client` | hard-coded empty `redirect_uris`, NULL auth method, no public-client option | `--redirect-uri` (repeatable), `--token-endpoint-auth-method`, auto-set `authorization_code,refresh_token` when `--redirect-uri` is passed |
-| Express OAuth endpoints CORS | `cors()` default → `Access-Control-Allow-Origin: *` on /mcp, /token, /authorize, /register, /revoke | default-deny; allowlist via `GBRAIN_HTTP_CORS_ORIGIN`; startup WARN when `--bind 0.0.0.0` is set with no allowlist |
-| Legacy transport CORS preflight | leaked `Allow-Methods` + `Allow-Headers` to every Origin on OPTIONS regardless of allowlist | consolidated `corsHeaders(origin, {preflight})` — both Allow-Origin and Allow-Methods/Headers gated together |
-| Admin endpoint registering public client | INSERT confidential → UPDATE to NULL out `client_secret_hash` (non-atomic; UPDATE failure stranded a confidential row) | single atomic INSERT via `registerClientManual(..., tokenEndpointAuthMethod)` |
-| `token_endpoint_auth_method` validation | accepted any string at admin endpoint; CLI didn't even take the field | `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS = {client_secret_post, client_secret_basic, none}` enforced at all three registration entry points (CLI, admin, DCR) |
-| Reverse-proxy trust env | hardcoded `'loopback'` in Express; docs claimed "disabled by default" (lie) | `GBRAIN_HTTP_TRUST_PROXY` env: `'loopback'` default, `'1'` for one-hop proxies, `'0'` to disable, numeric for N hops, named modes pass through |
+- `gbrain auth register-client` accepts repeatable `--redirect-uri` values and a supported `--token-endpoint-auth-method`, and infers the browser grant types when redirect URIs are present.
+- The complete HTTP MCP and OAuth surface uses default-deny CORS with an explicit `GBRAIN_HTTP_CORS_ORIGIN` allowlist for browser clients.
+- Public-client registration is atomic, and every registration entry point applies the same authentication-method validator.
+- `GBRAIN_HTTP_TRUST_PROXY` configures loopback, one-hop, disabled, multi-hop, named-mode, and CIDR trust consistently across both HTTP transports.
 
 ### Things to watch after upgrade
 
@@ -8170,7 +8236,7 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 - `gbrain auth register-client --redirect-uri <uri>` (repeatable) — pre-register a client with one or more callback URLs. When passed without `--grant-types`, defaults to `authorization_code,refresh_token`.
 - `gbrain auth register-client --token-endpoint-auth-method <method>` — `client_secret_post` (default), `client_secret_basic`, or `none` (public PKCE-only client; no client secret minted).
-- `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS` constant + `validateTokenEndpointAuthMethod()` validator exported from `src/core/oauth-provider.ts`. Single source of truth gated at all three registration entry points (CLI, admin endpoint, DCR `/register`). Closes the `--enable-dcr` loose-path hole where DCR previously skipped allowlist validation.
+- `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS` constant + `validateTokenEndpointAuthMethod()` validator exported from `src/core/oauth-provider.ts`. The same supported-method policy applies at all three registration entry points (CLI, admin endpoint, and DCR `/register`).
 - `GBRAIN_HTTP_TRUST_PROXY` env var on the Express OAuth server (`src/commands/serve-http.ts`). Maps `'loopback'` (default), `'0'`/`'false'` (trust nothing), `'1'`/`'true'` (one hop), other numeric (N hops), other strings pass-through to Express named modes / CIDR lists. Pure `resolveTrustProxy()` helper exported for testability.
 - `parseCorsAllowlistOAuth()` + `resolveCorsOrigin()` helpers in `src/commands/serve-http.ts`. The cors middleware on OAuth endpoints now uses `cors({ origin: resolveCorsOrigin(allowlist) })` — default-deny when `GBRAIN_HTTP_CORS_ORIGIN` is unset, function-form check when set.
 - Startup stderr WARN when `--bind 0.0.0.0` is set without `GBRAIN_HTTP_CORS_ORIGIN`. Surfaces the default-deny posture before the first cross-origin request.
@@ -8178,25 +8244,25 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 #### Changed
 
-- `registerClientManual()` signature extends with `tokenEndpointAuthMethod?: string` parameter. Return type widens from `{clientId, clientSecret}` to `{clientId, clientSecret?}` because public clients (`'none'`) don't mint a secret. Atomic single INSERT for the public-client case — no more INSERT-then-UPDATE race.
-- `corsHeaders()` and `corsPreflightHeaders()` in `src/mcp/http-transport.ts` consolidated into one `corsHeaders(origin, {preflight: boolean})`. Methods/Headers only emit when `preflight === true AND origin in allowlist`. Closes the asymmetry where the OPTIONS handler leaked surface to non-allowlisted origins.
-- Admin endpoint `POST /admin/api/register-client` validates `tokenEndpointAuthMethod` via shared validator before calling `registerClientManual`. The post-insert UPDATE block that NULL'd `client_secret_hash` for `'none'` clients is gone; the atomic INSERT does it directly.
-- CLI argv parser at `src/commands/auth.ts:registerClient` rewritten from `indexOf`-based lookahead to a proper loop. Pre-fix the parser only honored the FIRST occurrence of any flag, so `--redirect-uri A --redirect-uri B` silently dropped B.
-- `SECURITY.md` "If you must use a custom HTTP wrapper" section gains a "Pre-registering claude.ai / ChatGPT clients without DCR" subsection with paste-ready commands. "CORS" section documents the v0.41.3 OAuth endpoint lockdown. "Reverse-proxy trust" rewritten to match reality — was claiming "disabled by default" while Express hardcoded `'loopback'`; now documents the `GBRAIN_HTTP_TRUST_PROXY` env contract honestly.
+- `registerClientManual()` signature extends with `tokenEndpointAuthMethod?: string` parameter. Return type widens from `{clientId, clientSecret}` to `{clientId, clientSecret?}` because public clients (`'none'`) don't mint a secret. Atomic single INSERT for the public-client case.
+- `corsHeaders()` and `corsPreflightHeaders()` in `src/mcp/http-transport.ts` consolidated into one `corsHeaders(origin, {preflight: boolean})`, applying the allowlist consistently to actual and preflight requests.
+- Admin endpoint `POST /admin/api/register-client` validates `tokenEndpointAuthMethod` via the shared validator before calling `registerClientManual`, and public-client registration uses one atomic INSERT.
+- CLI argv parsing in `src/commands/auth.ts:registerClient` now handles repeatable `--redirect-uri` values correctly.
+- `SECURITY.md` gains paste-ready browser-client pre-registration commands, documents the default-deny CORS policy, and describes the shared `GBRAIN_HTTP_TRUST_PROXY` contract.
 
 #### Fixed
 
-- Admin endpoint atomicity bug (codex F4): pre-v0.41.3 the registration handler did `INSERT (confidential) → UPDATE (NULL out secret_hash)` for `tokenEndpointAuthMethod === 'none'`. If the UPDATE failed mid-flight (timeout, network), a confidential row with a real client_secret stranded — the agent thought it was registering a public client, but operators ended up with a confidential one. Single atomic INSERT now.
-- DCR validator gate (codex F5): pre-v0.41.3 the `--enable-dcr` `/register` path defaulted unknown `token_endpoint_auth_method` values to `'client_secret_post'`, silently swallowing typos. The shared validator now fires on the DCR path too — closes the "DCR was the loosest entry point" hole.
-- `client_secret_basic` admitted in the allowed set (codex F3): server supports HTTP Basic confidential client auth at `/token` (`src/commands/serve-http.ts:468`) but a narrower allowlist would have rejected it. The allowlist is exactly `{client_secret_post, client_secret_basic, none}` — the three methods the SDK's `mcpAuthRouter` advertises.
-- Wide-open `cors()` on every OAuth endpoint (codex F1, the biggest finding): pre-v0.41.3 the live Express server at `src/commands/serve-http.ts:400-404` ran `app.use('/mcp', cors())` (and same for /token, /authorize, /register, /revoke) with no allowlist. `cors()` defaults to `Access-Control-Allow-Origin: *`. Any web origin could complete a full OAuth flow from a logged-in operator's browser. Closed by default; explicit allowlist required.
-- Reverse-proxy doc disagreement (codex F7): docs at `SECURITY.md:127` said "Disabled by default" while `src/commands/serve-http.ts:390` hardcoded `app.set('trust proxy', 'loopback')`. Docs now match implementation.
+- Public-client registration now uses one atomic insert and never passes through a confidential-client intermediate state.
+- The shared authentication-method validator now applies to CLI, admin, and DCR registration paths.
+- `client_secret_basic` is accepted alongside `client_secret_post` and public PKCE clients.
+- The complete HTTP MCP and OAuth surface is default-deny for cross-origin browser requests unless the operator configures an explicit allowlist.
+- Reverse-proxy documentation now matches the shared loopback-by-default implementation.
 
 ### For contributors
 
 - Three new TODOS filed in `TODOS.md` under "v0.41.3 security/MCP fix wave follow-ups": T13a (extract deny-by-default fine-grained scope wiring from PR #1316), T13b (extract real operation names in mcp_request_log from #1316), T13c (extract `access_tokens.last_used_at` LRU debounce from #1316). PR #1316's RLS posture rewrite is deliberately not filed — it changes the v0.26.7 auto-RLS event trigger that `gbrain doctor`'s `rls_event_trigger` check treats as load-bearing and needs its own plan-eng-review.
 - Community PRs closed as superseded (work either already in master or covered by this wave): #685 (chipoto69), #876 (toilalesondev), #1076 (lukejduncan), #1077 (lukejduncan), #620 (ArshyaAI). Status comment left on open PR #1316 (chipoto69) pointing at the three TODOS.
-- 4 IRON RULE regression tests added at `test/http-transport.test.ts` pin the consolidated `corsHeaders` matrix (preflight × allowlisted/non-allowlisted) so the CORS asymmetry bug class can't return silently. The fix-wave-structural assertion was updated to assert the NEW atomic admin endpoint shape; a regression guard pins that the post-insert UPDATE pattern is gone.
+- Four regression tests in `test/http-transport.test.ts` pin the consolidated CORS policy for actual and preflight requests. Structural assertions also pin atomic public-client registration.
 
 ## To take advantage of v0.41.3.0
 

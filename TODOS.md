@@ -3312,16 +3312,11 @@ verify Voyage adapter integration in `src/core/ai/recipes/voyage.ts`).
 ## OAuth/MCP hardening (v0.26.7 follow-up)
 
 ### F11 — `auth register-client --redirect-uri` flag
-**Priority:** P3
 
-**What:** `gbrain auth register-client` always passes `[]` for redirect URIs; there is no CLI flag to set them. Operators who want to register an `authorization_code` client without DCR have to hand-edit the database.
-
-**Why:** Operator UX gap, not a trust-boundary issue. Codex C11 correctly flagged it as scope creep on the v0.26.7 hardening pass — kept out of that PR but worth doing.
-
-**Pros:** Closes the operator-experience gap. Validates `https://` or loopback per RFC 6749 §3.1.2.1 at registration time. Repeatable flag.
-**Cons:** ~30 lines of argv parsing + URL validation. Adds one more flag to the `auth register-client` surface. Low value relative to the OAuth provider hardening that already shipped.
-**Context:** Eva-brain has the implementation under `src/commands/auth.ts:registerClient`. Lift verbatim — the `localhost`/`127.0.0.1`/`::1` exact-match validation is correct; codex spot-check confirmed it does NOT match `localhost.evil.com`. v0.27 candidate.
-**Depends on:** Nothing.
+**Status:** Shipped in v0.41.3.0. `gbrain auth register-client` now accepts
+repeatable `--redirect-uri` values, validates supported callback URLs, and
+supports the token-endpoint authentication methods needed to pre-register
+browser clients while DCR remains disabled.
 
 ### F13 — `gbrain serve --http` argv positive-int validator
 **Priority:** P3

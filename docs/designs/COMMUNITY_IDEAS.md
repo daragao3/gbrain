@@ -233,9 +233,10 @@ triage report) and should be treated as a coordinated design, not piecemeal merg
   **OPEN, high.** No CLI/UI to inspect or change a client's `federated_read` scope (raw
   SQL only today). Atomic `array_append`/`array_remove` SQL to avoid read-modify-write
   races, plus an admin Sources tab.
-- **Pre-registration flow flags** (#894, @panda850819) — **OPEN, high, SECURITY.**
-  `register-client` hardcodes `redirect_uris=[]`, making the SECURITY.md-recommended
-  pre-registration (DCR-off) flow unusable for Claude.ai/ChatGPT connectors.
+- **Pre-registration flow flags** (#894, @panda850819) — **SHIPPED in v0.41.3.0.**
+  `gbrain auth register-client` accepts repeatable `--redirect-uri` values and a
+  supported token-endpoint authentication method, so operators can pre-register
+  browser clients while keeping DCR disabled.
 - **RFC 9728 `resource_metadata`** (#1410, @rayers) — **OPEN, high.** HTTP MCP 401s omit
   the `resource_metadata` param the MCP auth spec + RFC 9728 require, so claude.ai/Cursor
   can't discover the auth server and never start OAuth.
@@ -258,9 +259,9 @@ triage report) and should be treated as a coordinated design, not piecemeal merg
   gbrain-managed, so a re-pointed source can wipe a user's working tree. Gate behind
   `isManagedRecloneTarget()` + reject `..`. *(The maintainer's own #1960 is the canonical
   landing for this class — cross-check.)*
-- **CORS preflight asymmetry** (#983, @yashkot007) — **OPEN, high, SECURITY.** Preflight
-  returns the full method/header surface unconditionally while the actual-request path
-  gates on the allowlist — leaks allowed surface to non-allowlisted origins.
+- **Unified CORS allowlist policy** (#983, @yashkot007) — **SHIPPED in v0.41.3.0.**
+  Actual and preflight requests now use the same allowlist-gated policy, keeping
+  cross-origin authorization default-deny unless the operator lists the origin.
 - **jsonb double-encode corruption** (#1584 @warkcod, #597 @vinsew) — **OPEN, high,
   SECURITY/integrity.** Source-config and subagent writers `JSON.stringify` into a
   `::jsonb` cast — the exact postgres.js trap CLAUDE.md forbids; corrupts source config
