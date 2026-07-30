@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import postgres from 'postgres';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { importFromContent, type ImportResult } from '../../src/core/import-file.ts';
@@ -8,6 +9,32 @@ import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
 const DATABASE_URL = process.env.DATABASE_URL;
 const describeE2E = hasDatabase() ? describe : describe.skip;
 const WRITER_COUNT = 4;
+const DISPOSABLE_DATABASE_NAME = /^task5_test_[0-9a-f]{8}$/;
+
+function assertDisposableDatabaseName(databaseName: string): void {
+  if (databaseName === 'gbrain_db' || !DISPOSABLE_DATABASE_NAME.test(databaseName)) {
+    throw new Error(
+      `E2E guard: selected database name is not an approved disposable Task 5 database; refusing to run.`,
+    );
+  }
+}
+
+describe('conditional-write PostgreSQL database identity guard', () => {
+  test('accepts only the suite disposable database naming shape', () => {
+    expect(() => assertDisposableDatabaseName('task5_test_a491e265')).not.toThrow();
+
+    for (const name of [
+      'gbrain_db',
+      'gbrain_test',
+      'task5_test',
+      'task5_test_not-hex',
+      'other_test_a491e265',
+    ]) {
+      expect(() => assertDisposableDatabaseName(name)).toThrow(/refusing to run/);
+    }
+  });
+});
+
 const DATA_TABLES = [
   'facts',
   'synthesis_evidence',
@@ -121,6 +148,28 @@ function expectWinnerState(
   }
 }
 
+async function assertDisposableDatabaseSelected(): Promise<void> {
+  if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
+  const guardConnection = postgres(DATABASE_URL, {
+    max: 1,
+    connect_timeout: 10,
+    prepare: false,
+    onnotice: () => {},
+  });
+  try {
+    const rows = await guardConnection<{ database_name: string }[]>`
+      SELECT current_database() AS database_name
+    `;
+    const databaseName = rows[0]?.database_name;
+    if (!databaseName) {
+      throw new Error('E2E guard: current_database() returned no database name; refusing to run.');
+    }
+    assertDisposableDatabaseName(databaseName);
+  } finally {
+    await guardConnection.end({ timeout: 5 });
+  }
+}
+
 async function connectWriters(): Promise<PostgresEngine[]> {
   if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
   return Promise.all(Array.from({ length: WRITER_COUNT }, async () => {
@@ -169,6 +218,7 @@ describeE2E('conditional page writes on real PostgreSQL', () => {
   let writers: PostgresEngine[] = [];
 
   beforeAll(async () => {
+    await assertDisposableDatabaseSelected();
     observer = await setupDB();
     writers = await connectWriters();
   }, 60_000);
@@ -273,12 +323,30 @@ describeE2E('conditional page writes on real PostgreSQL', () => {
     expect(sourceA).toMatchObject({ status: 'created', revision: 1 });
     expect(sourceB).toMatchObject({ status: 'created', revision: 1 });
 
+    const createdA = await snapshot(observer, slug, 'source-a');
+    expect(createdA).not.toBeNull();
+    expect(createdA).toMatchObject({ revision: 1, deleted: false, versions: [] });
+    expectWinnerState(createdA!, 'a', 'source-create');
+
     const beforeB = await snapshot(observer, slug, 'source-b');
     expect(beforeB).not.toBeNull();
+    expect(beforeB).toMatchObject({ revision: 1, deleted: false, versions: [] });
     expectWinnerState(beforeB!, 'b', 'source-create');
 
     expect(await observer.softDeletePage(slug, { sourceId: 'source-a' })).toEqual({ slug });
-    const tombstone = await importFromContent(observer, slug, markdown('a-new', 'source-create'), {
+    const tombstonedA = await snapshot(observer, slug, 'source-a');
+    expect(tombstonedA).not.toBeNull();
+    expect(tombstonedA).toMatchObject({
+      title: createdA!.title,
+      compiledTruth: createdA!.compiledTruth,
+      revision: 2,
+      deleted: true,
+      tags: createdA!.tags,
+      chunks: createdA!.chunks,
+      versions: createdA!.versions,
+    });
+
+    const tombstone = await importFromContent(observer, slug, markdown('a-new', 'source-conflict'), {
       noEmbed: true,
       sourceId: 'source-a',
       writePrecondition: { mode: 'create_only' },
@@ -290,8 +358,7 @@ describeE2E('conditional page writes on real PostgreSQL', () => {
       chunks: 0,
     });
 
-    const afterA = await snapshot(observer, slug, 'source-a');
-    expect(afterA).toMatchObject({ revision: 2, deleted: true });
+    expect(await snapshot(observer, slug, 'source-a')).toEqual(tombstonedA);
     expect(await snapshot(observer, slug, 'source-b')).toEqual(beforeB);
   });
 
@@ -345,6 +412,7 @@ describeE2E('conditional page rollback on real PostgreSQL', () => {
   let failingEngine: ProjectionFailureEngine;
 
   beforeAll(async () => {
+    await assertDisposableDatabaseSelected();
     observer = await setupDB();
     if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
     failingEngine = new ProjectionFailureEngine();
