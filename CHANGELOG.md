@@ -2,6 +2,27 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.77.0] - 2026-07-29
+
+**The security guide now tells operators what is safe today without publishing a playbook for old weaknesses.**
+
+`SECURITY.md` keeps the private reporting channel and the practical steps operators need to secure an internet-reachable brain. It now describes Dynamic Client Registration and browser-origin controls in terms of their current behavior, rather than preserving historical request sequences and probe details that are not needed to operate the product safely. The result is a clearer current-state guide that still tells you which defaults to keep, which options require an explicit trust decision, and how to pre-register browser clients.
+
+No server behavior, authentication default, database schema, or upgrade path changes in this release.
+
+### How to use it
+
+Keep reporting vulnerabilities through the private GitHub security-advisory form, not a public issue. For remote deployments, keep Dynamic Client Registration disabled unless self-service registration is part of the trust model, and configure the existing origin allowlist for browser clients.
+
+### Things to watch
+
+`--enable-dcr-insecure` remains an explicit high-trust option for deployments that intentionally permit self-registered machine-to-machine clients. The guide still documents token management, network isolation, proxy trust, rate limiting, and audit redaction.
+
+### Itemized changes
+
+- `SECURITY.md` now presents DCR and CORS hardening as functional current-state guidance while preserving private vulnerability reporting and operator safeguards.
+- `.github/workflows/test.yml` refreshes the immutable `gitleaks/gitleaks-action@v2` pin to the current upstream commit.
+
 ## [0.42.67.0] - 2026-07-28
 
 **If you develop GBrain on Windows, the test and check commands now actually run. Until this release they were quietly doing almost nothing.**
