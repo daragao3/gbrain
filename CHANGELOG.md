@@ -2,6 +2,32 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.77.0] - 2026-07-30
+
+**The security guide now tells operators what is safe today without publishing a playbook for old weaknesses.**
+
+`SECURITY.md` keeps the private reporting channel and the practical steps operators need to secure an internet-reachable brain. It now describes Dynamic Client Registration and browser-origin controls in terms of their current behavior, rather than preserving historical request sequences and probe details that are not needed to operate the product safely. The guide still makes the trust boundaries explicit: keep self-service registration off unless the deployment requires it, configure an origin allowlist for browser clients, and protect tokens and the underlying network.
+
+No server behavior, authentication default, database schema, migration, or upgrade path changes in this release.
+
+### How to use it
+
+Keep reporting vulnerabilities through the private GitHub security-advisory form, not a public issue. For remote deployments, keep Dynamic Client Registration disabled unless self-service registration is part of the trust model, and configure the existing origin allowlist for browser clients.
+
+### Things to watch
+
+`--enable-dcr-insecure` remains an explicit high-trust option for deployments that intentionally permit self-registered machine-to-machine clients. The guide still documents OAuth, token management, network isolation, proxy trust, rate limiting, and audit redaction.
+
+## To take advantage of v0.42.77.0
+
+Nothing to configure or migrate. The release changes public guidance only; existing secure defaults and deployment controls continue to work as before.
+
+### Itemized changes
+
+#### Security guidance
+- **Private vulnerability reporting remains the required path.** Reports go through GitHub security advisories rather than public issues.
+- **Remote deployment guidance describes current protections without retaining historical probe instructions.** Operators still get actionable DCR, OAuth, CORS, token, network, proxy, rate-limit, and audit-redaction guidance.
+
 ## [0.42.76.0] - 2026-07-29
 
 **Fresh installs and upgrades now keep the MCP and HTTP dependency graph on compatible patched releases.**
