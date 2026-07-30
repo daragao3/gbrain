@@ -4,7 +4,7 @@
  * redirected to a tmp dir; installCron:false so the suite never touches launchd.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
@@ -34,6 +34,7 @@ let bare: string;
 let expectedRemoteHead: string | undefined;
 let observePush = false;
 let fixturePushLog: string;
+let fixturePushActiveDir: string;
 
 function makePair(): void {
   bare = mkdtempSync(join(root, 'origin-')) + '.git';
@@ -58,32 +59,26 @@ function readIfPresent(path: string): string {
 }
 
 async function waitForPushQuiescence(opts: {
-  logPath: string;
+  activeDir: string;
   expectRemoteHead?: string;
   observePush?: boolean;
 }): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  let previousLog: string | null = null;
-  let stableIntervals = 0;
+  if (!opts.observePush) return;
+  const deadline = Date.now() + 30_000;
 
   while (Date.now() < deadline) {
-    const log = readIfPresent(opts.logPath);
+    const active = (() => {
+      try { return readdirSync(opts.activeDir); } catch { return []; }
+    })();
     const remoteHead = (() => {
       try { return git(bare, 'rev-parse', 'refs/heads/main'); } catch { return ''; }
     })();
     const targetReached = opts.expectRemoteHead === undefined || remoteHead === opts.expectRemoteHead;
-    const pushObserved = !opts.observePush || log.length > 0;
-    if (targetReached && pushObserved && log === previousLog) {
-      stableIntervals += 1;
-      if (stableIntervals >= 2) return;
-    } else {
-      stableIntervals = 0;
-    }
-    previousLog = log;
-    await delay(50);
+    if (targetReached && active.length === 0) return;
+    await delay(150);
   }
 
-  throw new Error(`timed out waiting for fixture push quiescence (log=${opts.logPath}, expected=${opts.expectRemoteHead ?? 'unchanged'})`);
+  throw new Error(`timed out waiting for fixture push marker cleanup (activeDir=${opts.activeDir}, expected=${opts.expectRemoteHead ?? 'unchanged'})`);
 }
 
 async function removeFixtureTree(): Promise<void> {
@@ -117,6 +112,7 @@ async function withFixture(body: () => Promise<void> | void): Promise<void> {
     process.env.HOME = mkdtempSync(join(root, 'home-'));
     process.env.GBRAIN_HOME = join(process.env.HOME, '.gbrain');
     fixturePushLog = join(process.env.GBRAIN_HOME, 'brain-push.log');
+    fixturePushActiveDir = join(process.env.GBRAIN_HOME, 'push-active');
     process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT = '1';
     makePair();
     pairReady = true;
@@ -139,7 +135,7 @@ async function withFixture(body: () => Promise<void> | void): Promise<void> {
   if (fixtureCreated) {
     if (pairReady) {
       try {
-        await waitForPushQuiescence({ logPath: fixturePushLog, expectRemoteHead: expectedRemoteHead, observePush });
+        await waitForPushQuiescence({ activeDir: fixturePushActiveDir, expectRemoteHead: expectedRemoteHead, observePush });
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -177,7 +173,10 @@ describe('hardenBrainRepo', () => {
     // hook
     const hookPath = join(work, '.git', 'hooks', 'post-commit');
     expect(existsSync(hookPath)).toBe(true);
-    expect(readFileSync(hookPath, 'utf-8')).toContain('post-commit hook');
+    const hook = readFileSync(hookPath, 'utf-8');
+    expect(hook).toContain('post-commit hook');
+    expect(hook).toContain('/push-active');
+    expect(hook).toContain("trap 'rm -f \"$_active\"' EXIT");
     if (process.platform !== 'win32') expect(statSync(hookPath).mode & 0o111).toBeTruthy(); // executable
     // helper (committed, +x)
     const helperPath = join(work, 'scripts', 'brain-commit-push.sh');
@@ -213,7 +212,7 @@ describe('hardenBrainRepo', () => {
     expectedRemoteHead = git(work, 'rev-parse', 'HEAD');
     observePush = true;
 
-    await waitForPushQuiescence({ logPath: fixturePushLog, expectRemoteHead: expectedRemoteHead, observePush: true });
+    await waitForPushQuiescence({ activeDir: fixturePushActiveDir, expectRemoteHead: expectedRemoteHead, observePush: true });
 
     expect(git(bare, 'rev-parse', 'refs/heads/main')).toBe(expectedRemoteHead);
     expect(readIfPresent(fixturePushLog)).toContain('[push] ok main');

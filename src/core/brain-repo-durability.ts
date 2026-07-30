@@ -168,8 +168,14 @@ fi
 
 ${PUSH_RETRY}
 
-# Detach so the commit returns instantly; all output goes to the log.
-( brain_push "$_branch" ) </dev/null >/dev/null 2>&1 &
+# Detach so the commit returns instantly; all output goes to the log. The
+# fixture-owned active marker lets cleanup wait for this exact invocation
+# without enumerating or killing unrelated git processes.
+_active_dir="\${GBRAIN_HOME:-$HOME/.gbrain}/push-active"
+mkdir -p "$_active_dir" 2>/dev/null || true
+_active="$_active_dir/$(date +%s)-$$-$RANDOM"
+: >"$_active"
+( trap 'rm -f "$_active"' EXIT; brain_push "$_branch" ) </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || true
 exit 0
 `;

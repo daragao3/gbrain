@@ -70,6 +70,7 @@ Nothing to migrate or reconfigure. Existing Windows clones created before the LF
 - **Contributor guidance matches the runner.** `docs/TESTING.md` documents Windows chunk defaults, shell line endings, subprocess floors, and the difference between focused evidence and a complete-suite result.
 - **Architecture guidance records the lifecycle boundary.** `docs/architecture/KEY_FILES.md` describes portable encrypted resolve IPC and bounded shutdown ordering.
 - **GitHub Actions remain immutable and current.** The gitleaks action pin now matches the current v2 tag commit.
+- **AI SDK dependencies stay on a compatible secure graph.** Direct provider packages are pinned as one unit so lockfile refreshes cannot introduce a dependency outside the release's security floor.
 
 ## [0.42.77.0] - 2026-07-30
 

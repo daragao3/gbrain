@@ -91,8 +91,8 @@ function probeDirectoryJunction(root: string): boolean {
   }, root, '.gbrain-directory-junction-');
 }
 
-function git(cwd: string, args: string[], input?: string): string {
-  return execFileSync('git', args, {
+function git(cwd: string, executable: string, args: string[], input?: string): string {
+  return execFileSync(executable, args, {
     cwd,
     encoding: 'utf8',
     input,
@@ -100,12 +100,12 @@ function git(cwd: string, args: string[], input?: string): string {
   }).trim();
 }
 
-function probeGitSymlinkCheckout(root: string): boolean {
+function probeGitSymlinkCheckout(root: string, gitExecutable: string): boolean {
   const dir = mkdtempSync(join(root, '.gbrain-git-symlink-'));
   const emptyHooks = join(dir, 'empty-hooks');
   try {
     mkdirSync(emptyHooks);
-    const withNoHooks = (args: string[], input?: string): string => git(dir, [
+    const withNoHooks = (args: string[], input?: string): string => git(dir, gitExecutable, [
       '-c', `core.hooksPath=${emptyHooks}`,
       ...args,
     ], input);
@@ -134,23 +134,25 @@ function probeGitSymlinkCheckout(root: string): boolean {
   }
 }
 
-export function getFsCapabilities(root?: string): FsCapabilities {
+export function getFsCapabilities(
+  root?: string,
+  opts: { gitExecutable?: string } = {},
+): FsCapabilities {
   if (root !== undefined) mkdirSync(root, { recursive: true });
-  const cacheKey = root === undefined
-    ? DEFAULT_CACHE_KEY
-    : realpathSync(resolve(root));
+  const gitExecutable = opts.gitExecutable ?? 'git';
+  const canonicalRoot = root === undefined ? undefined : realpathSync(resolve(root));
+  const cacheKey = `${canonicalRoot ?? DEFAULT_CACHE_KEY}\0git=${gitExecutable}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  const probeRoot = root === undefined
-    ? mkdtempSync(join(tmpdir(), 'gbrain-fs-capabilities-root-'))
-    : cacheKey;
+  const probeRoot = canonicalRoot
+    ?? mkdtempSync(join(tmpdir(), 'gbrain-fs-capabilities-root-'));
   try {
     const capabilities: FsCapabilities = Object.freeze({
       fileSymlink: probeFileSymlink(probeRoot),
       directorySymlink: probeDirectorySymlink(probeRoot),
       directoryJunction: probeDirectoryJunction(probeRoot),
-      gitSymlinkCheckout: probeGitSymlinkCheckout(probeRoot),
+      gitSymlinkCheckout: probeGitSymlinkCheckout(probeRoot, gitExecutable),
     });
     cache.set(cacheKey, capabilities);
     return capabilities;

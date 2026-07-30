@@ -82,7 +82,7 @@ describe('getFsCapabilities', () => {
       const { getFsCapabilities } = await import(${JSON.stringify(helperUrl)});
       const root = mkdtempSync(join(tmpdir(), 'gbrain-missing-git-capability-'));
       try {
-        const capabilities = getFsCapabilities(root);
+        const capabilities = getFsCapabilities(root, { gitExecutable: 'gbrain-definitely-missing-git' });
         process.stdout.write(JSON.stringify({
           gitSymlinkCheckout: capabilities.gitSymlinkCheckout,
           leftovers: readdirSync(root),
@@ -92,7 +92,7 @@ describe('getFsCapabilities', () => {
       }
     `;
     const result = Bun.spawnSync([process.execPath, '--eval', script], {
-      env: { PATH: '' },
+      env: process.env,
       stdout: 'pipe',
       stderr: 'pipe',
     });
