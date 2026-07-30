@@ -21,8 +21,11 @@
  * worker can read. The operator picks a safe `cwd`; that's the trust boundary.
  *
  * Shutdown: the handler listens to BOTH `ctx.signal` (timeout/cancel/lock-loss)
- * and `ctx.shutdownSignal` (worker process SIGTERM). Either triggers the same
- * kill sequence: SIGTERM → 5s grace → SIGKILL. Non-shell handlers ignore
+ * and `ctx.shutdownSignal` (worker process SIGTERM). POSIX starts an owned
+ * process group, sends it SIGTERM, waits five seconds, then escalates the group
+ * to SIGKILL while inherited-pipe closure remains pending. Windows runs
+ * `taskkill.exe /PID <owned pid> /T /F`. Both paths then await the root exit and
+ * inherited-pipe closure. Non-shell handlers ignore
  * `shutdownSignal` so deploy restarts don't interrupt them mid-flight.
  */
 
@@ -33,6 +36,7 @@ import { UnrecoverableError } from '../types.ts';
 import { deriveEnvKey, resolveInheritValue } from './shell-inherit.ts';
 import { validateShellJobParams } from './shell-validate.ts';
 import { redactSecretsInText } from './shell-redact.ts';
+import { resolveShellInvocation, waitForOwnedChild } from './shell-platform.ts';
 import { loadConfig } from '../../config.ts';
 
 /** Environment variables passed through to shell children by default. Callers
@@ -50,7 +54,7 @@ const STDERR_TAIL_MAX_BYTES = 16 * 1024;
 const KILL_GRACE_MS = 5000;
 
 export interface ShellJobParams {
-  /** Shell command. Spawned via `/bin/sh -c cmd`. Exactly one of cmd or argv is required. */
+  /** Shell command. Spawned via the platform shell. Exactly one of cmd or argv is required. */
   cmd?: string;
   /** Argv vector. Spawned directly without a shell. Exactly one of cmd or argv is required. */
   argv?: string[];
@@ -243,11 +247,12 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   let proc: ChildProcess;
   try {
     if (params.cmd) {
-      // Absolute /bin/sh — not 'sh' — so a caller-supplied env with a poisoned
-      // PATH can't redirect to a different shell binary.
-      proc = spawn('/bin/sh', ['-c', params.cmd], {
+      const invocation = resolveShellInvocation(params.cmd);
+      proc = spawn(invocation.executable, invocation.args, {
         cwd: params.cwd,
         env,
+        shell: false,
+        detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } else {
@@ -255,11 +260,13 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
       proc = spawn(argv[0], argv.slice(1), {
         cwd: params.cwd,
         env,
+        shell: false,
+        detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     }
   } catch (err) {
-    // Spawn-phase failure (e.g. cwd doesn't exist when using '/bin/sh' directly).
+    // Spawn-phase failure (e.g. cwd doesn't exist or the platform shell is unavailable).
     // Retryable.
     throw err instanceof Error ? err : new Error(String(err));
   }
@@ -271,50 +278,16 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   proc.stdout?.on('data', (c: Buffer) => stdoutTail.append(c));
   proc.stderr?.on('data', (c: Buffer) => stderrTail.append(c));
 
-  // Wire BOTH signals to the kill sequence. `ctx.signal` fires on timeout /
-  // cancel / lock-loss; `ctx.shutdownSignal` fires only on worker SIGTERM/SIGINT.
-  // Shell handler needs both — a deploy restart shouldn't leave children running
-  // past the 30s worker cleanup race.
-  let killTimer: ReturnType<typeof setTimeout> | null = null;
-  let killReason = '';
-  const onAbort = (label: string) => () => {
-    if (killTimer !== null) return; // already started
-    killReason = label;
-    if (!proc.killed) {
-      try { proc.kill('SIGTERM'); } catch { /* proc already exited */ }
-    }
-    killTimer = setTimeout(() => {
-      if (!proc.killed) {
-        try { proc.kill('SIGKILL'); } catch { /* already exited */ }
-      }
-    }, KILL_GRACE_MS);
-  };
-  const sigAbort = onAbort('signal');
-  const shutdownAbort = onAbort('shutdown');
-  ctx.signal.addEventListener('abort', sigAbort);
-  ctx.shutdownSignal.addEventListener('abort', shutdownAbort);
-
-  // Fire immediately if either already aborted before wiring
-  if (ctx.signal.aborted) sigAbort();
-  if (ctx.shutdownSignal.aborted) shutdownAbort();
-
-  const exitCode: number = await new Promise<number>((resolve, reject) => {
-    proc.on('error', (err) => {
-      reject(err);
-    });
-    proc.on('exit', (code, signal) => {
-      // Node maps signal-terminated exits to a 128+N code convention; we use
-      // whichever is defined.
-      if (code !== null) resolve(code);
-      else if (signal === 'SIGTERM') resolve(143);
-      else if (signal === 'SIGKILL') resolve(137);
-      else resolve(-1);
-    });
-  }).finally(() => {
-    if (killTimer !== null) clearTimeout(killTimer);
-    ctx.signal.removeEventListener('abort', sigAbort);
-    ctx.shutdownSignal.removeEventListener('abort', shutdownAbort);
+  // Wire BOTH signals to owned-tree termination. `ctx.signal` fires on
+  // timeout / cancel / lock-loss; `ctx.shutdownSignal` fires only on worker
+  // SIGTERM/SIGINT. POSIX group escalation remains armed after root `exit`
+  // because only `close` proves that descendants released inherited pipes.
+  const childResult = await waitForOwnedChild(proc, {
+    signal: ctx.signal,
+    shutdownSignal: ctx.shutdownSignal,
+    graceMs: KILL_GRACE_MS,
   });
+  const exitCode = childResult.exitCode;
 
   const duration_ms = Date.now() - startedAt;
   // Assemble tails, then optionally scrub resolved inherit values out before
@@ -330,15 +303,18 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
     stderr_tail = redactSecretsInText(stderr_tail, redactionMap);
   }
 
-  // If we sent SIGTERM/SIGKILL in response to an abort, surface that as the
-  // error rather than the exit code — clearer for debugging. Worker catch
-  // handles retry/dead classification.
-  if (killReason === 'signal' || killReason === 'shutdown') {
-    const err = new Error(
-      `aborted: ${killReason === 'shutdown' ? 'shutdown' : (ctx.signal.reason as Error)?.message || 'signal'}`,
-    );
-    throw err;
+  // Once an abort begins, surface the contractual aborted result even if
+  // cleanup emitted a process error. Preserve that diagnostic in the message;
+  // only non-abort spawn/process errors keep their ordinary retryable path.
+  if (childResult.abortLabel !== '') {
+    const reason = childResult.abortLabel === 'shutdown'
+      ? 'shutdown'
+      : (childResult.abortReason as Error)?.message || 'signal';
+    const diagnostic = childResult.killError?.message;
+    throw new Error(`aborted: ${reason}${diagnostic ? ` (cleanup: ${diagnostic})` : ''}`);
   }
+
+  if (childResult.processError) throw childResult.processError;
 
   if (exitCode !== 0) {
     throw new Error(

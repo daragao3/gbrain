@@ -11,8 +11,10 @@ import {
 import { isPathInside } from '../src/core/path-confine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 const fence = '---';
+const FS_CAPABILITIES = getFsCapabilities();
 
 describe('autoFixFrontmatter', () => {
   test('strips null bytes', () => {
@@ -314,22 +316,21 @@ describe('scanBrainSources (PGLite)', () => {
     expect(ghost.total).toBe(0);
   });
 
-  test('skips symlinks (matches sync no-symlink policy)', async () => {
-    mkdirSync(join(tmp, 'real'), { recursive: true });
-    writeFileSync(join(tmp, 'real', 'good.md'), `${fence}\ntype: x\ntitle: ok\n${fence}\n\nbody`);
-    // Create a symlink loop: tmp/real/loop -> tmp/real
-    try {
-      symlinkSync(join(tmp, 'real'), join(tmp, 'real', 'loop'));
-    } catch {
-      // Some CI environments forbid symlink creation; skip the assertion.
-      return;
-    }
-    await registerSource('with-symlink', tmp);
-    const report = await scanBrainSources(engine);
-    // The walk should complete without infinite-looping; at most one .md
-    // entry visited (via the real path, not the symlink).
-    expect(report.per_source[0]!.total).toBe(0);
-  });
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)(
+    'skips symlinks (matches sync no-symlink policy)',
+    async () => {
+      mkdirSync(join(tmp, 'real'), { recursive: true });
+      writeFileSync(join(tmp, 'real', 'good.md'), `${fence}\ntype: x\ntitle: ok\n${fence}\n\nbody`);
+      // Create a symlink loop: tmp/real/loop -> tmp/real
+      symlinkSync(join(tmp, 'real'), join(tmp, 'real', 'loop'), 'dir');
+      await registerSource('with-symlink', tmp);
+      const report = await scanBrainSources(engine);
+      // The walk should complete without infinite-looping and visit good.md
+      // exactly once through the real path, never through the symlink.
+      expect(report.per_source[0]!.files_scanned).toBe(1);
+      expect(report.per_source[0]!.total).toBe(0);
+    },
+  );
 
   test('AbortSignal before scan: every source marked skipped (v0.38.2.0 partial-state contract)', async () => {
     const src = join(tmp, 'big');

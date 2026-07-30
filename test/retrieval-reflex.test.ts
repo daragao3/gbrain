@@ -8,6 +8,9 @@
  * shape the serve IPC / host ctx.brainQuery supply).
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { normalizeAlias } from '../src/core/search/alias-normalize.ts';
@@ -18,6 +21,7 @@ import { disposeReflex } from '../src/core/context/reflex.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
 
 let engine: PGLiteEngine;
+let workspaceDir: string;
 
 async function seed(slug: string, title: string, body: string, source = 'default') {
   await engine.executeRaw(
@@ -28,6 +32,7 @@ async function seed(slug: string, title: string, body: string, source = 'default
 }
 
 beforeAll(async () => {
+  workspaceDir = mkdtempSync(join(tmpdir(), 'gbrain-rr-workspace-'));
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -36,6 +41,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await engine.disconnect();
   await disposeReflex();
+  rmSync(workspaceDir, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
@@ -118,7 +124,7 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
       await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
       // Inject a resolver the way the OpenClaw host (ctx.brainQuery) or serve IPC would.
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -134,7 +140,7 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
 
   test('no resolver available (PGLite, no serve/host) → no throw, live context still present', async () => {
     await withEnv(REFLEX_ON, async () => {
-      const ce = createGBrainContextEngine({ workspaceDir: '/tmp/rr-test-ws-2' });
+      const ce = createGBrainContextEngine({ workspaceDir });
       const res = await ce.assemble({
         sessionId: 's2',
         messages: [{ role: 'user', content: 'what about Alice Example?' }],
@@ -149,7 +155,7 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
     await withEnv(REFLEX_ON, async () => {
       let called = false;
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-3',
+        workspaceDir,
         resolveEntities: async () => { called = true; return null; },
       });
       const res = await ce.assemble({
@@ -165,7 +171,7 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
     await withEnv(REFLEX_ON, async () => {
       await seed('people/alice-example', 'Alice Example', 'A founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-4',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -190,7 +196,7 @@ describe('v0.43 (#2095) — rolling window extraction through assemble()', () =>
     await withEnv(REFLEX_ON, async () => {
       await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-w1',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -212,7 +218,7 @@ describe('v0.43 (#2095) — rolling window extraction through assemble()', () =>
     await withEnv({ ...REFLEX_ON, GBRAIN_RETRIEVAL_REFLEX_WINDOW_TURNS: '1' }, async () => {
       await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-w2',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -232,7 +238,7 @@ describe('v0.43 (#2095) — rolling window extraction through assemble()', () =>
     await withEnv(REFLEX_ON, async () => {
       await seed('people/alice-example', 'Alice Example', 'A founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-w3',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -255,7 +261,7 @@ describe('v0.43 (#2095) — rolling window extraction through assemble()', () =>
     await withEnv(REFLEX_ON, async () => {
       await seed('people/alice-example', 'Alice Example', 'A founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-w4',
+        workspaceDir,
         resolveEntities: (candidates, opts) =>
           resolveEntitiesToPointers(engine, 'default', candidates, opts),
       });
@@ -274,7 +280,7 @@ describe('v0.43 (#2095) — rolling window extraction through assemble()', () =>
     await withEnv(REFLEX_ON, async () => {
       await seed('people/alice-example', 'Alice Example', 'A founder.');
       const ce = createGBrainContextEngine({
-        workspaceDir: '/tmp/rr-test-ws-w5',
+        workspaceDir,
         resolveEntities: async () => { throw new Error('resolver exploded'); },
       });
       const res = await ce.assemble({
@@ -348,7 +354,7 @@ describe('ambient-channel event logging (codex D11 — accept-side logDeliveredR
 
 describe('serve IPC wiring — suppression passthrough + reflex-channel logging (review hardening)', () => {
   test('the IPC round-trip honors slug-only suppression and logs channel=reflex', async () => {
-    const { startResolveIpcServer, resolveViaIpc, resolveSocketPath, IPC_UNAVAILABLE } =
+    const { startResolveIpcServer, resolveViaIpc, resolveIpcEndpoint, IPC_UNAVAILABLE } =
       await import('../src/core/context/resolve-ipc.ts');
     const { awaitPendingVolunteerEventWrites, _resetPendingVolunteerEventWritesForTests } =
       await import('../src/core/context/volunteer-events.ts');
@@ -361,13 +367,13 @@ describe('serve IPC wiring — suppression passthrough + reflex-channel logging 
     await seed('people/alice-example', 'Alice Example', 'A founder.');
 
     const dir = mkdtempSync(join(tmpdir(), 'rr-ipc-'));
-    const sock = resolveSocketPath(dir);
+    const endpoint = resolveIpcEndpoint(dir);
     // The SAME wiring shape src/mcp/server.ts uses for serve: forwards
     // suppression from the request; logging happens at DELIVERY via the
     // onDelivered hook (post-write), never inside the resolver.
     const { logDeliveredReflexPointers } = await import('../src/core/context/retrieval-reflex.ts');
     const server = await startResolveIpcServer(
-      sock,
+      endpoint,
       (req) =>
         resolveEntitiesToPointers(engine, req.sourceId || 'default', req.candidates ?? [], {
           priorContextText: req.priorContextText,
@@ -380,7 +386,7 @@ describe('serve IPC wiring — suppression passthrough + reflex-channel logging 
     try {
       // slug-only suppression: a TITLE mention in prior context must NOT
       // suppress (the windowing contract), and the resolve must log.
-      const block = await resolveViaIpc(sock, {
+      const block = await resolveViaIpc(endpoint, {
         candidates: extractCandidates('tell me about Alice Example'),
         priorContextText: 'earlier turn merely mentioned Alice Example',
         suppression: 'slug-only',
@@ -397,7 +403,7 @@ describe('serve IPC wiring — suppression passthrough + reflex-channel logging 
       expect(rows.length).toBe(1);
       expect(rows[0].channel).toBe('reflex');
     } finally {
-      server!.close();
+      await server!.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

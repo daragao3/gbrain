@@ -12,9 +12,10 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, chmodSync,
-  lstatSync, type Stats,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, readlinkSync, rmSync,
+  symlinkSync, unlinkSync, chmodSync, lstatSync, readdirSync, type Stats,
 } from 'fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -26,6 +27,10 @@ import { resolveBrainId } from '../src/core/brain-resolver.ts';
 import { HOST_BRAIN_ID } from '../src/core/brain-registry.ts';
 import { autoDetectSkillsDir } from '../src/core/repo-root.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
+const HAS_POSIX_OWNERSHIP = typeof process.getuid === 'function';
 
 // ── helpers ────────────────────────────────────────────────
 
@@ -66,6 +71,94 @@ function stubEngine(ids: string[]): BrainEngine {
   } as unknown as BrainEngine;
 }
 
+describe('getFsCapabilities', () => {
+  test('returns verified booleans, caches by canonical root, and cleans probe files', () => {
+    const root = scratch('fs-capabilities-');
+    const first = getFsCapabilities(root);
+    const second = getFsCapabilities(join(root, '.'));
+
+    expect(first).toBe(second);
+    expect(Object.keys(first).sort()).toEqual([
+      'directoryJunction',
+      'directorySymlink',
+      'fileSymlink',
+      'gitSymlinkCheckout',
+    ]);
+    for (const value of Object.values(first)) expect(typeof value).toBe('boolean');
+    expect(readdirSync(root)).toEqual([]);
+
+    if (first.fileSymlink) {
+      const dir = join(root, 'verify-file');
+      mkdirSync(dir);
+      const target = join(dir, 'target.txt');
+      const link = join(dir, 'link.txt');
+      writeFileSync(target, 'file-cycle');
+      symlinkSync(target, link, 'file');
+      expect(readFileSync(link, 'utf8')).toBe('file-cycle');
+      unlinkSync(link);
+      expect(readdirSync(dir)).not.toContain('link.txt');
+      rmSync(dir, { recursive: true });
+    }
+
+    if (first.directorySymlink) {
+      const dir = join(root, 'verify-directory');
+      const target = join(dir, 'target');
+      const link = join(dir, 'link');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'marker.txt'), 'directory-cycle');
+      symlinkSync(target, link, 'dir');
+      expect(readFileSync(join(link, 'marker.txt'), 'utf8')).toBe('directory-cycle');
+      unlinkSync(link);
+      expect(readdirSync(dir)).not.toContain('link');
+      rmSync(dir, { recursive: true });
+    }
+
+    if (first.directoryJunction) {
+      const dir = join(root, 'verify-junction');
+      const target = join(dir, 'target');
+      const link = join(dir, 'link');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'marker.txt'), 'junction-cycle');
+      symlinkSync(target, link, 'junction');
+      expect(readFileSync(join(link, 'marker.txt'), 'utf8')).toBe('junction-cycle');
+      unlinkSync(link);
+      expect(readdirSync(dir)).not.toContain('link');
+      rmSync(dir, { recursive: true });
+    }
+
+    if (first.gitSymlinkCheckout) {
+      const dir = join(root, 'verify-git-checkout');
+      const hooks = join(dir, 'empty-hooks');
+      mkdirSync(hooks, { recursive: true });
+      const git = (args: string[], input?: string): string => execFileSync(
+        'git',
+        ['-c', `core.hooksPath=${hooks}`, ...args],
+        { cwd: dir, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] },
+      ).trim();
+      git(['init', '--quiet']);
+      writeFileSync(join(dir, 'target.txt'), 'git-cycle');
+      git(['add', 'target.txt']);
+      const blob = git(['hash-object', '-w', '--stdin'], 'target.txt');
+      git(['update-index', '--add', '--cacheinfo', `120000,${blob},link.txt`]);
+      git([
+        '-c', 'user.name=gbrain-test',
+        '-c', 'user.email=gbrain-test@example.invalid',
+        '-c', 'commit.gpgSign=false',
+        'commit', '--quiet', '-m', 'verify git symlink checkout',
+      ]);
+      rmSync(join(dir, 'link.txt'), { force: true });
+      git(['checkout', '--', 'link.txt']);
+      const link = join(dir, 'link.txt');
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(link)).toBe('target.txt');
+      unlinkSync(link);
+      rmSync(dir, { recursive: true });
+    }
+
+    expect(readdirSync(root)).toEqual([]);
+  });
+});
+
 // ── isTrustedDotfile (synthetic Stats — precise branch coverage) ──
 
 describe('isTrustedDotfile', () => {
@@ -95,22 +188,32 @@ describe('isTrustedDotfile', () => {
 });
 
 describe('isTrustedDotfile — real fs (lstat)', () => {
-  test('a real owned file is trusted; a symlink and a world-writable file are not', () => {
-    if (typeof process.getuid !== 'function') return; // POSIX-only
-    const dir = scratch();
-    const ownFile = join(dir, 'own');
-    writeFileSync(ownFile, 'x');
-    expect(isTrustedDotfile(lstatSync(ownFile))).toBe(true);
+  test.skipIf(!HAS_POSIX_OWNERSHIP)(
+    'a real owned file is trusted and a world-writable file is not',
+    () => {
+      const dir = scratch();
+      const ownFile = join(dir, 'own');
+      writeFileSync(ownFile, 'x');
+      expect(isTrustedDotfile(lstatSync(ownFile))).toBe(true);
 
-    const link = join(dir, 'link');
-    symlinkSync(ownFile, link);
-    expect(isTrustedDotfile(lstatSync(link))).toBe(false);
+      const ww = join(dir, 'ww');
+      writeFileSync(ww, 'x');
+      chmodSync(ww, 0o666);
+      expect(isTrustedDotfile(lstatSync(ww))).toBe(false);
+    },
+  );
 
-    const ww = join(dir, 'ww');
-    writeFileSync(ww, 'x');
-    chmodSync(ww, 0o666);
-    expect(isTrustedDotfile(lstatSync(ww))).toBe(false);
-  });
+  test.skipIf(!HAS_POSIX_OWNERSHIP || !FS_CAPABILITIES.fileSymlink)(
+    'a real symlink is not trusted',
+    () => {
+      const dir = scratch();
+      const ownFile = join(dir, 'own');
+      writeFileSync(ownFile, 'x');
+      const link = join(dir, 'link');
+      symlinkSync(ownFile, link, 'file');
+      expect(isTrustedDotfile(lstatSync(link))).toBe(false);
+    },
+  );
 });
 
 // ── isPathContained + realpathOrResolve ────────────────────
@@ -122,19 +225,19 @@ describe('isPathContained', () => {
     mkdirSync(sub);
     expect(isPathContained(sub, dir)).toBe(true);
   });
-  test('symlink escaping the parent is NOT contained', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('symlink escaping the parent is NOT contained', () => {
     const dir = scratch();
     const outside = scratch('pc-outside-');
     const link = join(dir, 'escape');
-    symlinkSync(outside, link);
+    symlinkSync(outside, link, 'dir');
     expect(isPathContained(link, dir)).toBe(false);
   });
-  test('symlink resolving INSIDE the parent IS contained', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('symlink resolving INSIDE the parent IS contained', () => {
     const dir = scratch();
     const real = join(dir, 'real');
     mkdirSync(real);
     const link = join(dir, 'inlink');
-    symlinkSync(real, link);
+    symlinkSync(real, link, 'dir');
     expect(isPathContained(link, dir)).toBe(true);
   });
   test('missing path → not contained (fail-closed)', () => {
@@ -150,10 +253,10 @@ describe('isPathContained', () => {
 });
 
 describe('realpathOrResolve', () => {
-  test('resolves a symlink to its real target', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('resolves a symlink to its real target', () => {
     const dir = scratch();
     const real = join(dir, 'real'); mkdirSync(real);
-    const link = join(dir, 'link'); symlinkSync(real, link);
+    const link = join(dir, 'link'); symlinkSync(real, link, 'dir');
     expect(realpathOrResolve(link)).toBe(realpathOrResolve(real));
   });
   test('nonexistent path → lexical resolve (does not throw)', () => {
@@ -208,18 +311,17 @@ describe('isWriteTargetContained', () => {
     const root = scratch();
     expect(isWriteTargetContained(join(root, '..', 'escape.md'), root)).toBe(false);
   });
-  test('a symlinked intermediate dir escaping the root is refused', () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('a symlinked intermediate dir escaping the root is refused', () => {
     const root = scratch();
     const outside = scratch('wt-outside-');
-    symlinkSync(outside, join(root, 'link')); // root/link → outside
+    symlinkSync(outside, join(root, 'link'), 'dir'); // root/link → outside
     // target lands under the escaping symlink → real path is outside root
     expect(isWriteTargetContained(join(root, 'link', 'page.md'), root)).toBe(false);
   });
-  test('a symlinked intermediate dir staying inside the root is allowed', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('a symlinked intermediate dir staying inside the root is allowed', () => {
     const root = scratch();
     mkdirSync(join(root, 'real'));
-    symlinkSync(join(root, 'real'), join(root, 'link'));
+    symlinkSync(join(root, 'real'), join(root, 'link'), 'dir');
     expect(isWriteTargetContained(join(root, 'link', 'page.md'), root)).toBe(true);
   });
 });
@@ -232,15 +334,13 @@ describe('resolveSourceId — .gbrain-source dotfile trust', () => {
     writeFileSync(join(dir, '.gbrain-source'), 'evil\n');
     expect(await resolveSourceId(stubEngine(['evil', 'default']), null, dir)).toBe('evil');
   });
-  test('symlinked dotfile is REFUSED → falls through to default', async () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!HAS_POSIX_OWNERSHIP || !FS_CAPABILITIES.fileSymlink)('symlinked dotfile is REFUSED → falls through to default', async () => {
     const dir = scratch();
     const target = join(dir, 'target'); writeFileSync(target, 'evil\n');
-    symlinkSync(target, join(dir, '.gbrain-source'));
+    symlinkSync(target, join(dir, '.gbrain-source'), 'file');
     expect(await resolveSourceId(stubEngine(['evil', 'default']), null, dir)).toBe('default');
   });
-  test('world-writable dotfile is REFUSED → falls through to default', async () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!HAS_POSIX_OWNERSHIP)('world-writable dotfile is REFUSED → falls through to default', async () => {
     const dir = scratch();
     const df = join(dir, '.gbrain-source'); writeFileSync(df, 'evil\n'); chmodSync(df, 0o666);
     expect(await resolveSourceId(stubEngine(['evil', 'default']), null, dir)).toBe('default');
@@ -256,15 +356,13 @@ describe('resolveBrainId — .gbrain-mount dotfile trust', () => {
     writeFileSync(join(dir, '.gbrain-mount'), 'evil-brain\n');
     expect(resolveBrainId(null, dir, noMounts)).toBe('evil-brain');
   });
-  test('symlinked .gbrain-mount is REFUSED → falls through to host', () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!HAS_POSIX_OWNERSHIP || !FS_CAPABILITIES.fileSymlink)('symlinked .gbrain-mount is REFUSED → falls through to host', () => {
     const dir = scratch();
     const target = join(dir, 'm'); writeFileSync(target, 'evil-brain\n');
-    symlinkSync(target, join(dir, '.gbrain-mount'));
+    symlinkSync(target, join(dir, '.gbrain-mount'), 'file');
     expect(resolveBrainId(null, dir, noMounts)).toBe(HOST_BRAIN_ID);
   });
-  test('world-writable .gbrain-mount is REFUSED → falls through to host', () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!HAS_POSIX_OWNERSHIP)('world-writable .gbrain-mount is REFUSED → falls through to host', () => {
     const dir = scratch();
     const df = join(dir, '.gbrain-mount'); writeFileSync(df, 'evil-brain\n'); chmodSync(df, 0o666);
     expect(resolveBrainId(null, dir, noMounts)).toBe(HOST_BRAIN_ID);
@@ -279,39 +377,37 @@ describe('autoDetectSkillsDir — skills/ symlink confinement', () => {
     writeFileSync(join(dir, 'skills', 'RESOLVER.md'), '# RESOLVER\n');
   }
 
-  test('OPENCLAW_WORKSPACE: escaping skills symlink is refused', () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('OPENCLAW_WORKSPACE: escaping skills symlink is refused', () => {
     const ws = scratch('ws-'); const outside = scratch('outside-');
     seedSkills(outside); // real skills with RESOLVER.md, OUTSIDE the workspace
-    symlinkSync(join(outside, 'skills'), join(ws, 'skills')); // ws/skills → outside/skills
+    symlinkSync(join(outside, 'skills'), join(ws, 'skills'), 'dir'); // ws/skills → outside/skills
     const found = autoDetectSkillsDir(scratch('cwd-'), { OPENCLAW_WORKSPACE: ws });
     expect(found.source).not.toBe('openclaw_workspace_env');
     expect(found.dir).not.toBe(join(ws, 'skills'));
   });
 
-  test('OPENCLAW_WORKSPACE: in-workspace skills symlink is allowed', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('OPENCLAW_WORKSPACE: in-workspace skills symlink is allowed', () => {
     const ws = scratch('ws-');
     mkdirSync(join(ws, '_real'), { recursive: true });
     writeFileSync(join(ws, '_real', 'RESOLVER.md'), '# RESOLVER\n');
-    symlinkSync(join(ws, '_real'), join(ws, 'skills')); // contained symlink
+    symlinkSync(join(ws, '_real'), join(ws, 'skills'), 'dir'); // contained symlink
     const found = autoDetectSkillsDir(scratch('cwd-'), { OPENCLAW_WORKSPACE: ws });
     expect(found.source).toBe('openclaw_workspace_env');
     expect(found.dir).toBe(join(ws, 'skills'));
   });
 
-  test('cwd_walk_up: escaping skills symlink is refused', () => {
-    if (typeof process.getuid !== 'function') return;
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('cwd_walk_up: escaping skills symlink is refused', () => {
     const ws = scratch('ws-'); const outside = scratch('outside-');
     mkdirSync(join(outside, 'skills'), { recursive: true });
-    symlinkSync(join(outside, 'skills'), join(ws, 'skills'));
+    symlinkSync(join(outside, 'skills'), join(ws, 'skills'), 'dir');
     const found = autoDetectSkillsDir(ws, {});
     expect(found.dir).toBeNull();
   });
 
-  test('cwd_walk_up: in-workspace skills symlink is allowed', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('cwd_walk_up: in-workspace skills symlink is allowed', () => {
     const ws = scratch('ws-');
     mkdirSync(join(ws, '_real'), { recursive: true });
-    symlinkSync(join(ws, '_real'), join(ws, 'skills'));
+    symlinkSync(join(ws, '_real'), join(ws, 'skills'), 'dir');
     const found = autoDetectSkillsDir(ws, {});
     expect(found.source).toBe('cwd_walk_up');
     expect(found.dir).toBe(join(ws, 'skills'));

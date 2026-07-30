@@ -156,7 +156,8 @@ function renderPostCommitHook(): string {
 ${HOOK_BANNER}
 # LOCAL + untracked — NEVER commit this file. Best-effort background auto-push so
 # agent writes don't sit local-only. The real guarantee is ${HELPER_REL}.
-# Bypass: git commit --no-verify.
+# Internal scaffolding commits use -c core.hooksPath=/dev/null: --no-verify skips
+# pre-commit and commit-msg hooks, but it does not skip post-commit hooks.
 set -euo pipefail
 
 _branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
@@ -729,7 +730,11 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
       stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
     }).toString().trim();
     if (!staged) return { status: 'ok', detail: 'scaffolding already committed' };
-    execFileSync('git', ['-C', repoPath, 'commit', '-m', 'chore(gbrain): install brain durability scaffolding'], {
+    execFileSync('git', [
+      '-C', repoPath,
+      '-c', 'core.hooksPath=/dev/null',
+      'commit', '-m', 'chore(gbrain): install brain durability scaffolding',
+    ], {
       stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
     });
     execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', 'origin', `HEAD:${branch}`], {

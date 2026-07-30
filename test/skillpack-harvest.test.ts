@@ -27,7 +27,9 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 
 import { HarvestError, runHarvest, addToBundleManifest } from '../src/core/skillpack/harvest.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
+const FS_CAPABILITIES = getFsCapabilities();
 const created: string[] = [];
 afterEach(() => {
   while (created.length) {
@@ -160,7 +162,7 @@ describe('runHarvest — error paths', () => {
     }
   });
 
-  it('symlinks in host skill dir are rejected (D13 security gate)', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('symlinks in host skill dir are rejected (D13 security gate)', () => {
     const hostRoot = scratchHost();
     const gbrainRoot = scratchGbrain();
 
@@ -171,6 +173,7 @@ describe('runHarvest — error paths', () => {
     symlinkSync(
       join(outside, 'secret.txt'),
       join(hostRoot, 'skills', 'my-fork-skill', 'leaked.txt'),
+      'file',
     );
 
     try {

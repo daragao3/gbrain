@@ -65,12 +65,11 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new OperationTimeoutError(label, ms)), ms);
-    // Don't keep the event loop alive just for the timeout — if the wrapped
-    // promise settles first, we clear; if nothing else is running, the
-    // process can exit cleanly without waiting on this timer.
-    if (typeof (timer as { unref?: () => void }).unref === 'function') {
-      (timer as { unref: () => void }).unref();
-    }
+    // Keep the deadline referenced while the caller is awaiting this race.
+    // Bun's test runner may have no other referenced handles when `p` is a
+    // never-settling promise; unref() would then prevent the deadline from
+    // firing and defeat the timeout contract. The finally below clears this
+    // handle as soon as either side settles.
   });
 
   return Promise.race([p, timeoutPromise]).finally(() => {

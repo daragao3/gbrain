@@ -28,7 +28,7 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import type { DbUrlSource } from '../core/config.ts';
 import { gbrainPath, loadConfig } from '../core/config.ts';
 import { reflexEnabled } from '../core/context/reflex.ts';
-import { resolveSocketPath } from '../core/context/resolve-ipc.ts';
+import { resolveIpcEndpoint } from '../core/context/resolve-ipc.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 import { homedir } from 'os';
 import { isPathInside, isPathStrictlyInside } from '../core/path-confine.ts';
@@ -4630,7 +4630,10 @@ export async function computePoolReapHealthCheck(
  * Policy-skill install state is reported in details (it ships into the HOST
  * repo, so absence in gbrain's own skills dir is expected, not a failure).
  */
-export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
+export function buildRetrievalReflexCheck(
+  skillsDir: string | null,
+  platform: NodeJS.Platform = process.platform,
+): Check {
   const name = 'retrieval_reflex_health';
   try {
     const cfg = loadConfig();
@@ -4667,9 +4670,19 @@ export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
       pathDesc = 'postgres direct';
       viablePathVisible = true;
     } else if (engineKind === 'pglite' && cfg?.database_path) {
-      const socket = resolveSocketPath(cfg.database_path);
-      viablePathVisible = existsSync(socket);
-      pathDesc = viablePathVisible ? 'pglite via serve IPC' : 'pglite — serve IPC socket not present';
+      const endpoint = resolveIpcEndpoint(cfg.database_path, platform);
+      if (endpoint.kind === 'windows-pipe') {
+        // Named-pipe liveness is not filesystem-visible. Report the configured
+        // transport without claiming that a server is listening; the recent
+        // heartbeat remains the authority for observed runtime activity.
+        viablePathVisible = false;
+        pathDesc = 'pglite via serve IPC named pipe';
+      } else {
+        viablePathVisible = existsSync(endpoint.address);
+        pathDesc = viablePathVisible
+          ? 'pglite via serve IPC'
+          : 'pglite — serve IPC socket not present';
+      }
     } else {
       pathDesc = `engine ${engineKind}`;
       viablePathVisible = false;

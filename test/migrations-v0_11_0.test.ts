@@ -25,6 +25,9 @@ import {
   resolveMigrateCliTimeoutMs,
   DEFAULT_MIGRATE_CLI_TIMEOUT_MS,
 } from '../src/commands/migrations/v0_12_0.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 const {
   injectAgentsMdMarker,
@@ -121,14 +124,14 @@ describe('AGENTS.md marker injection', () => {
     expect(after).not.toContain(AGENTS_MD_MARKER);
   });
 
-  test('SKIPs symlink target that escapes scoped roots', () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('SKIPs symlink target that escapes scoped roots', () => {
     const outside = join(tmp, 'outside', 'AGENTS.md');
     mkdirSync(join(tmp, 'outside'), { recursive: true });
     writeFileSync(outside, '# escaped\n');
 
     const inside = join(tmp, '.claude', 'AGENTS.md');
     mkdirSync(join(tmp, '.claude'), { recursive: true });
-    symlinkSync(outside, inside);
+    symlinkSync(outside, inside, 'file');
 
     const result = injectAgentsMdMarker(inside, DEFAULT_OPTS);
     expect(result.injected).toBe(false);

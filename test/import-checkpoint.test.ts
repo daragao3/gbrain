@@ -10,7 +10,9 @@ import {
   resolveImportTargetDir,
   type ImportCheckpoint,
 } from '../src/core/import-checkpoint.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
+const FS_CAPABILITIES = getFsCapabilities();
 let workDir: string;
 let cpPath: string;
 let stderrCaptured = '';
@@ -232,11 +234,11 @@ describe('resolveImportTargetDir', () => {
     }
   });
 
-  test('collapses symlink spelling to the real import target', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('collapses symlink spelling to the real import target', () => {
     const target = join(workDir, 'real-staging');
     const link = join(workDir, 'linked-staging');
     mkdirSync(target);
-    symlinkSync(target, link);
+    symlinkSync(target, link, 'dir');
     expect(resolveImportTargetDir(link)).toBe(realpathSync(target));
   });
 
