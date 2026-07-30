@@ -105,7 +105,7 @@ describe('put_page_conditional operation', () => {
     const unchanged = await conditionalOp.handler(makeCtx(), {
       slug: 'notes/unchanged', content: V1, mode: 'compare_and_swap', expected_revision: 1,
     });
-    expect(unchanged).toEqual({ status: 'unchanged', slug: 'notes/unchanged', revision: 1 });
+    expect(unchanged).toEqual({ status: 'unchanged', slug: 'notes/unchanged', revision: 1, chunks: 0 });
     for (const field of [
       'write_through', 'facts_backstop', 'chronicle_backstop', 'writer_lint',
       'auto_links', 'auto_timeline',
@@ -145,17 +145,27 @@ describe('put_page_conditional operation', () => {
     expect(await engine.getPage('notes/malformed', { sourceId: 'default' })).toBeNull();
   });
 
-  test('post-write lint reads the source updated by the operation', async () => {
+  test('post-write lint reads the exact write source in a federated context', async () => {
     const slug = 'notes/source-scoped-lint';
-    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x')");
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('other', 'other'), ('team-x', 'team-x')");
     await engine.setConfig('writer.lint_on_put_page', 'true');
 
-    await conditionalOp.handler(makeCtx({ sourceId: 'default' }), {
+    await conditionalOp.handler(makeCtx({ sourceId: 'other' }), {
       slug,
-      content: '---\ntype: note\ntitle: Default Source\n---\n\nA normal page in the other source.',
+      content: '---\ntype: note\ntitle: Other Source\n---\n\nA normal page in the other source.',
       mode: 'create_only',
     });
-    const teamResult = await conditionalOp.handler(makeCtx({ sourceId: 'team-x' }), {
+    const teamResult = await conditionalOp.handler(makeCtx({
+      sourceId: 'team-x',
+      remote: true,
+      auth: {
+        token: 'test-token',
+        clientId: 'test-client',
+        scopes: ['read', 'write'],
+        sourceId: 'team-x',
+        allowedSources: ['other', 'team-x'],
+      },
+    }), {
       slug,
       content: '---\ntype: note\ntitle: Team Source\nvalidate: false\n---\n\nThis source opts out of lint.',
       mode: 'create_only',

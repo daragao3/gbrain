@@ -814,6 +814,7 @@ async function executePutPage(
   mode: PutPageMode,
 ): Promise<Record<string, unknown>> {
   const slug = p.slug as string;
+  const writeSourceId = ctx.sourceId || 'default';
   const operationName = mode.kind === 'legacy' ? 'put_page' : 'put_page_conditional';
   const remoteProvenance = mode.kind === 'legacy'
     ? 'mcp:put_page'
@@ -854,7 +855,7 @@ async function executePutPage(
   const sharedOpts = {
     noEmbed,
     remote: ctx.remote !== false,
-    ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+    sourceId: writeSourceId,
     ...(activePack ? { activePack } : {}),
     source_kind: provenanceKind,
     source_uri: provenanceUri,
@@ -894,7 +895,7 @@ async function executePutPage(
     };
   }
   if (mode.kind === 'conditional' && result.status === 'unchanged') {
-    return { status: result.status, slug: result.slug, revision: result.revision };
+    return { status: result.status, slug: result.slug, revision: result.revision, chunks: result.chunks };
   }
   if (mode.kind === 'conditional' && result.status !== 'created' && result.status !== 'updated') {
     return {
@@ -904,7 +905,7 @@ async function executePutPage(
     };
   }
 
-  const hooks = await runPutPageSuccessHooks(ctx, slug, result, activePack, operationName);
+  const hooks = await runPutPageSuccessHooks(ctx, slug, result, activePack, operationName, writeSourceId);
   return {
     slug: result.slug,
     status: mode.kind === 'legacy' && result.status === 'imported'
@@ -924,6 +925,7 @@ async function runPutPageSuccessHooks(
   result: ImportResult,
   activePack: ActivePackSummary | undefined,
   operationName: 'put_page' | 'put_page_conditional',
+  writeSourceId: string,
 ): Promise<Record<string, unknown>> {
     const imported = result.status === 'imported' || result.status === 'created' || result.status === 'updated';
     const hookProvenance = ctx.remote === false ? operationName : `mcp:${operationName}`;
@@ -978,12 +980,11 @@ async function runPutPageSuccessHooks(
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
       // --save`). Renders the file from the saved DB row and writes it
       // atomically; never throws (failures land in skipped/error).
       writeThrough = await writePageThrough(ctx.engine, result.slug, {
-        sourceId,
+        sourceId: writeSourceId,
         frontmatterOverrides: {
           ingested_via: hookProvenance,
           ingested_at: new Date().toISOString(),
@@ -1088,7 +1089,7 @@ async function runPutPageSuccessHooks(
         },
         {
           engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
+          sourceId: writeSourceId,
           sessionId: (ctx as { source_session?: string }).source_session ?? null,
           source: factsProvenance,
           mode: 'queue',
@@ -1130,7 +1131,7 @@ async function runPutPageSuccessHooks(
             compiled_truth: result.parsedPage.compiled_truth,
             frontmatter: result.parsedPage.frontmatter,
           },
-          { engine: ctx.engine, sourceId: ctx.sourceId ?? 'default' },
+          { engine: ctx.engine, sourceId: writeSourceId },
         );
         chronicleQueued = r.enqueued ? { queued: true } : { skipped: r.skipped ?? 'skipped' };
       } catch {
@@ -1146,7 +1147,7 @@ async function runPutPageSuccessHooks(
     let writerLint: { error_count: number; warning_count: number } | { skipped: string } | undefined;
     try {
       const { runPostWriteLint } = await import('./output/post-write.ts');
-      const lint = await runPostWriteLint(ctx.engine, result.slug, sourceScopeOpts(ctx));
+      const lint = await runPostWriteLint(ctx.engine, result.slug, { sourceId: writeSourceId });
       if (lint.ran) {
         writerLint = {
           error_count: lint.findings.filter(f => f.severity === 'error').length,
