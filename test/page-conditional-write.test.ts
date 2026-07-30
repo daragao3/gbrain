@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 
 let engine: PGLiteEngine;
 
@@ -25,6 +26,50 @@ const page = (title: string) => ({
   timeline: '',
   frontmatter: {},
 });
+
+const markdown = (title: string, body: string, tags: string[] = []) => `---
+type: note
+title: ${title}
+tags: [${tags.join(', ')}]
+---
+
+${body}
+`;
+
+async function stateFor(slug: string) {
+  const [pageRow] = await engine.executeRaw<{
+    id: number;
+    title: string;
+    compiled_truth: string;
+    revision: number;
+  }>(`
+    SELECT p.id, p.title, p.compiled_truth, p.revision
+    FROM pages p WHERE p.source_id = 'default' AND p.slug = $1
+  `, [slug]);
+  if (!pageRow) return null;
+  const [versions, chunks, tags] = await Promise.all([
+    engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM page_versions WHERE page_id = $1',
+      [pageRow.id],
+    ),
+    engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM content_chunks WHERE page_id = $1',
+      [pageRow.id],
+    ),
+    engine.executeRaw<{ n: number }>(
+      'SELECT count(*)::int AS n FROM tags WHERE page_id = $1',
+      [pageRow.id],
+    ),
+  ]);
+  return {
+    title: pageRow.title,
+    compiled_truth: pageRow.compiled_truth,
+    revision: pageRow.revision,
+    versions: versions[0]?.n ?? 0,
+    chunks: chunks[0]?.n ?? 0,
+    tags: tags[0]?.n ?? 0,
+  };
+}
 
 describe('conditional page writes', () => {
   test('createPageOnly creates revision 1 then conflicts without overwrite', async () => {
@@ -131,5 +176,168 @@ describe('conditional page writes', () => {
     );
     expect(lockedB?.title).toBe('b1');
     expect(lockedB?.revision).toBe(1);
+  });
+});
+
+describe('conditional import transaction', () => {
+  test('create success writes page, tags, and chunks; repeated create leaves state unchanged', async () => {
+    const content = markdown('Created', 'created body', ['alpha', 'beta']);
+    const first = await importFromContent(engine, 'notes/import-create', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+    expect(first.status).toBe('created');
+    expect(first.revision).toBe(1);
+    const afterCreate = await stateFor('notes/import-create');
+    expect(afterCreate).toMatchObject({ title: 'Created', revision: 1, versions: 0, tags: 2 });
+    expect(afterCreate!.chunks).toBeGreaterThan(0);
+
+    const second = await importFromContent(
+      engine,
+      'notes/import-create',
+      markdown('Loser', 'loser body', ['loser']),
+      { noEmbed: true, writePrecondition: { mode: 'create_only' } },
+    );
+    expect(second).toMatchObject({
+      status: 'conflict',
+      reason: 'already_exists',
+      current_revision: 1,
+      chunks: 0,
+    });
+    expect(await stateFor('notes/import-create')).toEqual(afterCreate);
+  });
+
+  test('matching CAS snapshots once, updates projections, and increments revision once', async () => {
+    const created = await importFromContent(
+      engine,
+      'notes/import-cas',
+      markdown('Initial', 'initial body', ['old']),
+      { noEmbed: true, writePrecondition: { mode: 'create_only' } },
+    );
+    expect(created.status).toBe('created');
+
+    const updated = await importFromContent(
+      engine,
+      'notes/import-cas',
+      markdown('Updated', 'updated body', ['new']),
+      { noEmbed: true, writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 } },
+    );
+    expect(updated.status).toBe('updated');
+    expect(updated.revision).toBe(2);
+    const state = await stateFor('notes/import-cas');
+    expect(state).toMatchObject({ title: 'Updated', revision: 2, versions: 1, tags: 2 });
+    expect(state!.chunks).toBeGreaterThan(0);
+  });
+
+  test('stale CAS leaves page, versions, tags, and chunks unchanged', async () => {
+    await importFromContent(engine, 'notes/import-stale', markdown('Initial', 'initial body', ['old']), {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+    const before = await stateFor('notes/import-stale');
+
+    const stale = await importFromContent(engine, 'notes/import-stale', markdown('Stale', 'stale body', ['new']), {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 0 },
+    });
+    expect(stale).toMatchObject({
+      status: 'conflict',
+      reason: 'revision_mismatch',
+      expected_revision: 0,
+      current_revision: 1,
+      chunks: 0,
+    });
+    expect(await stateFor('notes/import-stale')).toEqual(before);
+  });
+
+  test('same-content matching CAS returns unchanged without version or projection writes', async () => {
+    const content = markdown('Same', 'same body', ['same']);
+    await importFromContent(engine, 'notes/import-same', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+    const before = await stateFor('notes/import-same');
+
+    const unchanged = await importFromContent(engine, 'notes/import-same', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 },
+    });
+    expect(unchanged).toMatchObject({ status: 'unchanged', revision: 1, chunks: 0 });
+    expect(await stateFor('notes/import-same')).toEqual(before);
+  });
+
+  test('missing and tombstoned CAS return distinct conflicts', async () => {
+    const missing = await importFromContent(engine, 'notes/import-missing', markdown('Missing', 'body'), {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 },
+    });
+    expect(missing).toMatchObject({
+      status: 'conflict',
+      reason: 'not_found',
+      expected_revision: 1,
+    });
+
+    await importFromContent(engine, 'notes/import-tombstone', markdown('Old', 'old body'), {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+    await engine.softDeletePage('notes/import-tombstone', { sourceId: 'default' });
+    const tombstone = await engine.getPage('notes/import-tombstone', { sourceId: 'default', includeDeleted: true });
+    const deleted = await importFromContent(engine, 'notes/import-tombstone', markdown('New', 'new body'), {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 },
+    });
+    expect(deleted).toMatchObject({
+      status: 'conflict',
+      reason: 'soft_deleted',
+      expected_revision: 1,
+      current_revision: tombstone!.revision,
+    });
+  });
+
+  test('projection failure after page update rolls back page, revision, version, tags, and chunks', async () => {
+    await importFromContent(engine, 'notes/import-rollback', markdown('Initial', 'initial body', ['old']), {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+    const before = await stateFor('notes/import-rollback');
+    const originalAddTag = engine.addTag.bind(engine);
+    engine.addTag = async (...args: Parameters<typeof engine.addTag>) => {
+      if (args[1] === 'explode') throw new Error('injected addTag failure');
+      return originalAddTag(...args);
+    };
+
+    try {
+      await expect(importFromContent(
+        engine,
+        'notes/import-rollback',
+        markdown('Updated', 'updated body', ['explode']),
+        { noEmbed: true, writePrecondition: { mode: 'compare_and_swap', expected_revision: 1 } },
+      )).rejects.toThrow('injected addTag failure');
+    } finally {
+      engine.addTag = originalAddTag;
+    }
+
+    expect(await stateFor('notes/import-rollback')).toEqual(before);
+  });
+
+  test('chunk projection failure after create rolls back the inserted page', async () => {
+    const originalUpsertChunks = engine.upsertChunks.bind(engine);
+    engine.upsertChunks = async () => {
+      throw new Error('injected upsertChunks failure');
+    };
+
+    try {
+      await expect(importFromContent(
+        engine,
+        'notes/import-create-rollback',
+        markdown('Created', 'created body', ['new']),
+        { noEmbed: true, writePrecondition: { mode: 'create_only' } },
+      )).rejects.toThrow('injected upsertChunks failure');
+    } finally {
+      engine.upsertChunks = originalUpsertChunks;
+    }
+
+    expect(await stateFor('notes/import-create-rollback')).toBeNull();
   });
 });

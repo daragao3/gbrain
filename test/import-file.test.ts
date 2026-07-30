@@ -163,7 +163,12 @@ Content.
 `);
     const linkPath = join(TMP, 'symlink-file.md');
     try { rmSync(linkPath); } catch { /* may not exist */ }
-    symlinkSync(realFile, linkPath);
+    try {
+      symlinkSync(realFile, linkPath);
+    } catch (error: any) {
+      if (error?.code === 'EPERM') return;
+      throw error;
+    }
 
     const engine = mockEngine();
     const result = await importFile(engine, linkPath, 'symlink-file.md', { noEmbed: true });
@@ -413,6 +418,102 @@ ${longText}
         expect(chunks[i].chunk_index).toBe(i);
       }
     }
+  });
+});
+
+describe('importFromContent — conditional writes', () => {
+  test('conditional same hash still evaluates CAS and returns unchanged', async () => {
+    const content = `---
+type: note
+title: Same
+---
+
+same body
+`;
+    const { createHash } = await import('crypto');
+    const { parseMarkdown } = await import('../src/core/markdown.ts');
+    const parsed = parseMarkdown(content, 'notes/same.md');
+    const knownHash = createHash('sha256')
+      .update(JSON.stringify({
+        title: parsed.title,
+        type: parsed.type,
+        compiled_truth: parsed.compiled_truth,
+        timeline: parsed.timeline,
+        frontmatter: parsed.frontmatter,
+        tags: parsed.tags.sort(),
+      }))
+      .digest('hex');
+    const existing = {
+      id: 1,
+      source_id: 'default',
+      slug: 'notes/same',
+      type: 'note',
+      title: 'Same',
+      compiled_truth: 'same body',
+      timeline: '',
+      frontmatter: {},
+      content_hash: knownHash,
+      revision: 7,
+      created_at: new Date('2026-01-01T00:00:00Z'),
+      updated_at: new Date('2026-01-01T00:00:00Z'),
+      deleted_at: null,
+    };
+    const engine = mockEngine({
+      getPage: async () => existing,
+      lockPageForConditionalWrite: async () => existing,
+    });
+
+    const result = await importFromContent(engine, 'notes/same', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 7 },
+    });
+
+    expect(result.status).toBe('unchanged');
+    expect(result.revision).toBe(7);
+    expect((engine as any)._calls.some((c: any) => c.method === 'putPage')).toBe(false);
+    expect((engine as any)._calls.some((c: any) => c.method === 'upsertChunks')).toBe(false);
+  });
+
+  test('conditional external-id duplicate does not redirect away from exact slug', async () => {
+    const content = `---
+type: note
+title: Exact
+id: same-id
+---
+
+exact body
+`;
+    const otherPage = {
+      id: 1,
+      source_id: 'default',
+      slug: 'notes/other',
+      type: 'note',
+      title: 'Other',
+      compiled_truth: 'other body',
+      timeline: '',
+      frontmatter: { id: 'same-id' },
+      content_hash: 'other-hash',
+      revision: 3,
+      created_at: new Date('2026-01-01T00:00:00Z'),
+      updated_at: new Date('2026-01-01T00:00:00Z'),
+      deleted_at: null,
+    };
+    const engine = mockEngine({
+      findDuplicatePage: async () => ({ slug: 'notes/other', id: 1 }),
+      getPage: async (candidateSlug: string) => candidateSlug === 'notes/other' ? otherPage : null,
+      createPageOnly: async (createdSlug: string) => ({
+        status: 'created',
+        page: { ...otherPage, id: 2, slug: createdSlug, title: 'Exact', revision: 1 },
+      }),
+    });
+
+    const result = await importFromContent(engine, 'notes/exact', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+
+    expect(result.slug).toBe('notes/exact');
+    expect(result.status).toBe('created');
   });
 });
 
