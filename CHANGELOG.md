@@ -2,6 +2,75 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.78.0] - 2026-07-30
+
+**Windows contributors can run GBrain's tests without Unix-only launch failures, silent hangs, or cleanup races hiding the real result.**
+
+The unit runner now breaks Windows work into bounded groups instead of putting the whole suite behind one long-lived Bun process. If a group stalls or crashes before it prints totals, the runner records that outcome and fails closed. Tests that launch shells, workers, temporary repositories, or local IPC now use native Windows contracts while preserving the same behavior on Mac and Linux.
+
+This release also makes shutdown deterministic. GBrain stops only the process trees it started, waits for owned resources to settle, and still escalates when a descendant ignores the first stop request. Resolve IPC uses Windows named pipes when Unix sockets are unavailable, keeps request contents encrypted, and cannot block shutdown forever on an unresponsive peer.
+
+### How to use it
+
+Nothing to configure. Run the normal contributor gates:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .
+```
+
+```bash
+bun run test
+```
+
+```bash
+bun run typecheck
+```
+
+The first command rematerializes shell scripts with the repository's LF policy in an existing Windows clone. Fresh checkouts pick up that policy automatically.
+
+### The numbers that matter
+
+| Behavior | Previous Windows outcome | Current outcome |
+|---|---|---|
+| Unit-test process size | One long-lived shard could lose all totals when Bun exited early | Four files per Bun process by default |
+| Stalled unit-test group | Could wait indefinitely or end without a trustworthy verdict | 300-second cap plus a 5-second termination grace |
+| No-log-growth watchdog | No bounded outer diagnosis | 600-second watchdog with fail-closed evidence |
+| Resolve IPC | Unix-socket assumptions blocked Windows | Native named pipe on Windows, Unix socket elsewhere |
+| Symlink tests | Platform privilege differences looked like product failures | Each test gates on the exact filesystem capability it needs |
+
+### Things to watch
+
+A bounded runner reports the evidence it actually observed. A clean focused run is not a claim that every Windows unit test passed, and a missing natural-completion marker is reported as unattested rather than guessed green. Shell-job execution remains behind `GBRAIN_ALLOW_SHELL_JOBS=1`; direct-argument jobs continue to bypass a shell.
+
+## To take advantage of v0.42.78.0
+
+Nothing to migrate or reconfigure. Existing Windows clones created before the LF policy may retain CRLF copies of tracked shell scripts, so rematerialize them once with the command above. Then run `bun run test` and `bun run typecheck` normally.
+
+### Itemized changes
+
+#### Windows test execution
+- **Unit-test failures remain attributable.** `scripts/run-unit-parallel.sh` and `scripts/run-unit-shard.sh` use bounded chunks, natural-completion attestation, no-log-growth diagnosis, and distinct crash, stall, force-kill, wedge, and unattested outcomes.
+- **Shell commands use the host platform explicitly.** `src/core/minions/handlers/shell-platform.ts` selects `cmd.exe /d /s /c` on Windows and `/bin/sh -c` on POSIX while keeping `shell: false`.
+- **Subprocess fixtures run through the current runtime.** Transcript and supervisor tests use portable JavaScript fixtures instead of Unix-only shell files.
+- **Path and frontmatter expectations survive native checkouts.** Test-local parsers accept CRLF fences, and filesystem assertions use native path semantics without changing slash-delimited logical identifiers.
+- **Symlink coverage reflects real capabilities.** Tests distinguish file symlinks, directory symlinks, junctions, and Git symlink checkout support instead of treating them as one platform flag.
+
+#### Process and resource lifecycle
+- **Owned workers shut down as trees.** POSIX workers run in their own process groups, `tini -g` forwards group signals, Windows uses bounded `taskkill /T /F`, and TERM-to-KILL escalation retains the original owned-tree identity.
+- **Cleanup preserves the primary error.** Temporary repositories, environment changes, PGLite handles, listeners, and child pipes settle deterministically, with cleanup failures aggregated rather than replacing the test or operation failure.
+- **Awaited deadlines keep the process alive.** Hard operation boundaries use referenced timers, while observer-only timers remain unreferenced.
+
+#### Resolve IPC
+- **Windows uses a path-redacting named pipe.** POSIX continues to use a mode-0600 Unix socket beneath the data directory.
+- **Requests and responses stay confidential and authenticated.** AES-256-GCM envelopes use request and response domain separation, response binding, strict framing, and bounded replay rejection.
+- **Unresponsive peers cannot pin shutdown.** Clients have an absolute 250-millisecond deadline, accepted sockets are owned by the managed server, and active-handler drain is bounded before engine disconnect.
+
+#### Tests and documentation
+- **Focused regressions pin each portability contract.** New and updated tests cover shell resolution, named-pipe IPC, encrypted framing, replay and tamper rejection, process-tree escalation, spawn settlement, teardown ordering, exact symlink gates, bounded runner verdicts, and native path assertions.
+- **Contributor guidance matches the runner.** `docs/TESTING.md` documents Windows chunk defaults, shell line endings, subprocess floors, and the difference between focused evidence and a complete-suite result.
+- **Architecture guidance records the lifecycle boundary.** `docs/architecture/KEY_FILES.md` describes portable encrypted resolve IPC and bounded shutdown ordering.
+- **GitHub Actions remain immutable and current.** The gitleaks action pin now matches the current v2 tag commit.
+
 ## [0.42.77.0] - 2026-07-30
 
 **The security guide now tells operators what is safe today without publishing a playbook for old weaknesses.**
