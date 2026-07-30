@@ -1692,7 +1692,7 @@ gbrain serve --http       # HTTP MCP with OAuth 2.1 + admin dashboard at /admin
                           # (required for Claude Desktop, Cowork, Perplexity, ChatGPT)
 ```
 
-The HTTP server includes DCR-style client registration, scope-gated access (`read` / `write` / `admin`), and rate limiting. Deployment guides (ngrok, Railway, Fly.io) live under [`docs/mcp/`](docs/mcp/).
+The HTTP server supports optional Dynamic Client Registration (disabled by default), scope-gated access (`read` / `write` / `admin`), and rate limiting. Deployment guides (ngrok, Railway, Fly.io) live under [`docs/mcp/`](docs/mcp/).
 
 ## Two ways to query your brain
 
@@ -3699,9 +3699,8 @@ Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/DEPLOY
 > dashboard at `/admin`, scoped operations, and a live SSE activity feed.
 > Pre-v0.26 legacy bearer tokens still work — `verifyAccessToken` falls back
 > to the `access_tokens` table and grandfathers tokens to `read+write+admin`.
-> Postgres-only for the legacy fallback (the `access_tokens` table is Postgres-only);
-> OAuth tables work on both PGLite and Postgres. See [SECURITY.md](../../SECURITY.md)
-> for env vars and tunable defaults.
+> OAuth and operator-created bearer tokens work on both PGLite and Postgres.
+> See [SECURITY.md](../../SECURITY.md) for env vars and tunable defaults.
 
 Access your brain from any device, any AI client. GBrain ships two transports:
 `gbrain serve` (stdio) for local agents, and `gbrain serve --http` (v0.26.0+)
@@ -3741,7 +3740,7 @@ Supported clients:
 
 See the [OAuth 2.1 setup](#oauth-21-setup-v100) section below.
 
-### Remote with legacy bearer tokens (pre-v0.26 deployments) — Postgres only
+### Remote with legacy bearer tokens (pre-v0.26 deployments)
 
 ```
 Your AI client (Claude Desktop, Perplexity, etc.)
@@ -3751,8 +3750,7 @@ Your AI client (Claude Desktop, Perplexity, etc.)
 ```
 
 This requires:
-1. A Postgres-backed brain (the `access_tokens` table only exists on Postgres;
-   running `gbrain serve --http` against a PGLite install fails fast at startup)
+1. A PGLite- or Postgres-backed brain
 2. A machine running `gbrain serve --http`
 3. A public tunnel (ngrok, Tailscale, or cloud host)
 4. A bearer token created via `gbrain auth create <name>`

@@ -25,8 +25,9 @@ machine-to-machine clients without browser approval.
 
 ### Recommended: `gbrain serve --http`
 
-As of v0.22.7, GBrain ships a built-in HTTP transport that uses the
-existing `access_tokens` table for authentication:
+GBrain's built-in HTTP transport supports OAuth 2.1 and operator-created
+legacy bearer tokens. Dynamic Client Registration remains off unless the
+operator explicitly enables it:
 
 ```bash
 # Create a token
@@ -39,9 +40,10 @@ gbrain serve --http --port 8787
 ngrok http 8787 --url your-brain.ngrok.app
 ```
 
-This is the recommended way to expose GBrain remotely. No OAuth, no
-registration endpoint, no self-service tokens. Tokens are managed
-exclusively via `gbrain auth create/list/revoke`.
+For a simple operator-managed connection, create, list, and revoke legacy
+bearer tokens with `gbrain auth create/list/revoke`. Browser clients can use
+the built-in OAuth flow instead; pre-register them while DCR remains disabled
+unless the deployment intentionally permits self-service registration.
 
 ### If you must use a custom HTTP wrapper
 
@@ -128,13 +130,13 @@ fires when `--public-url` is set without `--bind` so the operator sees
 the binding before the first request — common cause of "ngrok forwards
 to me but the agent can't reach the upstream" misconfigurations.
 
-### Postgres-only
+### Engine support
 
-`gbrain serve --http` requires a Postgres engine. PGLite is local-only by
-design and the `access_tokens` / `mcp_request_log` tables don't exist in
-the PGLite schema. Local agents continue to use stdio (`gbrain serve`).
-Running `--http` against a PGLite-backed install fails fast with a clear
-error message at startup.
+`gbrain serve --http` works with both Postgres and PGLite. The OAuth,
+operator-created bearer-token, and request-audit tables are present on both
+engines. PGLite remains an embedded single-process engine, so use Postgres
+when the deployment also needs multi-process workers or other Postgres-only
+operational features.
 
 ### CORS
 
