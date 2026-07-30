@@ -22,7 +22,7 @@ export interface FsCapabilities {
   gitSymlinkCheckout: boolean;
 }
 
-const UNAVAILABLE_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'UNKNOWN']);
+const UNAVAILABLE_CODES = new Set(['ENOENT', 'EPERM', 'EACCES', 'ENOTSUP', 'UNKNOWN']);
 const cache = new Map<string, FsCapabilities>();
 const DEFAULT_CACHE_KEY = '<default-temp-filesystem>';
 

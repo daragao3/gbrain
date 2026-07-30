@@ -17,6 +17,7 @@ import {
 } from 'fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'path';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'os';
 import {
   isTrustedDotfile, isPathContained, realpathOrResolve, isWriteTargetContained,
@@ -72,6 +73,37 @@ function stubEngine(ids: string[]): BrainEngine {
 }
 
 describe('getFsCapabilities', () => {
+  test('treats a missing git executable as an unavailable checkout capability', () => {
+    const helperUrl = pathToFileURL(join(import.meta.dir, 'helpers', 'fs-capabilities.ts')).href;
+    const script = `
+      const { mkdtempSync, readdirSync, rmSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { getFsCapabilities } = await import(${JSON.stringify(helperUrl)});
+      const root = mkdtempSync(join(tmpdir(), 'gbrain-missing-git-capability-'));
+      try {
+        const capabilities = getFsCapabilities(root);
+        process.stdout.write(JSON.stringify({
+          gitSymlinkCheckout: capabilities.gitSymlinkCheckout,
+          leftovers: readdirSync(root),
+        }));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    `;
+    const result = Bun.spawnSync([process.execPath, '--eval', script], {
+      env: { PATH: '' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toEqual({
+      gitSymlinkCheckout: false,
+      leftovers: [],
+    });
+  });
+
   test('returns verified booleans, caches by canonical root, and cleans probe files', () => {
     const root = scratch('fs-capabilities-');
     const first = getFsCapabilities(root);

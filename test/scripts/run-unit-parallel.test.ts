@@ -20,7 +20,7 @@
  * smoke tests captured in CHANGELOG measurements.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync, chmodSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
@@ -33,20 +33,29 @@ const SERIAL_SH_SRC = resolve(REPO_ROOT, 'scripts/run-serial-tests.sh');
 
 let TMPROOT: string;
 
-beforeAll(() => {
+function createFixtureRoot(): string {
+  // Give every test its own repo-shaped tempdir. A test timeout stops Bun from
+  // awaiting the test body; it does not guarantee spawned descendants exited,
+  // so sharing this tree lets one timed-out case mutate the next case's files.
+  const root = mkdtempSync(join(tmpdir(), 'gbrain-parallel-test-'));
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  mkdirSync(join(root, 'test'), { recursive: true });
+
+  copyFileSync(PARALLEL_SH_SRC, join(root, 'scripts', 'run-unit-parallel.sh'));
+  copyFileSync(SHARD_SH_SRC, join(root, 'scripts', 'run-unit-shard.sh'));
+  copyFileSync(SERIAL_SH_SRC, join(root, 'scripts', 'run-serial-tests.sh'));
+  chmodSync(join(root, 'scripts', 'run-unit-parallel.sh'), 0o755);
+  chmodSync(join(root, 'scripts', 'run-unit-shard.sh'), 0o755);
+  chmodSync(join(root, 'scripts', 'run-serial-tests.sh'), 0o755);
+
+  return root;
+}
+
+beforeEach(() => {
   // Build a tiny repo-shaped tempdir with the wrapper scripts copied in
   // and 4 fixture test files (3 pass, 1 fail). The wrapper's `find test`
   // expression will pick them up via cwd.
-  TMPROOT = mkdtempSync(join(tmpdir(), 'gbrain-parallel-test-'));
-  mkdirSync(join(TMPROOT, 'scripts'), { recursive: true });
-  mkdirSync(join(TMPROOT, 'test'), { recursive: true });
-
-  copyFileSync(PARALLEL_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-parallel.sh'));
-  copyFileSync(SHARD_SH_SRC, join(TMPROOT, 'scripts', 'run-unit-shard.sh'));
-  copyFileSync(SERIAL_SH_SRC, join(TMPROOT, 'scripts', 'run-serial-tests.sh'));
-  chmodSync(join(TMPROOT, 'scripts', 'run-unit-parallel.sh'), 0o755);
-  chmodSync(join(TMPROOT, 'scripts', 'run-unit-shard.sh'), 0o755);
-  chmodSync(join(TMPROOT, 'scripts', 'run-serial-tests.sh'), 0o755);
+  TMPROOT = createFixtureRoot();
 
   // 3 passing + 1 failing test file. Round-robin sharding will land
   // them across 2 shards so we exercise the multi-shard merge path.
@@ -65,9 +74,25 @@ describe('failing-on-purpose', () => {
   writeFileSync(join(TMPROOT, 'test', 'd-fail.test.ts'), failing);
 });
 
-afterAll(() => {
+afterEach(() => {
   if (TMPROOT) rmSync(TMPROOT, { recursive: true, force: true });
 });
+
+function isRunningNonZombie(pid: string | number): boolean {
+  if (process.platform === 'win32') {
+    const probe = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`,
+    ]);
+    return probe.status === 0;
+  }
+
+  // `kill -0` reports zombies as live. Docker test containers have no init to
+  // reap orphaned descendants, so assert that owned PIDs are absent OR zombies.
+  const probe = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf-8' });
+  return probe.status === 0 && !probe.stdout.trim().startsWith('Z');
+}
 
 function runWrapper(
   extraArgs: string[] = [],
@@ -238,7 +263,7 @@ wait
       expect(result.code).not.toBe(0);
       expect(result.stderr).toContain('STALLED');
       const pid = Number(readFileSync(childPid, 'utf-8').trim());
-      expect(() => process.kill(pid, 0)).toThrow();
+      expect(isRunningNonZombie(pid)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -439,10 +464,7 @@ exec /usr/bin/sleep "$@"
       expect(result.code).toBe(0);
       expect(existsSync(childPidFile)).toBe(true);
       const childPid = readFileSync(childPidFile, 'utf-8').trim();
-      const liveness = spawnSync('bash', ['-lc', `kill -0 ${childPid}`], {
-        encoding: 'utf-8',
-      });
-      expect(liveness.status).not.toBe(0);
+      expect(isRunningNonZombie(childPid)).toBe(false);
     } finally {
       writeFileSync(join(TMPROOT, 'test', 'd-fail.test.ts'), `import { it, expect } from 'bun:test';\nit('fails', () => expect(1).toBe(2));\n`);
       rmSync(dir, { recursive: true, force: true });
@@ -525,10 +547,7 @@ exec /usr/bin/sleep "$@"
       expect(result.code, result.stderr).toBe(0);
 
       for (const pid of heartbeatPids) {
-        const liveness = process.platform === 'win32'
-          ? spawnSync('powershell.exe', ['-NoProfile', '-Command', `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`], { encoding: 'utf-8' })
-          : spawnSync('bash', ['-lc', `kill -0 ${pid}`], { encoding: 'utf-8' });
-        expect(liveness.status).not.toBe(0);
+        expect(isRunningNonZombie(pid)).toBe(false);
       }
     } finally {
       if (child?.exitCode === null) child.kill('SIGKILL');
