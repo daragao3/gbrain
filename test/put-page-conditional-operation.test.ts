@@ -114,6 +114,24 @@ describe('put_page_conditional operation', () => {
     }
   });
 
+  test('oversized skipped write has no success-hook fields', async () => {
+    const slug = 'notes/oversized-skipped';
+    const result = await conditionalOp.handler(makeCtx(), {
+      slug,
+      content: 'x'.repeat(5_000_001),
+      mode: 'create_only',
+    });
+
+    expect(result).toMatchObject({ status: 'skipped', slug, chunks: 0 });
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
+    for (const field of [
+      'write_through', 'facts_backstop', 'chronicle_backstop', 'writer_lint',
+      'auto_links', 'auto_timeline',
+    ]) {
+      expect(result).not.toHaveProperty(field);
+    }
+  });
+
   test('malformed frontmatter returns the legacy explicit refusal shape', async () => {
     const result = await conditionalOp.handler(makeCtx(), {
       slug: 'notes/malformed', content: MALFORMED, mode: 'create_only',
@@ -125,6 +143,28 @@ describe('put_page_conditional operation', () => {
       frontmatter: { error: 'unparseable', page_unchanged: true },
     });
     expect(await engine.getPage('notes/malformed', { sourceId: 'default' })).toBeNull();
+  });
+
+  test('post-write lint reads the source updated by the operation', async () => {
+    const slug = 'notes/source-scoped-lint';
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x')");
+    await engine.setConfig('writer.lint_on_put_page', 'true');
+
+    await conditionalOp.handler(makeCtx({ sourceId: 'default' }), {
+      slug,
+      content: '---\ntype: note\ntitle: Default Source\n---\n\nA normal page in the other source.',
+      mode: 'create_only',
+    });
+    const teamResult = await conditionalOp.handler(makeCtx({ sourceId: 'team-x' }), {
+      slug,
+      content: '---\ntype: note\ntitle: Team Source\nvalidate: false\n---\n\nThis source opts out of lint.',
+      mode: 'create_only',
+    });
+
+    expect(teamResult).toMatchObject({
+      status: 'created',
+      writer_lint: { skipped: 'validate_false_frontmatter' },
+    });
   });
 
   test('create conflicts are scoped to the caller source', async () => {

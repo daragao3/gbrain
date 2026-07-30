@@ -38,6 +38,10 @@ export interface PostWriteLintOpts {
   force?: boolean;
   /** Skip file writes; used by tests. */
   noLog?: boolean;
+  /** Source-scoped read context for multi-source page identity. */
+  sourceId?: string;
+  /** Federated source scope; takes precedence over sourceId in callers. */
+  sourceIds?: string[];
 }
 
 export interface PostWriteLintResult {
@@ -80,7 +84,10 @@ export async function runPostWriteLint(
     return { ran: false, slug, findings: [], skippedReason: 'flag_disabled' };
   }
 
-  const page = await engine.getPage(slug);
+  const page = await engine.getPage(slug, {
+    ...(opts.sourceIds ? { sourceIds: opts.sourceIds } : {}),
+    ...(!opts.sourceIds && opts.sourceId ? { sourceId: opts.sourceId } : {}),
+  });
   if (!page) {
     return { ran: false, slug, findings: [], skippedReason: 'page_not_found' };
   }

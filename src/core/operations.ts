@@ -896,6 +896,13 @@ async function executePutPage(
   if (mode.kind === 'conditional' && result.status === 'unchanged') {
     return { status: result.status, slug: result.slug, revision: result.revision };
   }
+  if (mode.kind === 'conditional' && result.status !== 'created' && result.status !== 'updated') {
+    return {
+      slug: result.slug,
+      status: result.status,
+      chunks: result.chunks,
+    };
+  }
 
   const hooks = await runPutPageSuccessHooks(ctx, slug, result, activePack, operationName);
   return {
@@ -920,6 +927,8 @@ async function runPutPageSuccessHooks(
 ): Promise<Record<string, unknown>> {
     const imported = result.status === 'imported' || result.status === 'created' || result.status === 'updated';
     const hookProvenance = ctx.remote === false ? operationName : `mcp:${operationName}`;
+    const factsProvenance: 'mcp:put_page' | 'mcp:put_page_conditional' =
+      operationName === 'put_page' ? 'mcp:put_page' : 'mcp:put_page_conditional';
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
     // Contract (codex finding #8 honored — 7 cases covered):
@@ -935,7 +944,7 @@ async function runPutPageSuccessHooks(
     //     since "unknown" has no meaning without a pack reference.
     if (activePack && imported) {
       try {
-        const pageType = (result as { page?: { type?: string } }).page?.type ?? null;
+        const pageType = result.parsedPage?.type ?? null;
         const knownTypes = new Set(activePack.page_types.map((t) => t.name));
         if (pageType && !knownTypes.has(pageType)) {
           const { logSchemaEvent } = await import('./schema-events.ts');
@@ -1081,7 +1090,7 @@ async function runPutPageSuccessHooks(
           engine: ctx.engine,
           sourceId: ctx.sourceId ?? 'default',
           sessionId: (ctx as { source_session?: string }).source_session ?? null,
-          source: 'mcp:put_page',
+          source: factsProvenance,
           mode: 'queue',
         },
       );
@@ -1137,7 +1146,7 @@ async function runPutPageSuccessHooks(
     let writerLint: { error_count: number; warning_count: number } | { skipped: string } | undefined;
     try {
       const { runPostWriteLint } = await import('./output/post-write.ts');
-      const lint = await runPostWriteLint(ctx.engine, result.slug);
+      const lint = await runPostWriteLint(ctx.engine, result.slug, sourceScopeOpts(ctx));
       if (lint.ran) {
         writerLint = {
           error_count: lint.findings.filter(f => f.severity === 'error').length,
