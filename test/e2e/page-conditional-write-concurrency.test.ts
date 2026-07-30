@@ -3,7 +3,7 @@ import postgres from 'postgres';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { importFromContent, type ImportResult } from '../../src/core/import-file.ts';
-import { LATEST_VERSION } from '../../src/core/migrate.ts';
+import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../../src/core/migrate.ts';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -32,6 +32,22 @@ describe('conditional-write PostgreSQL database identity guard', () => {
     ]) {
       expect(() => assertDisposableDatabaseName(name)).toThrow(/refusing to run/);
     }
+  });
+});
+
+describe('conditional-write PostgreSQL writer setup', () => {
+  test('disconnects engines connected before a later writer rejects', async () => {
+    const disconnected: number[] = [];
+    const failure = new Error('injected writer connection failure');
+    const connect = async (engine: PostgresEngine, index: number) => {
+      if (index === 2) throw failure;
+      engine.disconnect = async () => {
+        disconnected.push(index);
+      };
+    };
+
+    await expect(connectWriters(connect)).rejects.toBe(failure);
+    expect(disconnected.sort()).toEqual([0, 1]);
   });
 });
 
@@ -170,13 +186,24 @@ async function assertDisposableDatabaseSelected(): Promise<void> {
   }
 }
 
-async function connectWriters(): Promise<PostgresEngine[]> {
-  if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
-  return Promise.all(Array.from({ length: WRITER_COUNT }, async () => {
-    const engine = new PostgresEngine();
+async function connectWriters(
+  connect: (engine: PostgresEngine, index: number) => Promise<void> = async engine => {
+    if (!DATABASE_URL) throw new Error('DATABASE_URL is required');
     await engine.connect({ database_url: DATABASE_URL, poolSize: 1 });
-    return engine;
-  }));
+  },
+): Promise<PostgresEngine[]> {
+  const connected: PostgresEngine[] = [];
+  try {
+    for (let index = 0; index < WRITER_COUNT; index++) {
+      const engine = new PostgresEngine();
+      await connect(engine, index);
+      connected.push(engine);
+    }
+    return connected;
+  } catch (error) {
+    await Promise.all(connected.map(engine => engine.disconnect()));
+    throw error;
+  }
 }
 
 async function truncateData(engine: PostgresEngine) {
@@ -368,9 +395,25 @@ describeE2E('conditional page writes on real PostgreSQL', () => {
     await observer.executeRaw('ALTER TABLE pages DROP COLUMN IF EXISTS revision');
     await observer.setConfig('version', '125');
 
-    await observer.initSchema();
+    const migration = MIGRATIONS.find(candidate => candidate.version === 126);
+    const appliedIdentities: Array<{ version: number; name: string }> = [];
+    const transaction = observer.transaction.bind(observer);
+    observer.transaction = async <T>(fn: (tx: BrainEngine) => Promise<T>) => transaction(async tx => {
+      const runMigration = tx.runMigration.bind(tx);
+      tx.runMigration = async (version: number, sql: string) => {
+        if (version === migration?.version && sql === migration.sql) {
+          appliedIdentities.push({ version, name: migration.name });
+        }
+        await runMigration(version, sql);
+      };
+      return fn(tx);
+    });
+
+    const result = await runMigrations(observer);
 
     expect(LATEST_VERSION).toBe(126);
+    expect(result).toEqual({ applied: 1, current: 126 });
+    expect(appliedIdentities).toEqual([{ version: 126, name: 'page_revision_cas' }]);
     expect(await observer.getConfig('version')).toBe('126');
     const columns = await observer.executeRaw<{
       data_type: string;
