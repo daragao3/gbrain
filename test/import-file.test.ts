@@ -1,7 +1,13 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { writeFileSync, mkdirSync, rmSync, symlinkSync, readdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { importFile, importFromContent } from '../src/core/import-file.ts';
+import {
+  importCodeFile,
+  importFile,
+  importFromContent,
+  importFromFile,
+} from '../src/core/import-file.ts';
+import type { ImportFileResult, ImportResult } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
 
@@ -36,6 +42,39 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
+
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends
+  (<T>() => T extends B ? 1 : 2)
+    ? true
+    : false;
+type Expect<T extends true> = T;
+type StatusOfPromise<T extends (...args: any[]) => Promise<unknown>> =
+  Awaited<ReturnType<T>> extends { status: infer Status } ? Status : never;
+
+type LegacyStatus = 'imported' | 'skipped' | 'error';
+type ConditionalStatus = LegacyStatus | 'created' | 'updated' | 'unchanged' | 'conflict';
+
+type _ImportFileResultIsLegacy = Expect<Equal<ImportFileResult['status'], LegacyStatus>>;
+type _ImportFromFileIsLegacy = Expect<Equal<StatusOfPromise<typeof importFromFile>, LegacyStatus>>;
+type _ImportCodeFileIsLegacy = Expect<Equal<StatusOfPromise<typeof importCodeFile>, LegacyStatus>>;
+type _ConditionalImportResultIsExpanded = Expect<Equal<ImportResult['status'], ConditionalStatus>>;
+
+function assertImportFromContentOverloads(): void {
+  const legacyContentImport = importFromContent({} as BrainEngine, 'notes/type-check', 'body');
+  type _LegacyContentImportIsNarrow = Expect<
+    Equal<Awaited<typeof legacyContentImport>['status'], LegacyStatus>
+  >;
+  const conditionalContentImport = importFromContent({} as BrainEngine, 'notes/type-check', 'body', {
+    writePrecondition: { mode: 'create_only' },
+  });
+  type _ConditionalContentImportIsExpanded = Expect<
+    Equal<Awaited<typeof conditionalContentImport>['status'], ConditionalStatus>
+  >;
+  void legacyContentImport;
+  void conditionalContentImport;
+}
+void assertImportFromContentOverloads;
 
 describe('importFile', () => {
   test('imports a valid markdown file', async () => {

@@ -219,10 +219,9 @@ export interface ImportResult {
   current_revision?: number;
   error?: string;
   /**
-   * Parsed page content. Present for status='imported' AND status='skipped'
-   * (skip happens when content is identical to existing page; auto-link still
-   * needs to run for reconciliation in case links table drifted from page text).
-   * Absent only on status='error' (early payload-size rejection).
+   * Parsed page content. Present after successful markdown parsing for legacy
+   * and conditional outcomes (auto-link reuses it even when no write occurs).
+   * Absent only when the import exits before parsing succeeds.
    */
   parsedPage?: ParsedPage;
   /** Content-quality gate (issue #1699): true when the page landed with a
@@ -251,7 +250,10 @@ type ImportFromContentOptions = {
   writePrecondition?: ConditionalWritePrecondition;
 };
 
-type LegacyImportResult = ImportResult & {
+export type LegacyImportResult = Omit<
+  ImportResult,
+  'status' | 'revision' | 'reason' | 'expected_revision' | 'current_revision'
+> & {
   status: 'imported' | 'skipped' | 'error';
 };
 
@@ -971,7 +973,7 @@ export async function importFromFile(
      */
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
   } = {},
-): Promise<ImportResult> {
+): Promise<LegacyImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
@@ -1099,7 +1101,7 @@ export async function importCodeFile(
   relativePath: string,
   content: string,
   opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
-): Promise<ImportResult> {
+): Promise<LegacyImportResult> {
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
   const title = `${relativePath} (${lang})`;
@@ -1321,7 +1323,7 @@ export async function importCodeFile(
 
 // Backward compat
 export const importFile = importFromFile;
-export type ImportFileResult = ImportResult;
+export type ImportFileResult = LegacyImportResult;
 
 // ============================================================
 // v0.27.1 multimodal: image-file ingestion (Phase 8 / Sec5 / F2 / Eng-1C)
