@@ -207,13 +207,14 @@ describe('getPage / listPages includeDeleted contract (Q3 IRON RULE)', () => {
   test('Q3 round-trip: delete → get returns null → get(include_deleted) returns row → restore → get returns row again', async () => {
     await seedPage(engine, 'people/judy');
 
-    // Step 1: page is visible by default.
+    // Step 1: page is visible by default at its initial revision.
     const before = await engine.getPage('people/judy');
     expect(before).not.toBeNull();
     expect(before!.deleted_at).toBeFalsy();
+    expect(before!.revision).toBe(1);
 
     // Step 2: soft-delete, default getPage returns null.
-    await engine.softDeletePage('people/judy');
+    expect(await engine.softDeletePage('people/judy')).toEqual({ slug: 'people/judy' });
     const afterDelete = await engine.getPage('people/judy');
     expect(afterDelete).toBeNull();
 
@@ -221,12 +222,24 @@ describe('getPage / listPages includeDeleted contract (Q3 IRON RULE)', () => {
     const surfaced = await engine.getPage('people/judy', { includeDeleted: true });
     expect(surfaced).not.toBeNull();
     expect(surfaced!.deleted_at).toBeInstanceOf(Date);
+    expect(surfaced!.revision).toBe(2);
+
+    // Repeating delete is idempotent-as-null and cannot advance revision because no row changed.
+    expect(await engine.softDeletePage('people/judy')).toBeNull();
+    const afterNoOpDelete = await engine.getPage('people/judy', { includeDeleted: true });
+    expect(afterNoOpDelete!.revision).toBe(2);
 
     // Step 4: restore → default getPage returns the row again.
     expect(await engine.restorePage('people/judy')).toBe(true);
     const restored = await engine.getPage('people/judy');
     expect(restored).not.toBeNull();
     expect(restored!.deleted_at).toBeFalsy();
+    expect(restored!.revision).toBe(3);
+
+    // Repeating restore is idempotent-as-false and likewise leaves revision unchanged.
+    expect(await engine.restorePage('people/judy')).toBe(false);
+    const afterNoOpRestore = await engine.getPage('people/judy');
+    expect(afterNoOpRestore!.revision).toBe(3);
   });
 
   test('listPages excludes soft-deleted by default', async () => {
