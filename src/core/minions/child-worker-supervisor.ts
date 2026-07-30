@@ -41,6 +41,7 @@ import { buildSpawnInvocation, detectTini } from './spawn-helpers.ts';
 import { classifyWorkerExit } from './exit-classification.ts';
 import { calculateBackoffMs } from './supervisor.ts';
 import { WORKER_EXIT_RSS_WATCHDOG } from './worker-exit-codes.ts';
+import { terminateOwnedProcessTree } from './handlers/shell-platform.ts';
 
 export type ChildSupervisorEvent =
   | { kind: 'worker_spawned'; pid: number; tini: boolean }
@@ -175,6 +176,7 @@ export class ChildWorkerSupervisor {
    *  from crashCount so the >5-min stable-run reset can't defeat the breaker. */
   private _watchdogExitTimestamps: number[] = [];
   private _child: ChildProcess | null = null;
+  private readonly _closePromises = new WeakMap<ChildProcess, Promise<void>>();
   private _inBackoff = false;
   private _lastStartTime = 0;
   /** issue #1801: set by restartCurrentChild() before a deliberate wedge
@@ -209,21 +211,25 @@ export class ChildWorkerSupervisor {
    * shutdown paths. Idempotent — `kill('SIGTERM')` on a dead child is a no-op.
    */
   killChild(signal: NodeJS.Signals): void {
-    // Gate on LIVENESS, not `.killed`. Node's `child.killed` flips true the
-    // moment a signal has been *sent*, not when the process exits — so a guard
-    // of `!this._child.killed` makes a follow-up SIGKILL (after an ignored
-    // SIGTERM) a silent no-op. That bug bit both the wedge escalation AND the
-    // existing shutdown() drain (issue #1801, Codex #1). Checking exitCode /
-    // signalCode === null means "still running," so SIGKILL actually lands on a
-    // process that ignored SIGTERM.
     const child = this._child;
-    if (child && child.exitCode === null && child.signalCode === null) {
-      try {
-        child.kill(signal);
-      } catch {
-        /* already dead */
-      }
-    }
+    if (!child) return;
+    // The spawned POSIX child is a process-group leader. Signal the owned group
+    // so a worker cannot leave shell/native descendants behind; Windows uses
+    // taskkill /T through the same helper. Fire-and-forget preserves this
+    // compatibility surface; shutdown paths await settleChild() below.
+    void terminateOwnedProcessTree(child, process.platform, signal);
+  }
+
+  /**
+   * Gracefully stop the CURRENT owned tree, then force-kill that same captured
+   * tree if it remains. A POSIX group leader's `close` is not whole-tree proof:
+   * descendants can survive with inherited stdio, so group liveness is checked
+   * independently before either phase is considered settled.
+   */
+  async shutdownChild(graceMs: number, killTimeoutMs: number): Promise<boolean> {
+    const child = this._child;
+    if (!child) return true;
+    return this._shutdownCapturedChild(child, graceMs, killTimeoutMs);
   }
 
   /**
@@ -250,27 +256,91 @@ export class ChildWorkerSupervisor {
    * `this._child`-based wait/kill would hit the replacement (Codex #2).
    */
   private _awaitExit(child: ChildProcess, timeoutMs: number): Promise<void> {
-    // Already exited? `exitCode` becomes non-null once Node has seen the
-    // child terminate. `signalCode` is the symmetric flag for kill-signal
-    // termination — checked too so a SIGKILLed child also short-circuits.
     if (child.exitCode !== null || child.signalCode !== null) {
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => {
       let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
       const onExit = () => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         resolve();
       };
       child.once('exit', onExit);
-      setTimeout(() => {
+      timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         child.removeListener('exit', onExit);
         resolve();
       }, timeoutMs);
     });
+  }
+
+  private _awaitClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    const closePromise = this._closePromises.get(child);
+    if (!closePromise) {
+      return Promise.resolve(child.exitCode !== null || child.signalCode !== null);
+    }
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (closed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(closed);
+      };
+      void closePromise.then(() => finish(true));
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
+  private _ownedTreeAlive(child: ChildProcess): boolean {
+    const pid = child.pid;
+    if (!Number.isInteger(pid) || (pid ?? 0) <= 0) return false;
+    if (process.platform === 'win32') {
+      return child.exitCode === null && child.signalCode === null;
+    }
+    try {
+      process.kill(-(pid as number), 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  }
+
+  private async _waitForOwnedTreeExit(
+    child: ChildProcess,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (this._ownedTreeAlive(child)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return false;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(25, remaining));
+      });
+    }
+    return true;
+  }
+
+  private async _shutdownCapturedChild(
+    child: ChildProcess,
+    graceMs: number,
+    killTimeoutMs: number,
+  ): Promise<boolean> {
+    await terminateOwnedProcessTree(child, process.platform, 'SIGTERM');
+    if (await this._waitForOwnedTreeExit(child, graceMs)) {
+      return this._awaitClose(child, killTimeoutMs);
+    }
+
+    // Keep the original child reference/group ID even when its exit handler has
+    // already cleared this._child or a replacement worker has spawned.
+    await terminateOwnedProcessTree(child, process.platform, 'SIGKILL');
+    const treeExited = await this._waitForOwnedTreeExit(child, killTimeoutMs);
+    const closed = await this._awaitClose(child, killTimeoutMs);
+    return treeExited && closed;
   }
 
   /**
@@ -289,24 +359,7 @@ export class ChildWorkerSupervisor {
     const child = this._child;
     if (!child) return;
     this._intentionalRestart = true;
-    // SIGTERM the captured child (liveness-gated, same fix as killChild).
-    if (child.exitCode === null && child.signalCode === null) {
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        /* already dead */
-      }
-    }
-    await this._awaitExit(child, graceMs);
-    // Escalate to SIGKILL only if the CAPTURED child is still alive — never the
-    // respawned one.
-    if (child.exitCode === null && child.signalCode === null) {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already dead */
-      }
-    }
+    await this._shutdownCapturedChild(child, graceMs, 5_000);
   }
 
   /**
@@ -382,42 +435,95 @@ export class ChildWorkerSupervisor {
         child = spawn(spawnCmd, spawnArgs, {
           stdio: 'inherit',
           env,
+          detached: process.platform !== 'win32',
         });
       } catch (err: unknown) {
-        // Synchronous spawn error (e.g. invalid cliPath shape). Count as a crash.
+        // Synchronous spawn error (e.g. invalid cliPath shape). Count as a crash
+        // and emit the same terminal lifecycle event as an asynchronous failure.
         this.opts.onEvent({
           kind: 'worker_spawn_failed',
           error: err instanceof Error ? err.message : String(err),
           phase: 'sync',
         });
+        const runDuration = this.now() - this._lastStartTime;
         this._crashCount++;
         this._lastExitCode = null;
+        this.opts.onEvent({
+          kind: 'worker_exited',
+          code: null,
+          signal: null,
+          runDurationMs: runDuration,
+          likelyCause: 'spawn_failed',
+          crashCount: this._crashCount,
+        });
         resolve();
         return;
       }
 
       this._child = child;
+      const closePromise = new Promise<void>((resolveClose) => {
+        child.once('close', () => resolveClose());
+      });
+      this._closePromises.set(child, closePromise);
 
-      this.opts.onEvent({
-        kind: 'worker_spawned',
-        pid: child.pid ?? -1,
-        tini: this.tiniPath !== '',
+      // `spawn()` returning a ChildProcess does not mean the OS created it.
+      // ENOENT/EACCES arrive asynchronously with no `spawn` event, so emit the
+      // success lifecycle event only after Node confirms process creation.
+      child.once('spawn', () => {
+        this.opts.onEvent({
+          kind: 'worker_spawned',
+          pid: child.pid!,
+          tini: this.tiniPath !== '',
+        });
       });
 
-      // Async spawn errors (ENOENT, EACCES). Node fires 'error' first, then
-      // 'exit' with code=null. We log the error; the 'exit' handler increments
-      // crashCount as usual so the restart loop bounds permanent misconfigs
-      // via max_crashes.
+      // Spawn failure can produce error, close, and (runtime-dependently) exit
+      // in overlapping orders. Settle the lifecycle exactly once so an ENOENT
+      // without exit still advances the bounded retry loop, while an error plus
+      // close/exit cannot double-count one failed attempt.
+      let settled = false;
+      let spawnErrored = false;
+      const settleSpawnFailure = () => {
+        if (settled) return;
+        settled = true;
+        this._child = null;
+        this._intentionalRestart = false;
+        if (this.opts.isStopping()) {
+          resolve();
+          return;
+        }
+        const runDuration = this.now() - this._lastStartTime;
+        this._lastExitCode = null;
+        this._crashCount++;
+        this.opts.onEvent({
+          kind: 'worker_exited',
+          code: null,
+          signal: null,
+          runDurationMs: runDuration,
+          likelyCause: 'spawn_failed',
+          crashCount: this._crashCount,
+        });
+        resolve();
+      };
+
       child.on('error', (err) => {
+        spawnErrored = true;
         this.opts.onEvent({
           kind: 'worker_spawn_failed',
           error: err.message,
           phase: 'async',
           errnoCode: (err as NodeJS.ErrnoException).code,
         });
+        if (child.pid === undefined) settleSpawnFailure();
+      });
+
+      child.on('close', () => {
+        if (spawnErrored) settleSpawnFailure();
       });
 
       child.on('exit', (code, signal) => {
+        if (settled) return;
+        settled = true;
         this._child = null;
 
         if (this.opts.isStopping()) {

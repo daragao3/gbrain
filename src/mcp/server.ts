@@ -9,11 +9,20 @@ import { dispatchToolCall, validateParams, buildOperationContext } from './dispa
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import {
-  resolveSocketPath,
+  resolveIpcEndpoint,
   startResolveIpcServer,
-  cleanupStaleSocket,
+  type ResolveIpcServer,
 } from '../core/context/resolve-ipc.ts';
 import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
+
+/** Close resolve IPC before releasing the engine it serves. Best-effort at exit. */
+export async function closeMcpResources(
+  resolveServer: ResolveIpcServer | null,
+  engine: BrainEngine,
+): Promise<void> {
+  try { await resolveServer?.close(); } catch { /* best-effort IPC */ }
+  try { await engine.disconnect?.(); } catch { /* process is shutting down */ }
+}
 
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
@@ -35,6 +44,20 @@ export async function startMcpServer(engine: BrainEngine) {
   // shape and cast through `any` (the SDK accepts it via the ServerResult union).
   server.setRequestHandler(CallToolRequestSchema, async (request: any): Promise<any> => {
     const { name, arguments: params } = request.params;
+    // #3242: when the operator didn't pin a source via GBRAIN_SOURCE, stdio
+    // reads span every `config.federated = true` source (same visibility set
+    // as unqualified local CLI reads). GBRAIN_SOURCE set = explicit scope,
+    // no widening. Best-effort: a resolver failure keeps the scalar scope.
+    // ponytail: one tiny SELECT per tool call; cache it if it ever shows up.
+    let localFederated: string[] | undefined;
+    try {
+      const { localFederatedSourceIds } = await import('../core/source-resolver.ts');
+      localFederated = await localFederatedSourceIds(
+        engine,
+        process.env.GBRAIN_SOURCE || 'default',
+        process.env.GBRAIN_SOURCE ? 'env' : 'seed_default',
+      );
+    } catch { /* scalar scope stands */ }
     // v0.28: stdio MCP has no per-token auth (local pipe). Default the
     // takes-holder allow-list to ['world'] so agent-facing callers don't
     // see private hunches via takes_list / takes_search / query. Operators
@@ -51,6 +74,7 @@ export async function startMcpServer(engine: BrainEngine) {
       // Operators who want a different source on stdio MCP should set
       // GBRAIN_SOURCE in the env or use --source via `gbrain call`.
       sourceId: process.env.GBRAIN_SOURCE || 'default',
+      ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
       // v0.31 (eD3): _meta.brain_hot_memory injection so Claude Desktop /
       // Code see the brain's relevant hot memory automatically alongside
       // every tool-call response. Best-effort; absorbs errors.
@@ -63,17 +87,18 @@ export async function startMcpServer(engine: BrainEngine) {
 
   // Retrieval Reflex (#1981, D9=C): on a PGLite brain, serve owns the single
   // connection, so the context engine resolves salient entities THROUGH us over
-  // a local unix socket rather than opening a second (impossible) connection.
-  // Best-effort; failure to bind never blocks the MCP server.
-  let resolveServer: import('node:net').Server | null = null;
-  let resolveSocket: string | null = null;
+  // local IPC rather than opening a second (impossible) connection. POSIX uses
+  // a mode-0600 Unix socket; Windows uses a per-data-directory-secret-derived
+  // named pipe. Requests and responses are authenticated. Best-effort: failure
+  // to initialize or bind never blocks the MCP server.
+  let resolveServer: ResolveIpcServer | null = null;
   try {
     const cfg = loadConfig();
     if (cfg?.engine === 'pglite' && cfg.database_path) {
-      resolveSocket = resolveSocketPath(cfg.database_path);
+      const endpoint = resolveIpcEndpoint(cfg.database_path);
       const defaultSource = process.env.GBRAIN_SOURCE || 'default';
       resolveServer = await startResolveIpcServer(
-        resolveSocket,
+        endpoint,
         (req) =>
           resolveEntitiesToPointers(
             engine,
@@ -99,16 +124,15 @@ export async function startMcpServer(engine: BrainEngine) {
   // Exit cleanly when MCP client disconnects (stdin EOF) or on signals.
   // Without this, orphaned serve processes accumulate and contend for the
   // PGLite write lock, causing ingest jobs (email-sync) to time out.
-  let shuttingDown = false;
-  const shutdown = (reason: string, code = 0) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string, code = 0): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
     process.stderr.write(`[gbrain-serve] shutdown: ${reason}\n`);
-    try { resolveServer?.close(); } catch { /* noop */ }
-    if (resolveSocket) cleanupStaleSocket(resolveSocket);
-    Promise.resolve(engine.disconnect?.())
-      .catch(() => {})
-      .finally(() => process.exit(code));
+    shutdownPromise = (async () => {
+      await closeMcpResources(resolveServer, engine);
+      process.exit(code);
+    })();
+    return shutdownPromise;
   };
   // v0.34.1 (#870): when MCP_STDIO=1, the wrapping gateway (OpenClaw's
   // bundle-mcp layer, others) often pipes the JSON-RPC handshake then

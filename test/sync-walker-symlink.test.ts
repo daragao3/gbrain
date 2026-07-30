@@ -20,6 +20,9 @@ import { basename, join, sep } from 'path';
 import { tmpdir } from 'os';
 import { collectSyncableFiles } from '../src/commands/import.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 /**
  * PLATFORM NOTE: collectSyncableFiles returns absolute paths built with
@@ -49,11 +52,11 @@ afterEach(() => {
 });
 
 describe('collectSyncableFiles symlink + cycle hardening', () => {
-  test('1. self-referencing symlink does not loop', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('1. self-referencing symlink does not loop', async () => {
     await withEnv({ GBRAIN_EMBEDDING_MULTIMODAL: undefined }, () => {
       writeFileSync(join(tmp, 'notes.md'), '# top\n');
       // Symlink "loop" inside tempdir pointing back to itself.
-      symlinkSync(tmp, join(tmp, 'loop'));
+      symlinkSync(tmp, join(tmp, 'loop'), 'dir');
 
       const t0 = Date.now();
       const files = collectSyncableFiles(tmp, { strategy: 'markdown' });
@@ -65,14 +68,14 @@ describe('collectSyncableFiles symlink + cycle hardening', () => {
     });
   });
 
-  test('2. symlink chain through real dirs does not loop', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('2. symlink chain through real dirs does not loop', async () => {
     await withEnv({ GBRAIN_EMBEDDING_MULTIMODAL: undefined }, () => {
       // a/ contains a real subdir b/, which contains a symlink "back" -> a.
       // The lstat skip catches "back" before recursion. If somehow it
       // missed, the inode-cycle Map catches the second visit to a/.
       mkdirSync(join(tmp, 'a/b'), { recursive: true });
       writeFileSync(join(tmp, 'a/b/leaf.md'), 'leaf\n');
-      symlinkSync(join(tmp, 'a'), join(tmp, 'a/b/back'));
+      symlinkSync(join(tmp, 'a'), join(tmp, 'a/b/back'), 'dir');
 
       const t0 = Date.now();
       const files = collectSyncableFiles(tmp, { strategy: 'markdown' });

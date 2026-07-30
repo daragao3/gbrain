@@ -19,6 +19,26 @@ import {
 } from '../core/pace-mode.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
+import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
+import { titleTierCorpusGeneration } from '../core/contextual-retrieval-service.ts';
+import type { Page } from '../core/types.ts';
+
+/**
+ * #3507 — after a plain re-embed fully re-embedded a `per_chunk_synopsis`
+ * page at the title-only tier (see wrapChunkTextsForStoredMode), restamp the
+ * page's CR state to 'title' so `contextual_retrieval_mode` keeps describing
+ * the vectors actually in the column. The reindex sweep restores the synopsis
+ * tier later. No-op for every other mode.
+ */
+export async function restampIfDemotedToTitleTier(
+  engine: BrainEngine,
+  page: Pick<Page, 'contextual_retrieval_mode'> | null | undefined,
+  slug: string,
+  sourceId: string,
+): Promise<void> {
+  if (page?.contextual_retrieval_mode !== 'per_chunk_synopsis') return;
+  await engine.updatePageContextualRetrievalState(slug, sourceId, 'title', titleTierCorpusGeneration());
+}
 
 export interface EmbedOpts {
   /** Embed ALL pages (every chunk). */
@@ -107,6 +127,24 @@ export interface EmbedOpts {
    * runs lock every source in sorted order. dryRun skips it.
    */
   singleFlight?: boolean;
+  /**
+   * #394: suppress human stdout summaries (the `[dry-run] Would embed ...` /
+   * `Embedded N chunks ...` slog lines). Set by structured-output callers —
+   * the cycle's embed phase (dream --json must keep stdout JSON-clean per
+   * docs/progress-events.md) reports counts via its own PhaseResult instead.
+   * Errors/warnings still go to stderr regardless.
+   */
+  quiet?: boolean;
+  /**
+   * #3391: widen signature-drift invalidation to pages with NO recorded
+   * embedding_signature (pre-v108). By default those are grandfathered
+   * (never invalidated) so a routine upgrade doesn't surprise-re-embed a
+   * whole corpus — but after a provider/model swap the grandfather clause
+   * silently leaves them in the OLD embedding space, mixing two vector
+   * spaces in one index. `gbrain migrate embeddings` and
+   * `gbrain embed --stale --include-null-signature` set this.
+   */
+  includeNullSignature?: boolean;
 }
 
 /**
@@ -253,7 +291,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     for (const s of opts.slugs) {
       if (isAborted(opts.signal)) break; // #1737: stop the per-slug loop on abort
       try {
-        await embedPage(engine, s, !!opts.dryRun, result, opts.sourceId, opts.signal);
+        await embedPage(engine, s, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet);
       } catch (e: unknown) {
         serr(`  Error embedding ${s}: ${e instanceof Error ? e.message : e}`);
       }
@@ -347,6 +385,8 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
         catchUp: opts.catchUp,
         pacer,
         paceMaxConcurrency,
+        quiet: opts.quiet,
+        includeNullSignature: opts.includeNullSignature,
       }, opts.signal);
     } finally {
       // E1: surface pacing telemetry (human + structured) when pacing was on.
@@ -376,7 +416,7 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     return result;
   }
   if (opts.slug) {
-    await embedPage(engine, opts.slug, !!opts.dryRun, result, opts.sourceId, opts.signal);
+    await embedPage(engine, opts.slug, !!opts.dryRun, result, opts.sourceId, opts.signal, opts.quiet);
     return result;
   }
   throw new Error('No embed target specified. Pass { slug }, { slugs }, { all }, or { stale }.');
@@ -460,6 +500,8 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
   const priorityRaw = priorityIdx >= 0 ? args[priorityIdx + 1] : undefined;
   const priority = priorityRaw === 'recent' ? 'recent' as const : undefined;
   const catchUp = args.includes('--catch-up');
+  // #3391: re-embed pages that predate the embedding_signature stamp too.
+  const includeNullSignature = args.includes('--include-null-signature');
   const pace = parsePaceArgs(args);
 
   let opts: EmbedOpts;
@@ -467,11 +509,11 @@ export async function runEmbed(engine: BrainEngine, args: string[]): Promise<Emb
     opts = { slugs: args.slice(slugsIdx + 1).filter(a => !a.startsWith('--')), dryRun, sourceId, batchSize, priority, catchUp };
   } else if (all || stale) {
     // E-2: CLI-only single-flight for stale runs (the minion path locks itself).
-    opts = { all, stale, dryRun, sourceId, batchSize, priority, catchUp, ...(pace && { pace }), ...(stale && { singleFlight: true }) };
+    opts = { all, stale, dryRun, sourceId, batchSize, priority, catchUp, ...(pace && { pace }), ...(stale && { singleFlight: true }), ...(includeNullSignature && { includeNullSignature: true }) };
   } else {
     const slug = args.find(a => !a.startsWith('--'));
     if (!slug) {
-      serr('Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up]');
+      serr('Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature]');
       process.exit(1);
     }
     opts = { slug, dryRun, sourceId, batchSize, priority, catchUp };
@@ -521,6 +563,7 @@ async function embedPage(
   result: EmbedResult,
   sourceId?: string,
   signal?: AbortSignal,
+  quiet?: boolean,
 ) {
   const opts = sourceId ? { sourceId } : undefined;
   const page = await engine.getPage(slug, opts);
@@ -565,7 +608,7 @@ async function embedPage(
   result.skipped += chunks.length - toEmbed.length;
 
   if (toEmbed.length === 0) {
-    slog(`${slug}: all ${chunks.length} chunks already embedded`);
+    if (!quiet) slog(`${slug}: all ${chunks.length} chunks already embedded`);
     result.pages_processed++;
     return;
   }
@@ -576,7 +619,11 @@ async function embedPage(
     return;
   }
 
-  const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), { abortSignal: signal });
+  // #3507: embed with the page's STORED wrapping convention (title-tier
+  // contextual prefix when the page was embedded wrapped), not raw
+  // chunk_text — otherwise a re-embed silently strips the contextual
+  // prefixes the sync path applied. fenced_code chunks stay unwrapped.
+  const embeddings = await embedBatch(wrapChunkTextsForStoredMode(page, toEmbed), { abortSignal: signal });
   const embeddingMap = new Map<number, Float32Array>();
   for (let j = 0; j < toEmbed.length; j++) {
     embeddingMap.set(toEmbed[j].chunk_index, embeddings[j]);
@@ -599,10 +646,13 @@ async function embedPage(
   // such a page and then stamps it.
   if (toEmbed.length === chunks.length) {
     await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
+    // #3507: a fully re-embedded per_chunk_synopsis page landed at the
+    // title tier — keep the stamped mode honest.
+    await restampIfDemotedToTitleTier(engine, page, slug, page.source_id);
   }
   result.embedded += toEmbed.length;
   result.pages_processed++;
-  slog(`${slug}: embedded ${toEmbed.length} chunks`);
+  if (!quiet) slog(`${slug}: embedded ${toEmbed.length} chunks`);
 }
 
 /**
@@ -645,6 +695,10 @@ async function embedAll(
     pacer?: DbPacer;
     /** Resolved concurrency cap (E-1: the worker count, no separate permit). */
     paceMaxConcurrency?: number;
+    /** #394: suppress human stdout summaries (structured-output callers). */
+    quiet?: boolean;
+    /** #3391: lift the NULL-signature grandfather clause (see EmbedOpts). */
+    includeNullSignature?: boolean;
   },
   signal?: AbortSignal,
 ) {
@@ -736,7 +790,8 @@ async function embedAll(
     }
 
     try {
-      const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text));
+      // #3507: reproduce the page's stored wrapping convention (see embedPage).
+      const embeddings = await embedBatch(wrapChunkTextsForStoredMode(page, toEmbed));
       // Build a map of new embeddings by chunk_index
       const embeddingMap = new Map<number, Float32Array>();
       for (let j = 0; j < toEmbed.length; j++) {
@@ -757,6 +812,11 @@ async function embedAll(
       // detectable as stale.
       await observed(pacer, () =>
         engine.setPageEmbeddingSignature(page.slug, { sourceId: pageSourceId, signature }),
+      );
+      // #3507: --all fully re-embeds; a per_chunk_synopsis page landed at
+      // the title tier — keep the stamped mode honest.
+      await observed(pacer, () =>
+        restampIfDemotedToTitleTier(engine, page, page.slug, pageSourceId),
       );
       result.embedded += toEmbed.length;
     } catch (e: unknown) {
@@ -790,10 +850,12 @@ async function embedAll(
   });
 
   // Stdout summary preserved for scripts/tests that grep for counts.
-  if (dryRun) {
-    slog(`[dry-run] Would embed ${result.would_embed} chunks across ${pages.length} pages`);
-  } else {
-    slog(`Embedded ${result.embedded} chunks across ${pages.length} pages`);
+  if (!staleOpts?.quiet) {
+    if (dryRun) {
+      slog(`[dry-run] Would embed ${result.would_embed} chunks across ${pages.length} pages`);
+    } else {
+      slog(`Embedded ${result.embedded} chunks across ${pages.length} pages`);
+    }
   }
 }
 
@@ -829,6 +891,10 @@ async function embedAllStale(
     pacer?: DbPacer;
     /** Resolved concurrency cap (E-1: the worker count, no separate permit). */
     paceMaxConcurrency?: number;
+    /** #394: suppress human stdout summaries (structured-output callers). */
+    quiet?: boolean;
+    /** #3391: lift the NULL-signature grandfather clause (see EmbedOpts). */
+    includeNullSignature?: boolean;
   },
   signature?: string,
   externalSignal?: AbortSignal,
@@ -836,6 +902,7 @@ async function embedAllStale(
   // D7: thread sourceId so source-scoped runs only count + visit
   // that source's NULL embeddings.
   const sourceOpt = sourceId ? { sourceId } : undefined;
+  const includeNullSig = !!staleOpts?.includeNullSignature;
 
   // v0.41.31: re-embed pages whose embedding_signature drifted (model/dims
   // swap). dry-run must NOT mutate, so it counts signature-stale via the
@@ -845,22 +912,54 @@ async function embedAllStale(
     const invalidated = await engine.invalidateStaleSignatureEmbeddings({
       signature,
       ...(sourceId && { sourceId }),
+      ...(includeNullSig && { includeNullSignature: true }),
     });
-    if (invalidated > 0) {
+    if (invalidated > 0 && !staleOpts?.quiet) {
       slog(`[embed] invalidated ${invalidated} chunk(s) embedded under a prior model signature`);
+    }
+    // #3391: the grandfather clause keeps NULL-signature pages on their OLD
+    // vectors — two embedding spaces mixed in one index. Loud stderr warning
+    // with the fix, instead of silent retrieval degradation.
+    //
+    // Deliberately NOT gated on `invalidated > 0`: the original bug report's
+    // shape is a brain where EVERY embedded page predates the signature stamp,
+    // so nothing drifts, nothing is invalidated — and pre-fix that brain got
+    // no warning AND no work, the exact silent case #3391 is about. The probe
+    // below computes the left-behind count directly, which is 0 on a healthy
+    // brain, so an unaffected run stays quiet.
+    if (!includeNullSig) {
+      try {
+        const wide = await engine.countStaleChunks({ ...sourceOpt, signature, includeNullSignature: true });
+        const narrow = await engine.countStaleChunks({ ...sourceOpt, signature });
+        const leftBehind = wide - narrow;
+        if (leftBehind > 0) {
+          serr(
+            `  [embed] WARNING: ${leftBehind} embedded chunk(s) sit on pages with no recorded ` +
+            `embedding signature and were NOT invalidated — they remain in the previous model's ` +
+            `embedding space. Re-run with --include-null-signature (or use ` +
+            `\`gbrain migrate embeddings\`) to re-embed them.`,
+          );
+        }
+      } catch {
+        // The warning probe is best-effort; never break the embed run.
+      }
     }
   }
 
   // Pre-flight: 0 stale chunks → nothing to do, no further DB reads.
   // dry-run includes signature-drift in the count without mutating.
   const staleCount = await engine.countStaleChunks(
-    dryRun && signature ? { ...sourceOpt, signature } : sourceOpt,
+    dryRun && signature
+      ? { ...sourceOpt, signature, ...(includeNullSig && { includeNullSignature: true }) }
+      : sourceOpt,
   );
   if (staleCount === 0) {
-    if (dryRun) {
-      slog('[dry-run] Would embed 0 chunks (0 stale found)');
-    } else {
-      slog('Embedded 0 chunks (0 stale found)');
+    if (!staleOpts?.quiet) {
+      if (dryRun) {
+        slog('[dry-run] Would embed 0 chunks (0 stale found)');
+      } else {
+        slog('Embedded 0 chunks (0 stale found)');
+      }
     }
     return;
   }
@@ -869,7 +968,7 @@ async function embedAllStale(
     result.would_embed += staleCount;
     result.total_chunks += staleCount;
     if (onProgress) onProgress(1, 1, 0);
-    slog(`[dry-run] Would embed ${staleCount} stale chunks`);
+    if (!staleOpts?.quiet) slog(`[dry-run] Would embed ${staleCount} stale chunks`);
     return;
   }
 
@@ -1032,7 +1131,13 @@ async function embedAllStale(
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
         try {
-          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal });
+          // #3507: fetch the page row for its title + stored CR mode so the
+          // re-embed reproduces the page's wrapping convention instead of
+          // silently stripping contextual prefixes — `embed --stale` is the
+          // NORMAL post-model-migration path, so raw-text embedding here
+          // quietly converted whole corpora to the unwrapped convention.
+          const pageRow = await observed(pacer, () => engine.getPage(slug, { sourceId: keySourceId }));
+          const embeddings = await embedBatchWithBackoff(wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: effectiveSignal });
           // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
           const staleIdxToEmbedding = new Map<number, Float32Array>();
@@ -1058,6 +1163,14 @@ async function embedAllStale(
           if (signature && stale.length === existing.length) {
             await observed(pacer, () =>
               engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature }),
+            );
+          }
+          // #3507: a FULLY re-embedded per_chunk_synopsis page landed at the
+          // title tier — keep the stamped mode honest. Partially-stale pages
+          // stay stamped as-is (mixed provenance; reindex sweeps fix them).
+          if (stale.length === existing.length) {
+            await observed(pacer, () =>
+              restampIfDemotedToTitleTier(engine, pageRow, slug, keySourceId),
             );
           }
           result.embedded += stale.length;
@@ -1112,7 +1225,7 @@ async function embedAllStale(
     if (budgetTimer) clearTimeout(budgetTimer);
   }
 
-  slog(`Embedded ${result.embedded} chunks across ${totalProcessedPages} pages`);
+  if (!staleOpts?.quiet) slog(`Embedded ${result.embedded} chunks across ${totalProcessedPages} pages`);
 
   // #1946 (OV2a): a catch-up pass that completed without being aborted but left
   // chunks unembedded means those chunks are stuck (a non-transient embed
@@ -1120,7 +1233,9 @@ async function embedAllStale(
   // as a clean run — re-running won't help until the underlying failure is fixed.
   if (staleOpts?.catchUp && !effectiveSignal.aborted && embedFailures > 0) {
     const remaining = await engine.countStaleChunks(
-      signature ? { signature, ...(sourceId ? { sourceId } : {}) } : (sourceId ? { sourceId } : undefined),
+      signature
+        ? { signature, ...(sourceId ? { sourceId } : {}), ...(includeNullSig && { includeNullSignature: true }) }
+        : (sourceId ? { sourceId } : undefined),
     );
     if (remaining > 0) {
       serr(`\n  [embed] catch-up finished but ${remaining} chunk(s) remain stale after ${embedFailures} embed failure(s). These are not embeddable as-is; re-running won't clear them until the underlying error is resolved.`);

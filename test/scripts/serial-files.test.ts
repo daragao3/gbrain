@@ -61,6 +61,15 @@ describe('run-serial-tests.sh contract', () => {
     expect(src).toMatch(/bun test\s+--max-concurrency=1/);
   });
 
+  it('builds the gitignored snapshot fixture and extends only its timeout', () => {
+    const src = readFileSync(SERIAL_SH, 'utf-8');
+    expect(src).toMatch(/test_timeout=60000/);
+    expect(src).toMatch(
+      /test\/pglite-snapshot-file-seeding\.serial\.test\.ts[\s\S]*test_timeout=900000[\s\S]*bun run build:pglite-snapshot/,
+    );
+    expect(src).toMatch(/--timeout="\$test_timeout"/);
+  });
+
   it('disjoint from run-unit-shard.sh (a file is never in both passes)', () => {
     const serialFiles = new Set(dryRunList(SERIAL_SH));
     const unitFiles = new Set(dryRunList(SHARD_SH));

@@ -13,8 +13,11 @@
 #
 # Env overrides:
 #   SHARDS=N                     same as --shards
-#   GBRAIN_TEST_SHARD_TIMEOUT    per-shard wallclock cap, seconds (default 600)
-#   GBRAIN_TEST_MAX_CONCURRENCY  passed through to bun test (default 4)
+#   GBRAIN_TEST_SHARD_TIMEOUT       per-shard wallclock cap, seconds (default 1500;
+#                                   Windows single-shard default scales by file count)
+#   GBRAIN_TEST_SHARD_STALL_SECONDS kill a shard whose log stops growing (default 600;
+#                                   0 disables)
+#   GBRAIN_TEST_MAX_CONCURRENCY     passed through to bun test (default 4)
 #
 # Output files (workspace-local; falls back to /tmp if .context/ unwritable):
 #   .context/test-failures.log   failure blocks (cleared at start)
@@ -55,6 +58,13 @@ while [ $# -gt 0 ]; do
 done
 
 N="${SHARDS_OVERRIDE:-${SHARDS:-$(detect_cpus)}}"
+BUN_PLATFORM=$(bun -e 'process.stdout.write(process.platform)' 2>/dev/null || true)
+WINDOWS_DEFAULT=0
+if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ]; then
+  case "$BUN_PLATFORM:$(uname -s 2>/dev/null)" in
+    win32:*|*:MINGW*|*:MSYS*|*:CYGWIN*) N=1; WINDOWS_DEFAULT=1 ;;
+  esac
+fi
 if ! printf '%s' "$N" | grep -qE '^[0-9]+$' || [ "$N" -lt 1 ]; then
   echo "ERROR: invalid shard count: $N" >&2; exit 2
 fi
@@ -71,17 +81,39 @@ if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$N" -gt 4 ]; then
 fi
 
 INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
-# v0.40.10 flake-hardening: bump per-shard cap 600 → 1500 (was 900). At
-# 4-shard default each shard runs 159 files / ~2420 tests with internal
-# wallclock 960-1020s. The 900s value (sized for 8-shard's ~80 files /
-# 1100 tests at 620-770s) false-killed shard 1 at 900s even though it
-# had completed in 968s. 1500s cap gives ~55% headroom over observed
-# 4-shard wallclock; real hangs still hit it. Override via
-# GBRAIN_TEST_SHARD_TIMEOUT=N.
-SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-1500}"
+# POSIX keeps the established 1500s cap. The Windows default uses one shard to
+# bound aggregate PGlite/WASM commit charge, so that shard owns the full file
+# set and needs a cap that grows with it. Thirty seconds per file is the vetted
+# Windows budget; the 1500s floor preserves behavior for smaller suites.
+# Explicit shard counts retain the old cap unless GBRAIN_TEST_SHARD_TIMEOUT is
+# set, because their concurrency/wallclock trade-off is user-selected.
+SHARD_TIMEOUT_ORIGIN=""
+if [ -n "${GBRAIN_TEST_SHARD_TIMEOUT:-}" ]; then
+  SHARD_TIMEOUT="$GBRAIN_TEST_SHARD_TIMEOUT"
+elif [ "$WINDOWS_DEFAULT" = "1" ]; then
+  TOTAL_UNIT_FILES=$(SHARD= bash scripts/run-unit-shard.sh --dry-run-list 2>/dev/null | wc -l | tr -d ' ')
+  SHARD_TIMEOUT=$((TOTAL_UNIT_FILES * 30))
+  [ "$SHARD_TIMEOUT" -lt 1500 ] && SHARD_TIMEOUT=1500
+  SHARD_TIMEOUT_ORIGIN=" (${TOTAL_UNIT_FILES} files/shard × 30s)"
+else
+  SHARD_TIMEOUT=1500
+fi
+if ! printf '%s' "$SHARD_TIMEOUT" | grep -qE '^[0-9]{1,9}$' || [ "$SHARD_TIMEOUT" -lt 1 ]; then
+  echo "ERROR: invalid GBRAIN_TEST_SHARD_TIMEOUT: $SHARD_TIMEOUT" >&2; exit 2
+fi
+STALL_SECONDS="${GBRAIN_TEST_SHARD_STALL_SECONDS:-600}"
+STALL_POLL_SECONDS="${GBRAIN_TEST_SHARD_STALL_POLL_SECONDS:-10}"
+if ! printf '%s' "$STALL_SECONDS" | grep -qE '^[0-9]{1,9}$'; then
+  echo "ERROR: invalid GBRAIN_TEST_SHARD_STALL_SECONDS: $STALL_SECONDS" >&2; exit 2
+fi
+if ! printf '%s' "$STALL_POLL_SECONDS" | grep -qE '^[0-9]{1,9}$' || [ "$STALL_POLL_SECONDS" -lt 1 ]; then
+  echo "ERROR: invalid GBRAIN_TEST_SHARD_STALL_POLL_SECONDS: $STALL_POLL_SECONDS" >&2; exit 2
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
-# Output directories. Prefer workspace-local .context/, fall back to /tmp.
+# Output directories. Prefer workspace-local .context/. If it is unwritable,
+# ask the host runtime for its native temp directory and keep every artifact
+# beneath one PID-scoped run root so concurrent worktrees cannot collide.
 # ──────────────────────────────────────────────────────────────────────────
 LOG_DIR=""
 if mkdir -p .context/test-shards 2>/dev/null; then
@@ -89,27 +121,31 @@ if mkdir -p .context/test-shards 2>/dev/null; then
   FAILURES_LOG=".context/test-failures.log"
   SUMMARY_FILE=".context/test-summary.txt"
 else
-  LOG_DIR="/tmp/gbrain-test-shards-$$"
-  FAILURES_LOG="/tmp/gbrain-test-failures.log"
-  SUMMARY_FILE="/tmp/gbrain-test-summary.txt"
+  # This script runs under Git Bash on Windows. Bun returns a native `C:\...`
+  # path there; slash-normalize it so Bash/coreutils treat it as an absolute
+  # drive path instead of a relative filename containing backslashes.
+  HOST_TMP=$(bun -e 'process.stdout.write(require("node:os").tmpdir().replaceAll("\\\\", "/"))' 2>/dev/null || true)
+  [ -n "$HOST_TMP" ] || { echo "ERROR: cannot resolve native temp directory" >&2; exit 2; }
+  RUN_ROOT="$HOST_TMP/gbrain-test-run-$$"
+  LOG_DIR="$RUN_ROOT/shards"
+  FAILURES_LOG="$RUN_ROOT/failures.log"
+  SUMMARY_FILE="$RUN_ROOT/summary.txt"
   mkdir -p "$LOG_DIR" || { echo "ERROR: cannot create log dir" >&2; exit 2; }
 fi
 # Clear from prior run.
-rm -f "$LOG_DIR"/shard-*.log "$LOG_DIR"/shard-*.exit "$LOG_DIR"/shard-*.wedged 2>/dev/null
+rm -f "$LOG_DIR"/shard-*.log "$LOG_DIR"/shard-*.exit \
+      "$LOG_DIR"/shard-*.wedged "$LOG_DIR"/shard-*.stalled \
+      "$LOG_DIR"/shard-*.completed 2>/dev/null
 : > "$FAILURES_LOG"
 : > "$SUMMARY_FILE"
 
-# ──────────────────────────────────────────────────────────────────────────
-# Resolve `timeout` command. macOS without coreutils has neither; we degrade
-# to bg-pid + sleep cap. For now, prefer gtimeout (brew coreutils) → timeout.
-# ──────────────────────────────────────────────────────────────────────────
-TIMEOUT_BIN=""
-if command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
-elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
-fi
-
 START_TS=$(date +%s)
-echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR" >&2
+if [ "$STALL_SECONDS" -gt 0 ]; then
+  STALL_NOTE="stall=${STALL_SECONDS}s"
+else
+  STALL_NOTE="stall=off"
+fi
+echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s${SHARD_TIMEOUT_ORIGIN} | ${STALL_NOTE} | logs=$LOG_DIR" >&2
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "[unit-parallel] dry-run: would spawn $N shards with the above settings."
@@ -121,6 +157,104 @@ if [ "$DRY_RUN" = "1" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
+# Stall watchdog. The outer shard process may remain blocked after its Bun child
+# disappears, so liveness is log growth rather than child-process presence.
+# ──────────────────────────────────────────────────────────────────────────
+child_pids() {
+  local parent="$1" children
+  if ps -eo pid=,ppid= >/dev/null 2>&1; then
+    ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent" '$2 == parent { print $1 }'
+    return
+  fi
+  ps -W 2>/dev/null | awk -v parent="$parent" 'NR > 1 && $2 == parent { print $1 }'
+}
+
+kill_process_tree() {
+  local pid="$1"
+  local force_posix="${2:-0}"
+  if [ "$force_posix" != "1" ] && [ "$BUN_PLATFORM" = "win32" ] && command -v taskkill.exe >/dev/null 2>&1; then
+    local winpid
+    winpid=$(ps -W 2>/dev/null | awk -v pid="$pid" '$1 == pid { print $4; exit }')
+    if [ -n "$winpid" ]; then
+      taskkill.exe //PID "$winpid" //T //F >/dev/null 2>&1 && return 0
+      # taskkill can report failure when the targeted shell unwinds while its
+      # descendants are being terminated. A now-absent root still means the
+      # confirmed-live tree was successfully stopped.
+      kill -0 "$pid" 2>/dev/null || return 0
+      return 1
+    fi
+  fi
+  local children child
+  children=$(child_pids "$pid")
+  for child in $children; do
+    kill_process_tree "$child" 1
+  done
+  kill -KILL "$pid" 2>/dev/null && return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  return 1
+}
+
+# Helpers are shell pipelines owned by this wrapper. Stop their leaves first and
+# give each parent a chance to reap its child before terminating the parent; this
+# avoids leaking a sleep when pkill is absent and avoids touching unrelated PIDs.
+stop_helper_branch() {
+  local pid="$1" children child attempt
+  children=$(child_pids "$pid")
+  for child in $children; do
+    stop_helper_branch "$child"
+    attempt=0
+    while kill -0 "$child" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+  done
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+}
+
+stop_helper_tree() {
+  local pid="$1" children child
+  children=$(child_pids "$pid")
+  for child in $children; do
+    stop_helper_branch "$child"
+  done
+  # The helper may have advanced and spawned its next polling sleep while its
+  # first child was reaped. Snapshot once more before stopping the owned root.
+  children=$(child_pids "$pid")
+  for child in $children; do
+    stop_helper_branch "$child"
+  done
+  kill -TERM "$pid" 2>/dev/null || true
+}
+
+stall_watchdog() {
+  local pid="$1" logf="$2" sentinel="$3"
+  [ "$STALL_SECONDS" -gt 0 ] || return 0
+  local last_size=-1 last_change size now
+  last_change=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$STALL_POLL_SECONDS"
+    kill -0 "$pid" 2>/dev/null || return 0
+    size=$(wc -c < "$logf" 2>/dev/null | tr -d ' ')
+    size="${size:-0}"
+    now=$(date +%s)
+    if [ "$size" != "$last_size" ]; then
+      last_size="$size"
+      last_change="$now"
+    elif [ $((now - last_change)) -ge "$STALL_SECONDS" ]; then
+      # Recheck immediately before recording the stall. On Windows/MSYS,
+      # taskkill /T may terminate this watchdog along with the native shard
+      # tree, so the marker must exist before termination begins. If the
+      # watcher survives a definitive kill failure, remove the pending marker.
+      kill -0 "$pid" 2>/dev/null || return 0
+      echo "STALLED" > "$sentinel"
+      kill_process_tree "$pid" || rm -f "$sentinel"
+      return 0
+    fi
+  done
+}
+
+# ──────────────────────────────────────────────────────────────────────────
 # Spawn shards. Each child captures its own exit code into a sentinel file
 # so $? is recoverable per-shard (we never trust `wait`'s aggregate value).
 # ──────────────────────────────────────────────────────────────────────────
@@ -128,26 +262,32 @@ SHARD_PIDS=()
 for i in $(seq 1 "$N"); do
   (
     SHARD_LOG="$LOG_DIR/shard-$i.log"
-    if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" "${SHARD_TIMEOUT}s" \
-        env SHARD="$i/$N" \
-        bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
-        > "$SHARD_LOG" 2>&1
-    else
-      env SHARD="$i/$N" \
-        bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
-        > "$SHARD_LOG" 2>&1 &
-      pid=$!
-      ( sleep "$SHARD_TIMEOUT" && kill -TERM "$pid" 2>/dev/null && \
-        sleep 5 && kill -KILL "$pid" 2>/dev/null ) &
-      cap_pid=$!
-      wait "$pid" 2>/dev/null
-      kill "$cap_pid" 2>/dev/null
-      wait "$cap_pid" 2>/dev/null
-    fi
+    : > "$SHARD_LOG"
+    env SHARD="$i/$N" \
+      GBRAIN_TEST_SHARD_COMPLETED_FILE="$LOG_DIR/shard-$i.completed" \
+      bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
+      > "$SHARD_LOG" 2>&1 &
+    run_pid=$!
+    ( sleep "$SHARD_TIMEOUT" && echo "WEDGED" > "$LOG_DIR/shard-$i.wedged" && \
+      kill_process_tree "$run_pid" ) &
+    cap_pid=$!
+
+    stall_watchdog "$run_pid" "$SHARD_LOG" "$LOG_DIR/shard-$i.stalled" &
+    watchdog_pid=$!
+    wait "$run_pid" 2>/dev/null
     rc=$?
+    for helper in "$watchdog_pid" "$cap_pid"; do
+      [ -n "$helper" ] || continue
+      stop_helper_tree "$helper"
+      wait "$helper" 2>/dev/null
+    done
+
+    # Helper evidence is fail-closed even when the shard wrote its private
+    # completion marker: a deadline can kill the shell in the tiny interval
+    # after marker creation but before exit and still yield rc=0 on Git Bash.
+    # Nested test processes cannot forge the marker, but neither can the marker
+    # prove that no owned helper actually terminated the shard.
     echo "$rc" > "$LOG_DIR/shard-$i.exit"
-    [ "$rc" = "124" ] && echo "WEDGED" > "$LOG_DIR/shard-$i.wedged"
   ) &
   SHARD_PIDS+=($!)
 done
@@ -271,23 +411,15 @@ heartbeat() {
 }
 heartbeat &
 HB_PID=$!
-# v0.41.11.0 cleanup: pkill children FIRST, then kill heartbeat. If we
-# kill the heartbeat shell first, its current `sleep 10` is reparented
-# to init/launchd and pkill -P can no longer find it (orphan). Order:
-# children first while the parent PID is still findable, then parent.
-# Known bash quirk: SIGTERM to a shell sleeping inside `sleep` doesn't
-# propagate to the sleep child before the wait returns. Without this,
-# each invocation of this script leaks ONE orphan sleep; CI's "orphan
-# process cleanup" at end-of-job reports them as (unnamed) test failures.
-# Seen on the garrytan/port-pr-1406 PR, 2 CI runs in a row, 6 orphans
-# matching the 6 invocations in test/scripts/run-unit-parallel.test.ts.
-trap 'pkill -P "$HB_PID" 2>/dev/null; kill "$HB_PID" 2>/dev/null; wait "$HB_PID" 2>/dev/null' EXIT
+# The heartbeat is another helper tree owned by this wrapper. Stop its current
+# sleep descendant before the heartbeat shell in both exit paths; this remains
+# bounded to descendants of HB_PID and does not depend on pkill being installed.
+trap 'stop_helper_tree "$HB_PID"; wait "$HB_PID" 2>/dev/null' EXIT
 
 # Wait for every shard. Don't care about wait's exit code.
 for pid in "${SHARD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
 
-pkill -P "$HB_PID" 2>/dev/null
-kill "$HB_PID" 2>/dev/null
+stop_helper_tree "$HB_PID"
 wait "$HB_PID" 2>/dev/null
 trap - EXIT
 
@@ -304,6 +436,8 @@ for i in $(seq 1 "$N"); do
   SHARD_LOG="$LOG_DIR/shard-$i.log"
   EXIT_FILE="$LOG_DIR/shard-$i.exit"
   WEDGED_FILE="$LOG_DIR/shard-$i.wedged"
+  STALLED_FILE="$LOG_DIR/shard-$i.stalled"
+  COMPLETED_FILE="$LOG_DIR/shard-$i.completed"
   rc=1
   [ -f "$EXIT_FILE" ] && rc=$(cat "$EXIT_FILE" 2>/dev/null || echo 1)
 
@@ -313,6 +447,17 @@ for i in $(seq 1 "$N"); do
   TOTAL_PASS=$((TOTAL_PASS + pass_count))
   TOTAL_FAILURES=$((TOTAL_FAILURES + fail_count))
   TOTAL_SKIP=$((TOTAL_SKIP + skip_count))
+
+  if [ -f "$STALLED_FILE" ]; then
+    TOTAL_RC=1
+    {
+      echo "--- shard $i: STALLED — no log output for ${STALL_SECONDS}s ---"
+      [ -f "$SHARD_LOG" ] && tail -50 "$SHARD_LOG"
+      echo ""
+    } >> "$FAILURES_LOG"
+    echo "shard $i/$N: STALLED after ${STALL_SECONDS}s with no output (rc=$rc)" >> "$SUMMARY_FILE"
+    continue
+  fi
 
   if [ -f "$WEDGED_FILE" ]; then
     TOTAL_RC=1
@@ -325,9 +470,20 @@ for i in $(seq 1 "$N"); do
     continue
   fi
 
+  if [ "$rc" = "0" ] && [ "$fail_count" -eq 0 ] && [ ! -f "$COMPLETED_FILE" ]; then
+    TOTAL_RC=1
+    {
+      echo "--- shard $i: UNATTESTED — natural completion marker missing (rc=$rc) ---"
+      [ -f "$SHARD_LOG" ] && cat "$SHARD_LOG"
+      echo ""
+    } >> "$FAILURES_LOG"
+    echo "shard $i/$N: UNATTESTED — natural completion marker missing (rc=$rc)" >> "$SUMMARY_FILE"
+    continue
+  fi
+
   echo "shard $i/$N: pass=$pass_count fail=$fail_count skip=$skip_count rc=$rc" >> "$SUMMARY_FILE"
 
-  if [ "$rc" != "0" ]; then
+  if [ "$rc" != "0" ] || [ "$fail_count" -gt 0 ]; then
     TOTAL_RC=1
     if [ "$fail_count" -gt 0 ] && [ -f "$SHARD_LOG" ]; then
       # Extract each (fail) block: from `(fail)` line through next `(pass)`,

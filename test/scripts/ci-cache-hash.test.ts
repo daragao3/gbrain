@@ -38,7 +38,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getFsCapabilities } from "../helpers/fs-capabilities.ts";
 
+const FS_CAPABILITIES = getFsCapabilities();
 const REPO_ROOT = resolve(import.meta.dir, "..", "..");
 const SCRIPT_SRC = resolve(REPO_ROOT, "scripts/ci-cache-hash.sh");
 
@@ -357,15 +359,15 @@ describe("ci-cache-hash.sh — edge cases", () => {
     });
   });
 
-  it("symlink target change affects hash (git hash-object follows symlink contents)", () => {
-    // Note: git stores symlinks as the link target string, so changing
-    // the LINK TARGET changes the git blob sha. Our hash will catch
-    // that. We can't easily test "change of target's content" without
-    // creating an out-of-tree file, so this case pins the link-target
-    // path change.
+  it.skipIf(!FS_CAPABILITIES.gitSymlinkCheckout)(
+    "tracked symlink target change affects the ls-files index mode/blob/path hash",
+    () => {
+    // Git stores a symlink as index mode 120000 plus a blob containing the
+    // link-target path. The cache hash consumes `git ls-files -s`, so changing
+    // that target changes the indexed blob while preserving mode and path.
     withSandbox(BASELINE_FILES, (sb) => {
       // Create a symlink and commit.
-      symlinkSync("./db.ts", join(sb.dir, "src/core/db-link.ts"));
+      symlinkSync("./db.ts", join(sb.dir, "src/core/db-link.ts"), 'file');
       execFileSync("git", ["add", "src/core/db-link.ts"], { cwd: sb.dir });
       execFileSync("git", ["commit", "--quiet", "-m", "add link"], {
         cwd: sb.dir,
@@ -374,7 +376,7 @@ describe("ci-cache-hash.sh — edge cases", () => {
       // Point the symlink elsewhere — and commit so it lands in the
       // index that `git ls-files -s` reads.
       rmSync(join(sb.dir, "src/core/db-link.ts"));
-      symlinkSync("./cli.ts", join(sb.dir, "src/core/db-link.ts"));
+      symlinkSync("./cli.ts", join(sb.dir, "src/core/db-link.ts"), 'file');
       execFileSync("git", ["add", "src/core/db-link.ts"], { cwd: sb.dir });
       execFileSync("git", ["commit", "--quiet", "-m", "repoint link"], {
         cwd: sb.dir,
@@ -382,7 +384,8 @@ describe("ci-cache-hash.sh — edge cases", () => {
       const after = hash(sb);
       expect(after).not.toBe(before);
     });
-  });
+    },
+  );
 
   it("locale-stable: LC_ALL=de_DE.UTF-8 produces the same hash as default", () => {
     withSandbox(BASELINE_FILES, (sb) => {

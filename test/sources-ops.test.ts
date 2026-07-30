@@ -33,6 +33,9 @@ import { readdirSync } from 'fs';
 import { runSources } from '../src/commands/sources.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 // Tier 3: every PGLite spinup path needs the snapshot env unset (test
 // infrastructure detail; matches bootstrap.test.ts pattern).
@@ -373,7 +376,7 @@ describe('removeSource — clone-cleanup', () => {
     });
   });
 
-  test('symlink-target-OUTSIDE-clones: realpath confinement foils escape', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('symlink-target-OUTSIDE-clones: realpath confinement foils escape', async () => {
     await withEnv2(async () => {
       // Attacker replaces $CLONE_ROOT/evil with a symlink to a sibling dir
       // (e.g. ~/.ssh, /etc). The realpath check in isPathContained resolves
@@ -385,7 +388,7 @@ describe('removeSource — clone-cleanup', () => {
       writeFileSync(join(target, 'sentinel'), 'do-not-touch');
       const linkPath = join(CLONE_ROOT, 'evil');
       mkdirSync(CLONE_ROOT, { recursive: true });
-      symlinkSync(target, linkPath);
+      symlinkSync(target, linkPath, 'dir');
       await engine.executeRaw(
         `INSERT INTO sources (id, name, local_path, config) VALUES ('evil', 'evil', $1, $2::jsonb)`,
         [linkPath, JSON.stringify({ remote_url: 'https://github.com/x/y' })],
@@ -405,7 +408,7 @@ describe('removeSource — clone-cleanup', () => {
     });
   });
 
-  test('symlink-target-INSIDE-clones: lstat check refuses with symlink_escape', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('symlink-target-INSIDE-clones: lstat check refuses with symlink_escape', async () => {
     await withEnv2(async () => {
       // Edge case: symlink that resolves INSIDE clones/ (so isPathContained
       // returns true), but the symlink itself is the local_path. lstat-check
@@ -416,7 +419,7 @@ describe('removeSource — clone-cleanup', () => {
         'do-not-touch',
       );
       const linkPath = join(CLONE_ROOT, 'symlink-source');
-      symlinkSync(join(CLONE_ROOT, 'real-target'), linkPath);
+      symlinkSync(join(CLONE_ROOT, 'real-target'), linkPath, 'dir');
       await engine.executeRaw(
         `INSERT INTO sources (id, name, local_path, config) VALUES ('inner-symlink', 'x', $1, $2::jsonb)`,
         [linkPath, JSON.stringify({ remote_url: 'https://github.com/x/y' })],
@@ -680,7 +683,7 @@ describe('recloneIfMissing — refuses to delete an unowned working tree (#1881)
 });
 
 describe('recloneIfMissing — symlink TOCTOU + EXDEV-safe swap', () => {
-  test('symlink at an owned default-location path → symlink_escape, target untouched', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('symlink at an owned default-location path → symlink_escape, target untouched', async () => {
     await withEnv2(async () => {
       // Owned by equality: local_path === defaultCloneDir(id). But the path is a
       // symlink to a real dir → reclone must refuse rather than rename through it.
@@ -693,7 +696,7 @@ describe('recloneIfMissing — symlink TOCTOU + EXDEV-safe swap', () => {
 
       mkdirSync(CLONE_ROOT, { recursive: true });
       const clonePath = defaultCloneDir(id); // = CLONE_ROOT/sym-owned
-      symlinkSync(target, clonePath);
+      symlinkSync(target, clonePath, 'dir');
 
       await engine.executeRaw(
         `INSERT INTO sources (id, name, local_path, config)
@@ -1092,11 +1095,11 @@ describe('isPathContained', () => {
     expect(isPathContained(outside, SANDBOX)).toBe(false);
   });
 
-  test('rejects symlink escape (the codex finding case)', () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('rejects symlink escape (the codex finding case)', () => {
     const target = join(tmpdir(), `escape-${process.pid}-${Date.now()}`);
     mkdirSync(target, { recursive: true });
     const link = join(SANDBOX, 'innocent-name');
-    symlinkSync(target, link);
+    symlinkSync(target, link, 'dir');
     // After realpath the link resolves to /tmp/escape-…, which is NOT
     // contained under SANDBOX. Function returns false.
     expect(isPathContained(link, SANDBOX)).toBe(false);

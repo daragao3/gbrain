@@ -4,13 +4,13 @@
  * and the D2 clean-restart-budget gate so future refactors can't silently
  * regress the supervisor crash-count incident this wave fixes.
  *
- * Strategy: each test writes a small shell script to disk that exits with
- * a chosen code after an optional sleep. The class spawns the script as
- * the "worker" and we assert on the event stream the class emits.
+ * Strategy: constant-exit workers use the platform shell; stateful workers
+ * are generated .mjs files launched through process.execPath. The class spawns
+ * each harness and we assert on the event stream the class emits.
  */
 
 import { describe, it, expect, afterEach } from 'bun:test';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -18,26 +18,83 @@ import {
   type ChildSupervisorEvent,
 } from '../src/core/minions/child-worker-supervisor.ts';
 
+const TEST_TIMEOUT_MS = 60_000;
+const RUN_DEADLINE_MS = 30_000;
+const RUN_ABANDON_GRACE_MS = 5_000;
+
 interface Harness {
-  workerScript: string;
-  cleanup: () => void;
+  cliPath: string;
+  args: string[];
+  cleanup(): void;
 }
 
-function makeHarness(name: string, body: string): Harness {
+function makeModuleHarness(name: string, source: string): Harness {
   const root = join(tmpdir(), `gbrain-cws-test-${name}-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true });
-  const workerScript = join(root, 'worker.sh');
-  writeFileSync(workerScript, `#!/bin/sh\n${body}\n`, 'utf8');
-  chmodSync(workerScript, 0o755);
+  const workerScript = join(root, 'worker.mjs');
+  writeFileSync(workerScript, source, 'utf8');
   return {
-    workerScript,
-    cleanup: () => {
+    cliPath: process.execPath,
+    args: [workerScript],
+    cleanup() {
       try {
         rmSync(root, { recursive: true, force: true });
       } catch {
         /* noop */
       }
     },
+  };
+}
+
+function makeConstantExitHarness(code: number): Harness {
+  return process.platform === 'win32'
+    ? {
+        cliPath: process.env.ComSpec ?? 'cmd.exe',
+        args: ['/d', '/s', '/c', `exit ${code}`],
+        cleanup() {},
+      }
+    : {
+        cliPath: '/bin/sh',
+        args: ['-c', `exit ${code}`],
+        cleanup() {},
+      };
+}
+
+function makeExitSequenceHarness(name: string, codes: number[]): Harness {
+  return makeModuleHarness(
+    name,
+    `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+const counterFile = fileURLToPath(new URL('./counter', import.meta.url));
+const count = existsSync(counterFile) ? Number(readFileSync(counterFile, 'utf8')) : 0;
+writeFileSync(counterFile, String(count + 1));
+const codes = ${JSON.stringify(codes)};
+process.exit(codes[Math.min(count, codes.length - 1)] ?? 0);
+`,
+  );
+}
+
+function makeMissingExecutableHarness(name: string): Harness {
+  const root = join(tmpdir(), `gbrain-cws-test-${name}-${process.pid}-${Date.now()}`);
+  mkdirSync(root, { recursive: true });
+  return {
+    cliPath: join(root, 'missing-worker'),
+    args: [],
+    cleanup() {
+      try {
+        rmSync(root, { recursive: true, force: true });
+      } catch {
+        /* noop */
+      }
+    },
+  };
+}
+
+function makeSynchronousSpawnFailureHarness(): Harness {
+  return {
+    cliPath: 'invalid\0worker',
+    args: [],
+    cleanup() {},
   };
 }
 
@@ -69,8 +126,8 @@ async function runUntilTerminal(
   const stopAfter = overrides.stopAfterEvents ?? 200;
 
   const sup = new ChildWorkerSupervisor({
-    cliPath: h.workerScript,
-    args: [],
+    cliPath: h.cliPath,
+    args: h.args,
     maxCrashes: overrides.maxCrashes ?? 3,
     hardStopMaxCrashes: overrides.hardStopMaxCrashes,
     _backoffFloorMs: overrides._backoffFloorMs ?? 5,
@@ -95,7 +152,28 @@ async function runUntilTerminal(
     },
   });
 
-  await sup.run();
+  let softDeadline: ReturnType<typeof setTimeout> | undefined;
+  let hardDeadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      softDeadline = setTimeout(() => {
+        stopping = true;
+        sup.killChild('SIGKILL');
+        hardDeadline = setTimeout(() => {
+          reject(
+            new Error(
+              `ChildWorkerSupervisor did not settle within ${RUN_DEADLINE_MS + RUN_ABANDON_GRACE_MS}ms; latest events: ${JSON.stringify(events.slice(-10))}`,
+            ),
+          );
+        }, RUN_ABANDON_GRACE_MS);
+      }, RUN_DEADLINE_MS);
+
+      void sup.run().then(resolve, reject);
+    });
+  } finally {
+    if (softDeadline) clearTimeout(softDeadline);
+    if (hardDeadline) clearTimeout(hardDeadline);
+  }
   return { events, maxCrashesFired };
 }
 
@@ -106,7 +184,7 @@ afterEach(() => {
 describe('ChildWorkerSupervisor', () => {
   describe('D1 — code=0 exit classifier', () => {
     it('code=0 worker exit does not count as crash; restarts immediately', async () => {
-      const h = makeHarness('clean-exits', 'exit 0');
+      const h = makeConstantExitHarness(0);
       try {
         const res = await runUntilTerminal(h, {
           maxCrashes: 3,
@@ -146,18 +224,7 @@ describe('ChildWorkerSupervisor', () => {
     it('interleaved code=0 and code!=0 exits still trip max_crashes', async () => {
       // Worker alternates: each invocation increments a counter file and
       // exits 1 on odd hits, 0 on even hits (so exit-sequence is 1,0,1,0,1).
-      const h = makeHarness(
-        'interleaved',
-        `
-COUNTER_FILE="$(dirname "$0")/counter"
-[ -f "$COUNTER_FILE" ] || echo 0 > "$COUNTER_FILE"
-COUNT=$(cat "$COUNTER_FILE")
-NEXT=$((COUNT + 1))
-echo "$NEXT" > "$COUNTER_FILE"
-# Odd-indexed runs (#1, #3, #5...) exit 1; even-indexed exit 0.
-if [ $((NEXT % 2)) -eq 1 ]; then exit 1; else exit 0; fi
-`,
-      );
+      const h = makeExitSequenceHarness('interleaved', [1, 0, 1, 0, 1]);
       try {
         const res = await runUntilTerminal(h, {
           maxCrashes: 3,
@@ -196,23 +263,7 @@ if [ $((NEXT % 2)) -eq 1 ]; then exit 1; else exit 0; fi
       // Sequence (4 runs total): exit 1 → exit 0 (6 min, "stable") → exit 1 →
       // exit 1. crashCount progression: 1, 1 (unchanged across the long
       // clean exit), 2, 3 — last one trips max_crashes=3.
-      const h = makeHarness(
-        'stable-clean-no-reset',
-        `
-COUNTER_FILE="$(dirname "$0")/counter"
-[ -f "$COUNTER_FILE" ] || echo 0 > "$COUNTER_FILE"
-COUNT=$(cat "$COUNTER_FILE")
-NEXT=$((COUNT + 1))
-echo "$NEXT" > "$COUNTER_FILE"
-case $NEXT in
-  1) exit 1 ;;
-  2) exit 0 ;;
-  3) exit 1 ;;
-  4) exit 1 ;;
-  *) exit 0 ;;
-esac
-`,
-      );
+      const h = makeExitSequenceHarness('stable-clean-no-reset', [1, 0, 1, 1, 0]);
       try {
         // Fake clock — each spawnOnce reads now() twice (start + exit) and
         // applyBackoff may read once more. Run 2 sees a 6-minute duration
@@ -271,7 +322,7 @@ esac
   describe('D2 — clean-restart budget', () => {
     it('budget exceeded triggers health_warn + budget_exceeded backoff', async () => {
       // Tight budget of 2 so we trip it on the 3rd clean exit.
-      const h = makeHarness('budget-trip', 'exit 0');
+      const h = makeConstantExitHarness(0);
       try {
         const res = await runUntilTerminal(h, {
           maxCrashes: 3, // never trips because code=0 doesn't increment
@@ -309,8 +360,8 @@ esac
     it('budget config is per-instance (no module-level state leakage)', async () => {
       // Run instance A with budget=2 and instance B with budget=5. Each
       // tracks its own sliding window; A trips faster than B.
-      const hA = makeHarness('budget-a', 'exit 0');
-      const hB = makeHarness('budget-b', 'exit 0');
+      const hA = makeConstantExitHarness(0);
+      const hB = makeConstantExitHarness(0);
       try {
         const resA = await runUntilTerminal(hA, {
           maxCrashes: 99,
@@ -353,14 +404,14 @@ esac
     // and the caller waited out the full timeout. Fix probes exitCode +
     // signalCode first and short-circuits.
     it('resolves immediately when the child has already exited', async () => {
-      const h = makeHarness('await-already-exited', 'exit 0');
+      const h = makeConstantExitHarness(0);
       try {
         // Spin up a supervisor; drive it for ONE spawn cycle and then stop.
         const events: ChildSupervisorEvent[] = [];
         let stopping = false;
         const sup = new ChildWorkerSupervisor({
-          cliPath: h.workerScript,
-          args: [],
+          cliPath: h.cliPath,
+          args: h.args,
           maxCrashes: 1,
           _backoffFloorMs: 1,
           isStopping: () => stopping,
@@ -383,9 +434,59 @@ esac
     });
   });
 
+  describe('failed spawn settlement', () => {
+    async function expectBoundedSpawnFailure(h: Harness, phase: 'sync' | 'async') {
+      try {
+        const { events, maxCrashesFired } = await runUntilTerminal(h, {
+          maxCrashes: 2,
+          hardStopMaxCrashes: 3,
+          _backoffFloorMs: 1,
+        });
+
+        expect(maxCrashesFired).toEqual({ count: 3, max: 3 });
+        const failed = events.filter(
+          (e): e is Extract<ChildSupervisorEvent, { kind: 'worker_spawn_failed' }> =>
+            e.kind === 'worker_spawn_failed',
+        );
+        const exited = events.filter(
+          (e): e is Extract<ChildSupervisorEvent, { kind: 'worker_exited' }> =>
+            e.kind === 'worker_exited',
+        );
+        const spawned = events.filter((event) => event.kind === 'worker_spawned');
+
+        expect(failed).toHaveLength(3);
+        expect(failed.every((event) => event.phase === phase)).toBe(true);
+        expect(spawned).toHaveLength(0);
+        expect(exited).toHaveLength(3);
+        expect(exited.map((e) => e.crashCount)).toEqual([1, 2, 3]);
+        for (const event of exited) {
+          expect(event).toMatchObject({
+            code: null,
+            signal: null,
+            likelyCause: 'spawn_failed',
+          });
+          expect(typeof event.runDurationMs).toBe('number');
+        }
+      } finally {
+        h.cleanup();
+      }
+    }
+
+    it('async failure emits one terminal exit per attempt and stops at the hard ceiling', async () => {
+      await expectBoundedSpawnFailure(
+        makeMissingExecutableHarness('failed-spawn'),
+        'async',
+      );
+    }, TEST_TIMEOUT_MS);
+
+    it('sync failure emits one terminal exit per attempt and stops at the hard ceiling', async () => {
+      await expectBoundedSpawnFailure(makeSynchronousSpawnFailureHarness(), 'sync');
+    }, TEST_TIMEOUT_MS);
+  });
+
   describe('event shape', () => {
     it('worker_spawned + worker_exited fire on every cycle with consistent shape', async () => {
-      const h = makeHarness('shape', 'exit 0');
+      const h = makeConstantExitHarness(0);
       try {
         const res = await runUntilTerminal(h, {
           maxCrashes: 3,
@@ -425,7 +526,7 @@ esac
   // defeat max_crashes and the 400×/24h loop would never stop being silent.
   describe('rss_watchdog breaker (issue #1678)', () => {
     it('code=12 is labeled rss_watchdog and never increments crashCount', async () => {
-      const h = makeHarness('wd-nocrash', 'exit 12');
+      const h = makeConstantExitHarness(12);
       try {
         const { events, maxCrashesFired } = await runUntilTerminal(h, {
           maxCrashes: 3,
@@ -450,7 +551,7 @@ esac
     });
 
     it('emits rss_watchdog_loop health_warn once the window budget is exceeded', async () => {
-      const h = makeHarness('wd-loop', 'exit 12');
+      const h = makeConstantExitHarness(12);
       try {
         const { events } = await runUntilTerminal(h, {
           maxCrashes: 99,
@@ -483,7 +584,7 @@ esac
   // at the much-higher hard ceiling.
   describe('degraded-mode crash backoff (issue #1994)', () => {
     it('crossing the soft budget does NOT give up; it warns and keeps retrying to the hard ceiling', async () => {
-      const h = makeHarness('degraded-softbudget', 'exit 1');
+      const h = makeConstantExitHarness(1);
       try {
         const { events, maxCrashesFired } = await runUntilTerminal(h, {
           maxCrashes: 3,        // soft budget
@@ -517,7 +618,7 @@ esac
     });
 
     it('hardStopMaxCrashes=0 disables permanent give-up (retry-forever-with-backoff)', async () => {
-      const h = makeHarness('degraded-noforever', 'exit 1');
+      const h = makeConstantExitHarness(1);
       try {
         const { events, maxCrashesFired } = await runUntilTerminal(h, {
           maxCrashes: 3,
@@ -549,7 +650,12 @@ esac
 
     // Worker that IGNORES SIGTERM and sleeps, so only SIGKILL can stop it.
     function makeSigtermIgnorer(name: string): Harness {
-      return makeHarness(name, "trap '' TERM\nsleep 30");
+      return makeModuleHarness(
+        name,
+        `process.on('SIGTERM', () => {});
+setTimeout(() => {}, 30_000);
+`,
+      );
     }
 
     async function startInBackground(h: Harness): Promise<{
@@ -563,8 +669,8 @@ esac
       let resolveSpawn: (pid: number) => void;
       const firstSpawn = new Promise<number>((r) => { resolveSpawn = r; });
       const sup = new ChildWorkerSupervisor({
-        cliPath: h.workerScript,
-        args: [],
+        cliPath: h.cliPath,
+        args: h.args,
         maxCrashes: 100,
         _backoffFloorMs: 5,
         isStopping: () => stopping,
@@ -616,13 +722,83 @@ esac
         .split('\n')
         .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
         .join('\n');
-      expect(code).toContain('exitCode === null');
-      expect(code).toContain('signalCode === null');
+      expect(code).toContain('terminateOwnedProcessTree');
       // The buggy `.killed` guard must be gone from the code.
       expect(code).not.toContain('.killed');
     });
 
-    it('restartCurrentChild SIGKILLs the captured child, respawns, labels wedge_restart, leaves crashCount=0', async () => {
+    it.skipIf(process.platform === 'win32')('shutdownChild SIGKILLs a TERM-resistant descendant after its leader exits', async () => {
+      const root = join(
+        tmpdir(),
+        `gbrain-cws-test-resistant-descendant-${process.pid}-${Date.now()}`,
+      );
+      mkdirSync(root, { recursive: true });
+      const descendantPidFile = join(root, 'descendant.pid');
+      const descendantScript = join(root, 'descendant.mjs');
+      const leaderScript = join(root, 'leader.mjs');
+      writeFileSync(
+        descendantScript,
+        `import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => {});
+writeFileSync(${JSON.stringify(descendantPidFile)}, String(process.pid));
+setInterval(() => {}, 30_000);
+`,
+        'utf8',
+      );
+      writeFileSync(
+        leaderScript,
+        `import { spawn } from 'node:child_process';
+const descendant = spawn(process.execPath, [${JSON.stringify(descendantScript)}], {
+  stdio: 'inherit',
+});
+process.on('SIGTERM', () => process.exit(0));
+descendant.once('spawn', () => setInterval(() => {}, 30_000));
+`,
+        'utf8',
+      );
+
+      const events: ChildSupervisorEvent[] = [];
+      let stopping = false;
+      let resolveSpawn!: () => void;
+      const spawned = new Promise<void>((resolve) => { resolveSpawn = resolve; });
+      const sup = new ChildWorkerSupervisor({
+        cliPath: process.execPath,
+        args: [leaderScript],
+        maxCrashes: 100,
+        isStopping: () => stopping,
+        onMaxCrashesExceeded: () => { stopping = true; },
+        onEvent: (event) => {
+          events.push(event);
+          if (event.kind === 'worker_spawned') resolveSpawn();
+        },
+      });
+      const runPromise = sup.run();
+      let descendantPid = 0;
+      try {
+        await spawned;
+        for (let attempt = 0; attempt < 200 && !existsSync(descendantPidFile); attempt++) {
+          await sleep(10);
+        }
+        descendantPid = Number(readFileSync(descendantPidFile, 'utf8'));
+        expect(isAlive(descendantPid)).toBe(true);
+
+        stopping = true;
+        const settled = await sup.shutdownChild(100, 5_000);
+        await runPromise;
+
+        expect(settled).toBe(true);
+        expect(isAlive(descendantPid)).toBe(false);
+      } finally {
+        stopping = true;
+        if (descendantPid > 0 && isAlive(descendantPid)) {
+          try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already gone */ }
+        }
+        await Promise.race([runPromise, sleep(5_000)]);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, TEST_TIMEOUT_MS);
+
+    it.skipIf(process.platform === 'win32')('restartCurrentChild SIGKILLs the captured child, respawns, labels wedge_restart, leaves crashCount=0', async () => {
       const h = makeSigtermIgnorer('restart-current');
       const ctx = await startInBackground(h);
       try {
@@ -660,7 +836,7 @@ esac
       }
     });
 
-    it('repeated wedge restarts never trip max_crashes (crashCount stays 0)', async () => {
+    it.skipIf(process.platform === 'win32')('repeated wedge restarts never trip max_crashes (crashCount stays 0)', async () => {
       const h = makeSigtermIgnorer('restart-no-crash');
       const ctx = await startInBackground(h);
       try {

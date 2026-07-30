@@ -20,10 +20,12 @@ let queue: MinionQueue;
 // (in the minion-shell submission E2E / the queue-resilience wave)
 // toggles the var itself.
 let prevAllowShellJobs: string | undefined;
+let shellCwd: string;
 
 beforeAll(async () => {
   prevAllowShellJobs = process.env.GBRAIN_ALLOW_SHELL_JOBS;
   process.env.GBRAIN_ALLOW_SHELL_JOBS = '1';
+  shellCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-minion-shell-'));
   engine = new PGLiteEngine();
   await engine.connect({ database_url: '' });
   await engine.initSchema();
@@ -32,6 +34,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  fs.rmSync(shellCwd, { recursive: true, force: true });
   if (prevAllowShellJobs === undefined) delete process.env.GBRAIN_ALLOW_SHELL_JOBS;
   else process.env.GBRAIN_ALLOW_SHELL_JOBS = prevAllowShellJobs;
 });
@@ -88,19 +91,19 @@ describe('protected-names', () => {
 
 describe('MinionQueue.add protected-name guard', () => {
   test('add("shell", ...) without trusted arg throws', async () => {
-    expect(queue.add('shell', { cmd: 'echo', cwd: '/tmp' })).rejects.toThrow(/protected job name/);
+    expect(queue.add('shell', { cmd: 'echo', cwd: shellCwd })).rejects.toThrow(/protected job name/);
   });
   test('add("shell", ..., opts, {allowProtectedSubmit:true}) succeeds', async () => {
-    const job = await queue.add('shell', { cmd: 'echo', cwd: '/tmp' }, undefined, { allowProtectedSubmit: true });
+    const job = await queue.add('shell', { cmd: 'echo', cwd: shellCwd }, undefined, { allowProtectedSubmit: true });
     expect(job.name).toBe('shell');
     expect(job.status).toBe('waiting');
   });
   // Whitespace bypass defense (Codex #1)
   test('add(" shell ", ...) without trusted arg throws (whitespace bypass defense)', async () => {
-    expect(queue.add(' shell ', { cmd: 'echo', cwd: '/tmp' })).rejects.toThrow(/protected job name/);
+    expect(queue.add(' shell ', { cmd: 'echo', cwd: shellCwd })).rejects.toThrow(/protected job name/);
   });
   test('add(" shell ", ...) with trusted arg inserts normalized name "shell"', async () => {
-    const job = await queue.add(' shell ', { cmd: 'echo', cwd: '/tmp' }, undefined, { allowProtectedSubmit: true });
+    const job = await queue.add(' shell ', { cmd: 'echo', cwd: shellCwd }, undefined, { allowProtectedSubmit: true });
     expect(job.name).toBe('shell');
   });
   test('add("Shell", ...) is treated as non-protected (case-sensitive)', async () => {
@@ -123,11 +126,11 @@ describe('MinionQueue.add protected-name guard', () => {
 
 describe('shell handler: validation', () => {
   test('both cmd and argv → UnrecoverableError', async () => {
-    const p = shellHandler(makeCtx({ cmd: 'echo', argv: ['echo'], cwd: '/tmp' }));
+    const p = shellHandler(makeCtx({ cmd: 'echo', argv: ['echo'], cwd: shellCwd }));
     expect(p).rejects.toThrow(UnrecoverableError);
   });
   test('neither cmd nor argv → UnrecoverableError', async () => {
-    const p = shellHandler(makeCtx({ cwd: '/tmp' }));
+    const p = shellHandler(makeCtx({ cwd: shellCwd }));
     expect(p).rejects.toThrow(UnrecoverableError);
   });
   test('cwd missing → UnrecoverableError', async () => {
@@ -139,15 +142,15 @@ describe('shell handler: validation', () => {
     expect(p).rejects.toThrow(UnrecoverableError);
   });
   test('argv non-array (string) → UnrecoverableError', async () => {
-    const p = shellHandler(makeCtx({ argv: 'echo ok', cwd: '/tmp' }));
+    const p = shellHandler(makeCtx({ argv: 'echo ok', cwd: shellCwd }));
     expect(p).rejects.toThrow(UnrecoverableError);
   });
   test('argv with non-string entries → UnrecoverableError', async () => {
-    const p = shellHandler(makeCtx({ argv: ['echo', 42], cwd: '/tmp' }));
+    const p = shellHandler(makeCtx({ argv: ['echo', 42], cwd: shellCwd }));
     expect(p).rejects.toThrow(UnrecoverableError);
   });
   test('env with non-string values → UnrecoverableError', async () => {
-    const p = shellHandler(makeCtx({ cmd: 'echo', cwd: '/tmp', env: { FOO: 42 } }));
+    const p = shellHandler(makeCtx({ cmd: 'echo', cwd: shellCwd, env: { FOO: 42 } }));
     expect(p).rejects.toThrow(UnrecoverableError);
   });
 });
@@ -156,30 +159,36 @@ describe('shell handler: validation', () => {
 
 describe('shell handler: spawn', () => {
   test('cmd happy path: echo ok → exit 0, stdout captured', async () => {
-    const res = await shellHandler(makeCtx({ cmd: 'echo ok', cwd: '/tmp' })) as any;
+    const command = process.platform === 'win32' ? 'echo ok' : 'printf "ok\n"';
+    const res = await shellHandler(makeCtx({ cmd: command, cwd: shellCwd })) as any;
     expect(res.exit_code).toBe(0);
-    expect(res.stdout_tail).toBe('ok\n');
+    expect(res.stdout_tail.trimEnd()).toBe('ok');
     expect(res.stderr_tail).toBe('');
     expect(typeof res.duration_ms).toBe('number');
     expect(res.duration_ms).toBeGreaterThanOrEqual(0);
     expect(typeof res.pid).toBe('number');
   });
-  test('argv happy path: ["echo","hi"] → exit 0, stdout "hi\\n"', async () => {
-    const res = await shellHandler(makeCtx({ argv: ['echo', 'hi'], cwd: '/tmp' })) as any;
+  test('argv happy path writes hi through direct shell-free argv', async () => {
+    const res = await shellHandler(makeCtx({
+      argv: [process.execPath, '-e', 'process.stdout.write("hi" + String.fromCharCode(10))'],
+      cwd: shellCwd,
+    })) as any;
     expect(res.exit_code).toBe(0);
     expect(res.stdout_tail).toBe('hi\n');
   });
   test('non-zero exit → Error with stderr in message', async () => {
-    const p = shellHandler(makeCtx({ cmd: 'echo fail 1>&2; exit 7', cwd: '/tmp' }));
+    const command = process.platform === 'win32' ? 'echo fail 1>&2 & exit /b 7' : 'echo fail 1>&2; exit 7';
+    const p = shellHandler(makeCtx({ cmd: command, cwd: shellCwd }));
     await expect(p).rejects.toThrow(/exit 7/);
   });
   test('argv with bogus binary → Error (retryable)', async () => {
-    const p = shellHandler(makeCtx({ argv: ['gbrain-nonexistent-binary-xyz'], cwd: '/tmp' }));
+    const p = shellHandler(makeCtx({ argv: ['gbrain-nonexistent-binary-xyz'], cwd: shellCwd }));
     // spawn emits 'error' on ENOENT
     await expect(p).rejects.toThrow();
   });
   test('result shape includes all declared keys', async () => {
-    const res = await shellHandler(makeCtx({ cmd: 'echo ok', cwd: '/tmp' })) as any;
+    const command = process.platform === 'win32' ? 'echo ok' : 'printf "ok\n"';
+    const res = await shellHandler(makeCtx({ cmd: command, cwd: shellCwd })) as any;
     expect(Object.keys(res).sort()).toEqual(['duration_ms', 'exit_code', 'pid', 'stderr_tail', 'stdout_tail']);
   });
 });
@@ -192,10 +201,10 @@ describe('shell handler: env allowlist', () => {
     process.env.SHELL_TEST_SECRET = 'should-not-leak';
     try {
       const res = await shellHandler(makeCtx({
-        cmd: 'echo "secret=${SHELL_TEST_SECRET:-EMPTY}"',
-        cwd: '/tmp',
+        cmd: process.platform === 'win32' ? 'echo secret=%SHELL_TEST_SECRET%' : 'echo "secret=${SHELL_TEST_SECRET:-EMPTY}"',
+        cwd: shellCwd,
       })) as any;
-      expect(res.stdout_tail).toBe('secret=EMPTY\n');
+      expect(res.stdout_tail.trimEnd()).toBe(process.platform === 'win32' ? 'secret=%SHELL_TEST_SECRET%' : 'secret=EMPTY');
     } finally {
       if (saved === undefined) delete process.env.SHELL_TEST_SECRET;
       else process.env.SHELL_TEST_SECRET = saved;
@@ -203,28 +212,30 @@ describe('shell handler: env allowlist', () => {
   });
   test('PATH is inherited from worker', async () => {
     const res = await shellHandler(makeCtx({
-      cmd: 'echo "path=$PATH"',
-      cwd: '/tmp',
+      cmd: process.platform === 'win32' ? 'echo path=%PATH%' : 'echo "path=$PATH"',
+      cwd: shellCwd,
     })) as any;
     expect(res.stdout_tail.startsWith('path=')).toBe(true);
     expect(res.stdout_tail.length).toBeGreaterThan('path=\n'.length);
   });
   test('caller-supplied env key is added', async () => {
     const res = await shellHandler(makeCtx({
-      cmd: 'echo "val=$MY_CUSTOM"',
-      cwd: '/tmp',
+      cmd: process.platform === 'win32' ? 'echo val=%MY_CUSTOM%' : 'echo "val=$MY_CUSTOM"',
+      cwd: shellCwd,
       env: { MY_CUSTOM: 'hello' },
     })) as any;
-    expect(res.stdout_tail).toBe('val=hello\n');
+    expect(res.stdout_tail.trimEnd()).toBe('val=hello');
   });
   test('caller-supplied env can override allowlisted key (PATH)', async () => {
+    const expectedPath = process.platform === 'win32' ? String.raw`C:\custom\bin` : '/custom/bin';
     const res = await shellHandler(makeCtx({
-      cmd: 'echo "path=$PATH"',
-      cwd: '/tmp',
-      env: { PATH: '/custom/bin' },
+      cmd: process.platform === 'win32' ? 'echo path=%PATH%' : 'echo "path=$PATH"',
+      cwd: shellCwd,
+      env: { PATH: expectedPath },
     })) as any;
-    expect(res.stdout_tail).toBe('path=/custom/bin\n');
+    expect(res.stdout_tail.trimEnd()).toBe(`path=${expectedPath}`);
   });
+
 });
 
 // ---- Shell handler: abort --------------------------------------------------
@@ -233,7 +244,7 @@ describe('shell handler: abort', () => {
   test('ctx.signal.abort triggers SIGTERM and handler throws aborted', async () => {
     const ac = new AbortController();
     const promise = shellHandler(makeCtx(
-      { cmd: 'sleep 30', cwd: '/tmp' },
+      { argv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'], cwd: shellCwd },
       { signal: ac.signal },
     ));
     // Give spawn a beat to start
@@ -243,7 +254,7 @@ describe('shell handler: abort', () => {
   test('ctx.shutdownSignal.abort also triggers kill', async () => {
     const shutdownCtl = new AbortController();
     const promise = shellHandler(makeCtx(
-      { cmd: 'sleep 30', cwd: '/tmp' },
+      { argv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'], cwd: shellCwd },
       { shutdownSignal: shutdownCtl.signal },
     ));
     setTimeout(() => shutdownCtl.abort(new Error('shutdown')), 50);
@@ -253,7 +264,7 @@ describe('shell handler: abort', () => {
     const ac = new AbortController();
     ac.abort(new Error('cancel'));
     const promise = shellHandler(makeCtx(
-      { cmd: 'sleep 30', cwd: '/tmp' },
+      { argv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'], cwd: shellCwd },
       { signal: ac.signal },
     ));
     await expect(promise).rejects.toThrow(/aborted/);
@@ -282,12 +293,19 @@ describe('shell-audit: computeAuditFilename', () => {
 
 describe('shell-audit: write', () => {
   let tmpDir: string;
+  // #3554-sibling: the audit-dir preload sets GBRAIN_AUDIT_DIR once at
+  // process start; deleting it here (instead of restoring) let every file
+  // AFTER this one in the shard write audit fixtures to the operator's
+  // real ~/.gbrain/audit/ — and failed audit-dir-preload.test.ts whenever
+  // bin-packing placed it later in the shard. Restore the prior value.
+  const priorAuditDir = process.env.GBRAIN_AUDIT_DIR;
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-audit-test-'));
     process.env.GBRAIN_AUDIT_DIR = tmpDir;
   });
   afterAll(() => {
-    delete process.env.GBRAIN_AUDIT_DIR;
+    if (priorAuditDir === undefined) delete process.env.GBRAIN_AUDIT_DIR;
+    else process.env.GBRAIN_AUDIT_DIR = priorAuditDir;
   });
 
   test('GBRAIN_AUDIT_DIR env override resolves to the custom dir', () => {
@@ -297,7 +315,7 @@ describe('shell-audit: write', () => {
     const inner = path.join(tmpDir, 'nested-not-yet-created');
     process.env.GBRAIN_AUDIT_DIR = inner;
     logShellSubmission({
-      caller: 'cli', remote: false, job_id: 42, cwd: '/tmp', cmd_display: 'echo ok',
+      caller: 'cli', remote: false, job_id: 42, cwd: shellCwd, cmd_display: 'echo ok',
     });
     const files = fs.readdirSync(inner);
     expect(files.length).toBe(1);
@@ -310,7 +328,7 @@ describe('shell-audit: write', () => {
   });
   test('argv_display stored as JSON array (Codex #11)', () => {
     logShellSubmission({
-      caller: 'cli', remote: false, job_id: 1, cwd: '/tmp',
+      caller: 'cli', remote: false, job_id: 1, cwd: shellCwd,
       argv_display: ['node', 'script.mjs', '--date', '2026-04-18'],
     });
     const files = fs.readdirSync(tmpDir);
@@ -321,18 +339,19 @@ describe('shell-audit: write', () => {
   });
   test('does NOT log env values', () => {
     logShellSubmission({
-      caller: 'cli', remote: false, job_id: 1, cwd: '/tmp', cmd_display: 'echo ok',
+      caller: 'cli', remote: false, job_id: 1, cwd: shellCwd, cmd_display: 'echo ok',
     });
     const files = fs.readdirSync(tmpDir);
     const content = fs.readFileSync(path.join(tmpDir, files[0]), 'utf8');
     expect(content).not.toContain('env');
   });
   test('write failure (EACCES) is non-blocking', () => {
-    // Point at a read-only target. /dev/null is not a directory.
-    process.env.GBRAIN_AUDIT_DIR = '/dev/null/not-a-dir';
+    const blockerFile = path.join(shellCwd, 'audit-blocker');
+    fs.writeFileSync(blockerFile, 'not a directory');
+    process.env.GBRAIN_AUDIT_DIR = path.join(blockerFile, 'not-a-dir');
     // Should not throw — failures go to stderr.
     expect(() => logShellSubmission({
-      caller: 'cli', remote: false, job_id: 1, cwd: '/tmp',
+      caller: 'cli', remote: false, job_id: 1, cwd: shellCwd,
     })).not.toThrow();
   });
 });
@@ -343,8 +362,8 @@ describe('shell handler: output truncation', () => {
   test('stdout > 64KB is truncated and marker is prepended', async () => {
     // Emit ~100KB of stdout to force truncation
     const res = await shellHandler(makeCtx({
-      cmd: `yes ok | head -c 100000`,
-      cwd: '/tmp',
+      argv: [process.execPath, '-e', "process.stdout.write('ok'.repeat(50000))"],
+      cwd: shellCwd,
     })) as any;
     expect(res.exit_code).toBe(0);
     expect(res.stdout_tail).toMatch(/^\[truncated \d+ bytes\]/);

@@ -28,6 +28,9 @@ import {
   extractTarball,
   DEFAULT_EXTRACT_CAPS,
 } from '../src/core/skillpack/tarball.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 function hasGnuTar(): boolean {
   for (const bin of ['gtar', 'tar']) {
@@ -182,17 +185,13 @@ describe('extractTarball — allowlist + caps', () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  test.skipIf(SKIP_NO_GNU)('rejects a tarball containing a symlink', () => {
+  test.skipIf(SKIP_NO_GNU || !FS_CAPABILITIES.fileSymlink)(
+    'rejects a tarball containing a symlink',
+    () => {
     const src = join(workspace, 'pack-symlink');
     mkdirSync(src, { recursive: true });
     writeFileSync(join(src, 'real-file'), 'real');
-    try {
-      symlinkSync('real-file', join(src, 'evil-link'));
-    } catch {
-      // Symlink creation requires elevated perms on some Windows configs;
-      // skip the assertion if it's unavailable.
-      return;
-    }
+    symlinkSync('real-file', join(src, 'evil-link'), 'file');
 
     const tgz = join(workspace, 'pack-symlink.tgz');
     packTarball({ sourceDir: src, outPath: tgz });
@@ -202,7 +201,8 @@ describe('extractTarball — allowlist + caps', () => {
     } catch (err) {
       expect((err as TarballError).code).toBe('extract_disallowed_entry_type');
     }
-  });
+    },
+  );
 
   test.skipIf(SKIP_NO_GNU)('rejects when maxFiles is exceeded', () => {
     const src = join(workspace, 'pack-many');

@@ -19,34 +19,44 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Build into a temp DIRECTORY rather than a temp FILE: `bun build --compile`
-# appends `.exe` on Windows, so a pre-created extension-less mktemp file is
-# left behind at 0 bytes while the real binary lands next to it. Executing
-# the stub yielded empty output and tripped the "no symbol names (fallback
-# chunks)" branch below — reporting a WASM-embedding regression on every
-# Windows dev box when embedding was in fact working.
-OUT_DIR="$(mktemp -d /tmp/gbrain-wasm-check.XXXXXX)"
-trap 'rm -rf "$OUT_DIR"' EXIT
-OUT_BIN="$OUT_DIR/gbrain-wasm-check"
+# Build into a temp directory rather than a pre-created temp file. Bun appends
+# `.exe` on Windows, so executing the extension-less mktemp path would run an
+# empty stub instead of the produced binary.
+BUILD_DIR="$(mktemp -d /tmp/gbrain-wasm-check.XXXXXX)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+OUT_BIN="$BUILD_DIR/chunker-smoketest"
+
+# Docker Desktop exposes a bind-mounted checkout through two path aliases. On
+# POSIX, compile from a container-local copy so inputs and output stay under
+# /tmp. Native Windows cannot reliably create the node_modules symlink, so it
+# compiles directly from the checkout.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) BUILD_CWD="$REPO_ROOT" ;;
+  *)
+    mkdir -p "$BUILD_DIR/scripts"
+    cp -R "$REPO_ROOT/src" "$BUILD_DIR/src"
+    cp "$REPO_ROOT/scripts/chunker-smoketest.ts" "$BUILD_DIR/scripts/chunker-smoketest.ts"
+    ln -s "$REPO_ROOT/node_modules" "$BUILD_DIR/node_modules"
+    BUILD_CWD="$BUILD_DIR"
+    ;;
+esac
 
 # Build a minimal smoketest binary that imports the chunker. We compile this
 # instead of the full gbrain CLI so the failure mode is laser-focused on
 # chunker + WASM path resolution, not unrelated CLI wiring.
-if ! bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >"$OUT_DIR/build.log" 2>&1; then
+if ! (cd "$BUILD_CWD" && bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >"$BUILD_DIR/build.log" 2>&1); then
   echo "[check-wasm-embedded] FAIL: 'bun build --compile' did not succeed." >&2
   echo "[check-wasm-embedded] Build log:" >&2
-  cat "$OUT_DIR/build.log" >&2
+  cat "$BUILD_DIR/build.log" >&2
   exit 1
 fi
-
-# Resolve whichever name the toolchain actually produced.
 if [ -x "$OUT_BIN.exe" ]; then
   OUT_BIN="$OUT_BIN.exe"
 elif [ ! -x "$OUT_BIN" ]; then
   echo "[check-wasm-embedded] FAIL: build reported success but no executable was produced at" >&2
   echo "[check-wasm-embedded]   $OUT_BIN (or $OUT_BIN.exe)" >&2
   echo "[check-wasm-embedded] Contents of build dir:" >&2
-  ls -la "$OUT_DIR" >&2
+  ls -la "$BUILD_DIR" >&2
   exit 1
 fi
 
