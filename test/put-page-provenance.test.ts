@@ -30,6 +30,8 @@ import { OperationError } from '../src/core/operations.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 
 const putPageOp = operations.find((o) => o.name === 'put_page')!;
+const conditionalOp = operations.find(o => o.name === 'put_page_conditional');
+if (!conditionalOp) throw new Error('put_page_conditional missing');
 
 let engine: PGLiteEngine;
 
@@ -195,6 +197,54 @@ describe('put_page provenance — CV6 spoofing guard (ctx.remote !== false)', ()
     });
     const prov = await readProvenance('wiki/p3a-undefined-trust');
     expect(prov.source_kind).toBe('mcp:put_page');
+  });
+});
+
+describe('put_page_conditional provenance', () => {
+  test('trusted local caller provenance params are honored', async () => {
+    await conditionalOp.handler(makeCtx({ remote: false }), {
+      slug: 'wiki/conditional-local',
+      content: '---\ntype: note\ntitle: Conditional Local\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+      source_uri: 'file:///tmp/conditional.md',
+      ingested_via: 'conditional-cli',
+    });
+    expect(await readProvenance('wiki/conditional-local')).toMatchObject({
+      source_kind: 'capture-cli',
+      source_uri: 'file:///tmp/conditional.md',
+      ingested_via: 'conditional-cli',
+    });
+  });
+
+  test('remote payload provenance is replaced by the conditional server stamp', async () => {
+    await conditionalOp.handler(makeCtx({ remote: true }), {
+      slug: 'wiki/conditional-remote',
+      content: '---\ntype: note\ntitle: Conditional Remote\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+      source_uri: 'spoofed://attacker',
+      ingested_via: 'file-watcher',
+    });
+    expect(await readProvenance('wiki/conditional-remote')).toMatchObject({
+      source_kind: 'mcp:put_page_conditional',
+      source_uri: null,
+      ingested_via: 'mcp:put_page_conditional',
+    });
+  });
+
+  test('undefined trust is fail-closed for conditional provenance', async () => {
+    await conditionalOp.handler(makeCtx({ remote: undefined as unknown as boolean }), {
+      slug: 'wiki/conditional-undefined',
+      content: '---\ntype: note\ntitle: Conditional Undefined\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+    });
+    expect(await readProvenance('wiki/conditional-undefined')).toMatchObject({
+      source_kind: 'mcp:put_page_conditional',
+      source_uri: null,
+      ingested_via: 'mcp:put_page_conditional',
+    });
   });
 });
 
