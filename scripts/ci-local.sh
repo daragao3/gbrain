@@ -46,7 +46,7 @@ for arg in "$@"; do
   esac
 done
 
-gbrain_ci_validate_keep_volumes "$KEEP_VOLUMES"
+gbrain_ci_validate_keep_volumes "$KEEP_VOLUMES" "$COMPOSE_FILE"
 trap 'gbrain_ci_cleanup "$?" "$COMPOSE_FILE" "$KEEP_VOLUMES"' EXIT
 
 if [ "$CLEAN" = "1" ]; then
