@@ -1,5 +1,37 @@
 # TODOS
 
+## v0.42.80.0 follow-ups (auto-link removal safety net)
+
+- [ ] **P2 - decide whether `DIR_PATTERN` should stop being a hardcoded whitelist.**
+  The v0.42.80.0 data-loss defect was only reachable because
+  `src/core/link-extraction.ts`'s `DIR_PATTERN` recognizes a fixed set of top-level
+  slug directories, so a `[[<other-dir>/page]]` wikilink silently produces no link
+  candidate at all unless `link_resolution.global_basename` is on. The release stops
+  that from DELETING anything, but those wikilinks still never become links, so the
+  graph is quietly missing edges the author clearly intended. Options: widen the
+  whitelist, derive it from the source's actual top-level directories, or make
+  `global_basename` the default. Each changes edge counts brain-wide, which is why
+  it was deliberately not bundled into the data-loss fix.
+  Where: `src/core/link-extraction.ts` (`DIR_PATTERN`, `WIKILINK_RE`).
+- [ ] **P2 - frontmatter-derived edges have the same exposure and are NOT protected.**
+  `runAutoLink`'s safety net keys on `unresolvableRefs`, which only covers body
+  wikilinks. An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
+  a slug, so it cannot be matched against `to_slug` and was left out rather than
+  half-matched. A frontmatter field whose value stops resolving therefore still drops
+  its edge. Closing this needs the frontmatter resolver to report the slug it was
+  unable to confirm, not just the name it failed on.
+  Where: `src/core/link-extraction.ts` (`UnresolvedFrontmatterRef`,
+  `extractFrontmatterLinks`), `src/core/operations.ts` (`runAutoLink`).
+- [ ] **P3 - report the Bun Windows binstub shim crash upstream.**
+  `gbrain put <slug> --content <large body>` dies with an access violation
+  (`0xC0000005`, exit `3221225477`) with no output and no write. It is not gbrain
+  code: the installed `gbrain.exe` is Bun's ~15KB Windows binstub shim, and it faults
+  once the forwarded command line passes roughly 16-20KB. The same argument size runs
+  fine through `bun src/cli.ts` directly and through `bun --eval`, so the shim is the
+  faulting component. v0.42.80.0 routes around it with `put --file`; the shim bug
+  itself belongs in a Bun issue with the size threshold and the direct-invocation
+  control included.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns every

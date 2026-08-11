@@ -2,11 +2,17 @@
  * put_page empty-overwrite guard tests.
  *
  * Class guard: empty/whitespace-only content over an existing non-empty page
- * is an input-plumbing failure (e.g. a caller that meant file input — put has
- * no --file flag — so the missing --content fell back to reading an empty
- * non-interactive stdin), not an intentional write. put_page must refuse it
- * loudly unless allow_empty is passed. New-slug creates, same-source scoping,
- * and normal non-empty overwrites are unaffected.
+ * is an input-plumbing failure (e.g. a caller that meant file input, so the
+ * missing --content fell back to reading an empty non-interactive stdin), not
+ * an intentional write. put_page must refuse it loudly unless allow_empty is
+ * passed. New-slug creates, same-source scoping, and normal non-empty
+ * overwrites are unaffected.
+ *
+ * The suggestion text is asserted because it is the remediation an agent acts
+ * on. It routes to `gbrain put SLUG --file PATH` (CLI-only, added after Bun's
+ * Windows binstub shim was found to fault on large --content) rather than the
+ * older `capture --file` workaround, which normalizes the text and returns a
+ * hash that will not match pages.content_hash.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -75,7 +81,7 @@ describe('put_page empty-overwrite guard — rejection', () => {
     const err = await expectRejected({ slug: 'inbox/guarded', content: '' });
     expect(err.code).toBe('invalid_params');
     expect(err.message).toContain('inbox/guarded');
-    expect(err.suggestion).toContain('capture --file PATH --slug SLUG');
+    expect(err.suggestion).toContain('put SLUG --file PATH');
     expect(err.suggestion).toContain('allow_empty');
 
     const page = await engine.getPage('inbox/guarded', { sourceId: 'default' });
