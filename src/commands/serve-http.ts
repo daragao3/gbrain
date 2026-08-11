@@ -258,6 +258,66 @@ export function resolveTrustProxy(env: string | undefined): string | number | bo
   return env;
 }
 
+/** Minimal shape of the per-request MCP scope this module has to dispose. */
+export interface McpDisposable { close(): void | Promise<void> }
+/** Minimal shape of the response object `disposeMcpScopeOnResponseClose` listens on. */
+export interface McpCloseEmitter { on(event: 'close', listener: () => void): unknown }
+
+/**
+ * Tear down the throwaway `Server` + `StreamableHTTPServerTransport` that
+ * POST /mcp builds per request (stateless mode), once the response is done.
+ *
+ * Pre-fix nothing closed either object. `server.connect(transport)` makes the
+ * two mutually reachable, so every single request retained a Server (its
+ * request/notification handler maps) plus a transport (stream bookkeeping) for
+ * the lifetime of the process. On the shared long-lived `gbrain serve --http`
+ * deployment that grows monotonically until the operator's leak guard kills the
+ * process — and a process killed mid-request silently drops in-flight SSE
+ * responses. Because the SSE headers are flushed BEFORE the tool handler runs,
+ * the client sees HTTP 200 with a zero-length body even though the write it
+ * requested already committed. Large `put_page` calls are the ones that get
+ * caught, purely because they stay in flight the longest.
+ *
+ * `close` (not `finish`) is the right signal: it fires for completed responses
+ * AND for client aborts, so an abandoned request is disposed too. Disposal is
+ * latched so a second `close` can't double-close, and each close is isolated so
+ * a throwing transport can't skip the server (or vice versa).
+ *
+ * Returns the dispose function so callers/tests can invoke it directly.
+ */
+export function disposeMcpScopeOnResponseClose(
+  res: McpCloseEmitter,
+  server: McpDisposable,
+  transport: McpDisposable,
+  onError: (e: unknown) => void = e =>
+    console.error('MCP scope dispose error:', e instanceof Error ? e.message : e),
+): () => void {
+  // Both SDK close() methods are async (Protocol.close / transport.close), so a
+  // bare try/catch would let a rejection escape as an unhandled rejection —
+  // which under Bun can take the whole server down, i.e. cause the very
+  // mid-request death this function exists to prevent. Swallow both shapes.
+  const closeQuietly = (c: McpDisposable) => {
+    try {
+      const maybePromise = c.close();
+      if (maybePromise && typeof (maybePromise as Promise<void>).then === 'function') {
+        (maybePromise as Promise<void>).then(undefined, onError);
+      }
+    } catch (e) {
+      onError(e);
+    }
+  };
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    // Transport first, then server — the SDK's documented stateless teardown.
+    closeQuietly(transport);
+    closeQuietly(server);
+  };
+  res.on('close', dispose);
+  return dispose;
+}
+
 /**
  * Parse `GBRAIN_HTTP_CORS_ORIGIN` into a Set of allowed origins for OAuth
  * endpoints. Mirrors `src/mcp/http-transport.ts:parseCorsAllowlist`. Single
@@ -1991,6 +2051,17 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     // gets parseable JSON back.
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined as any });
+      // Every POST /mcp builds a throwaway Server + transport (stateless mode).
+      // Nothing used to close either one, so each request leaked the pair — the
+      // Server's request/notification handler maps, the transport's stream
+      // bookkeeping, and the `server.connect(transport)` cross-references that
+      // keep both reachable from each other. Under a long-lived shared server
+      // that grows without bound until the host's leak guard kills the process,
+      // and a process killed mid-request drops in-flight SSE responses whose
+      // headers were already flushed — the client reads HTTP 200 with a
+      // zero-length body while the DB write it asked for has already committed.
+      // Disposing on response close is the SDK's documented stateless pattern.
+      disposeMcpScopeOnResponseClose(res, server, transport);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (e) {
