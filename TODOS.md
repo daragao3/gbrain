@@ -1,5 +1,43 @@
 # TODOS
 
+## v0.42.81.0 follow-ups (PGLite snapshot embedding width)
+
+- [ ] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
+  ABSENT, never when it is STALE.** The guard is
+  `if [ ! -f test/fixtures/pglite-snapshot.tar ] || [ ! -f ...version ]; then build; else
+  "engine will validate hash at load time"; fi`. Hash validation at load time is the right
+  behavior for the ENGINE, which degrades to a normal cold init on a mismatch. It is not
+  enough for `test/pglite-snapshot-file-seeding.serial.test.ts`, which THROWS
+  `snapshot fixture stale; run bun run build:pglite-snapshot before this test` at module
+  scope rather than degrading. So a machine holding a cached fixture from before any
+  schema, migration, or embedding-width change fails that test on `bun run ci:local` until
+  the fixture is rebuilt by hand. v0.42.81.0 makes this more likely to fire, since folding
+  the width into the hash invalidates every previously built fixture. Fix: compare the
+  stored `.version` against `computeSnapshotSchemaHash(...)` in the `else` branch and
+  rebuild on mismatch, so a stale fixture is refreshed rather than reported as a test
+  failure. Where: `scripts/ci-local.sh` (the Tier 3 block, near the
+  `GBRAIN_PGLITE_SNAPSHOT` export).
+- [ ] **P3 — four `check-test-isolation` allowlist entries may now be removable.**
+  v0.42.81.0 replaced the bare module-level `delete process.env.GBRAIN_PGLITE_SNAPSHOT`
+  in `test/bootstrap.test.ts`, `test/destructive-guard.test.ts`,
+  `test/pages-soft-delete.test.ts`, and `test/schema-bootstrap-coverage.test.ts` with
+  `useColdPglite()`, which saves and restores around a single file. Those four files no
+  longer mutate `process.env` directly, which is the R1 violation their
+  `scripts/check-test-isolation.allowlist` entries were excusing, and the allowlist header
+  says the list MUST shrink as files are fixed. They were NOT removed here because the
+  allowlist is flat, one line per file with no per-rule granularity, so an entry also
+  exempts the file from the PGLite rules (engine created outside `beforeAll`, missing
+  `afterAll{disconnect}`), which these files plausibly still trip. Removing an entry
+  therefore needs a per-file guard run, not a blind delete. Do it as its own sweep:
+  drop one entry, run `bash scripts/check-test-isolation.sh`, keep it out only if clean.
+- [ ] **P3 — `scripts/check-test-isolation.sh` only scans `*.test.ts`.** Its file list is
+  `find "$TARGET_DIR" -name '*.test.ts'`, so shared helpers under `test/helpers/` are never
+  linted. `test/helpers/cold-pglite.ts` mutates `process.env` (correctly, with save and
+  restore), but the guard is structurally unable to say so, and a future helper that
+  mutates env WITHOUT restoring would pass silently while polluting every file that imports
+  it. Consider extending the scan to `test/helpers/*.ts` with a rule set that accepts the
+  bracketed save/restore shape.
+
 ## v0.42.80.0 follow-ups (auto-link removal safety net)
 
 - [ ] **P2 - decide whether `DIR_PATTERN` should stop being a hardcoded whitelist.**
