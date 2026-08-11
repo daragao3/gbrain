@@ -35,7 +35,7 @@ import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 import { snapshotEligible, resolveSnapshotPath } from './pglite-snapshot.ts';
 import { getFtsLanguage } from './fts-language.ts';
 import type {
-  Page, PageInput, PageFilters, PageType,
+  Page, PageInput, PageFilters, PageType, ConditionalPageWriteResult,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath,
@@ -78,6 +78,43 @@ import {
 import { hasCJK, escapeLikePattern } from './cjk.ts';
 
 type PGLiteDB = PGlite;
+
+interface NormalizedPageWrite {
+  hash: string;
+  frontmatter: Record<string, unknown>;
+  pageKind: NonNullable<PageInput['page_kind']>;
+  effectiveDate: string | null;
+  effectiveDateSource: NonNullable<PageInput['effective_date_source']> | null;
+  importFilename: string | null;
+  chunkerVersion: number | null;
+  sourcePath: string | null;
+  sourceKind: string | null;
+  sourceUri: string | null;
+  ingestedVia: string | null;
+  ingestedAt: string | null;
+}
+
+function normalizePageWrite(page: PageInput): NormalizedPageWrite {
+  const sourceKind = page.source_kind ?? null;
+  const sourceUri = page.source_uri ?? null;
+  const ingestedVia = page.ingested_via ?? null;
+  return {
+    hash: page.content_hash || contentHash(page),
+    frontmatter: page.frontmatter || {},
+    pageKind: page.page_kind || 'markdown',
+    effectiveDate: page.effective_date instanceof Date
+      ? page.effective_date.toISOString()
+      : (page.effective_date ?? null),
+    effectiveDateSource: page.effective_date_source ?? null,
+    importFilename: page.import_filename ?? null,
+    chunkerVersion: page.chunker_version ?? null,
+    sourcePath: page.source_path ?? null,
+    sourceKind,
+    sourceUri,
+    ingestedVia,
+    ingestedAt: (sourceKind || sourceUri || ingestedVia) ? new Date().toISOString() : null,
+  };
+}
 
 // Tier 3 snapshot fast-restore. Reads a tar dump produced by
 // `bun run scripts/build-pglite-snapshot.ts`. Snapshot is matched against
@@ -531,6 +568,8 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='pages') AS pages_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='revision') AS pages_revision_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='deleted_at') AS deleted_at_exists,
@@ -615,6 +654,7 @@ export class PGLiteEngine implements BrainEngine {
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
+      pages_revision_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
       links_exists: boolean;
@@ -659,6 +699,7 @@ export class PGLiteEngine implements BrainEngine {
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
+    const needsPagesRevision = probe.pages_exists && !probe.pages_revision_exists;
     const needsLinksBootstrap = probe.links_exists
       && (!probe.link_source_exists || !probe.origin_page_id_exists);
     const needsChunksBootstrap = probe.chunks_exists
@@ -736,7 +777,8 @@ export class PGLiteEngine implements BrainEngine {
     const needsTimelineEventPageId = probe.timeline_entries_exists && !probe.timeline_event_page_id_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+    if (!needsPagesBootstrap && !needsPagesRevision
+        && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsChunksEmbeddingImage
         && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsPagesRecency && !needsIngestLogSourceId
@@ -775,6 +817,13 @@ export class PGLiteEngine implements BrainEngine {
           ON CONFLICT (id) DO NOTHING;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
           NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsPagesRevision) {
+      await this.db.exec(`
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
       `);
     }
 
@@ -1045,7 +1094,7 @@ export class PGLiteEngine implements BrainEngine {
       where.push('deleted_at IS NULL');
     }
     const { rows } = await this.db.query(
-      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
               effective_date, effective_date_source,
               source_kind, source_uri, ingested_via, ingested_at,
               contextual_retrieval_mode
@@ -1079,8 +1128,12 @@ export class PGLiteEngine implements BrainEngine {
 
   async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
     slug = validateSlug(slug);
-    const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
+    const normalized = normalizePageWrite(page);
+    const {
+      hash, frontmatter, pageKind, effectiveDate, effectiveDateSource,
+      importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri,
+      ingestedVia, ingestedAt,
+    } = normalized;
     const sourceId = opts?.sourceId ?? 'default';
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
@@ -1088,26 +1141,8 @@ export class PGLiteEngine implements BrainEngine {
     // let the schema DEFAULT 'default' apply, fabricating duplicate slugs that
     // later made bare-slug subqueries return multiple rows.
     // ON CONFLICT target is (source_id, slug); global UNIQUE(slug) dropped in v17.
-    const pageKind = page.page_kind || 'markdown';
-    // v0.29.1 — additive opt-in columns. COALESCE(EXCLUDED.x, pages.x)
-    // preserves existing values when caller omits them (auto-link path,
-    // code reindex, etc.). Mirrors postgres-engine.ts.
-    const effectiveDate = page.effective_date instanceof Date
-      ? page.effective_date.toISOString()
-      : (page.effective_date ?? null);
-    const effectiveDateSource = page.effective_date_source ?? null;
-    const importFilename = page.import_filename ?? null;
-    // v0.32.7 CJK wave: chunker_version + source_path columns.
-    const chunkerVersion = page.chunker_version ?? null;
-    const sourcePath = page.source_path ?? null;
-    // v0.39.3.0 provenance write-through (WARN-8 + CV12). Mirrors postgres-engine.ts.
-    // Server stamps `ingested_at = now()` ONLY when any provenance field is being
-    // written this call. COALESCE-preserve UPDATE keeps the prior first-write
-    // timestamp intact so the audit trail survives routine edits.
-    const sourceKind = page.source_kind ?? null;
-    const sourceUri = page.source_uri ?? null;
-    const ingestedVia = page.ingested_via ?? null;
-    const ingestedAt = (sourceKind || sourceUri || ingestedVia) ? new Date().toISOString() : null;
+    // Normalization is shared with createPageOnly and compareAndSwapPage so
+    // all page-write primitives retain the legacy defaults/hash/provenance rules.
     const { rows } = await this.db.query(
       `INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), $10::timestamptz, $11, $12, COALESCE($13, ${MARKDOWN_CHUNKER_VERSION}), $14, $15, $16, $17, $18::timestamptz)
@@ -1130,7 +1165,7 @@ export class PGLiteEngine implements BrainEngine {
          source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
          ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
          ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
       [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     // PGLite can return zero rows from INSERT ... ON CONFLICT DO UPDATE ...
@@ -1144,6 +1179,133 @@ export class PGLiteEngine implements BrainEngine {
       throw new Error(`putPage: RETURNING produced no row for ${sourceId}/${slug}`);
     }
     return rowToPage(rows[0] as Record<string, unknown>);
+  }
+
+  async createPageOnly(
+    slug: string,
+    page: PageInput,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult> {
+    slug = validateSlug(slug);
+    const normalized = normalizePageWrite(page);
+    const { rows } = await this.db.query(
+      `INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), $10::timestamptz, $11, $12, COALESCE($13, ${MARKDOWN_CHUNKER_VERSION}), $14, $15, $16, $17, $18::timestamptz)
+       ON CONFLICT (source_id, slug) DO NOTHING
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+      [
+        opts.sourceId, slug, page.type, normalized.pageKind, page.title,
+        page.compiled_truth, page.timeline || '', JSON.stringify(normalized.frontmatter),
+        normalized.hash, normalized.effectiveDate, normalized.effectiveDateSource,
+        normalized.importFilename, normalized.chunkerVersion, normalized.sourcePath,
+        normalized.sourceKind, normalized.sourceUri, normalized.ingestedVia,
+        normalized.ingestedAt,
+      ],
+    );
+    if (rows.length > 0) {
+      return { status: 'created', page: rowToPage(rows[0] as Record<string, unknown>) };
+    }
+
+    const diagnostic = await this.db.query(
+      `SELECT revision, deleted_at
+       FROM pages
+       WHERE source_id = $1 AND slug = $2
+       LIMIT 1`,
+      [opts.sourceId, slug],
+    );
+    if (diagnostic.rows.length === 0) {
+      return { status: 'conflict', slug, reason: 'already_exists' };
+    }
+    const row = diagnostic.rows[0] as { revision: number | string; deleted_at: Date | string | null };
+    return {
+      status: 'conflict',
+      slug,
+      reason: row.deleted_at == null ? 'already_exists' : 'soft_deleted',
+      current_revision: Number(row.revision),
+    };
+  }
+
+  async lockPageForConditionalWrite(
+    slug: string,
+    opts: { sourceId: string },
+  ): Promise<Page | null> {
+    slug = validateSlug(slug);
+    const { rows } = await this.db.query(
+      `SELECT id, source_id, slug, type, title, compiled_truth, timeline,
+              frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
+              source_kind, source_uri, ingested_via, ingested_at
+       FROM pages
+       WHERE source_id = $1 AND slug = $2
+       FOR UPDATE`,
+      [opts.sourceId, slug],
+    );
+    return rows.length === 0 ? null : rowToPage(rows[0] as Record<string, unknown>);
+  }
+
+  async compareAndSwapPage(
+    slug: string,
+    page: PageInput,
+    expectedRevision: number,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult> {
+    slug = validateSlug(slug);
+    const normalized = normalizePageWrite(page);
+    const { rows } = await this.db.query(
+      `UPDATE pages
+       SET type = $3,
+           page_kind = $4,
+           title = $5,
+           compiled_truth = $6,
+           timeline = $7,
+           frontmatter = $8::jsonb,
+           content_hash = $9,
+           updated_at = now(),
+           effective_date = COALESCE($10::timestamptz, pages.effective_date),
+           effective_date_source = COALESCE($11, pages.effective_date_source),
+           import_filename = COALESCE($12, pages.import_filename),
+           chunker_version = COALESCE($13, pages.chunker_version),
+           source_path = COALESCE($14, pages.source_path),
+           source_kind = COALESCE($15, pages.source_kind),
+           source_uri = COALESCE($16, pages.source_uri),
+           ingested_via = COALESCE($17, pages.ingested_via),
+           ingested_at = COALESCE($18::timestamptz, pages.ingested_at)
+       WHERE source_id = $1
+         AND slug = $2
+         AND deleted_at IS NULL
+         AND revision = $19
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+      [
+        opts.sourceId, slug, page.type, normalized.pageKind, page.title,
+        page.compiled_truth, page.timeline || '', JSON.stringify(normalized.frontmatter),
+        normalized.hash, normalized.effectiveDate, normalized.effectiveDateSource,
+        normalized.importFilename, normalized.chunkerVersion, normalized.sourcePath,
+        normalized.sourceKind, normalized.sourceUri, normalized.ingestedVia,
+        normalized.ingestedAt, expectedRevision,
+      ],
+    );
+    if (rows.length > 0) {
+      return { status: 'updated', page: rowToPage(rows[0] as Record<string, unknown>) };
+    }
+
+    const diagnostic = await this.db.query(
+      `SELECT revision, deleted_at
+       FROM pages
+       WHERE source_id = $1 AND slug = $2
+       LIMIT 1`,
+      [opts.sourceId, slug],
+    );
+    if (diagnostic.rows.length === 0) {
+      return { status: 'conflict', slug, reason: 'not_found', expected_revision: expectedRevision };
+    }
+    const row = diagnostic.rows[0] as { revision: number | string; deleted_at: Date | string | null };
+    const currentRevision = Number(row.revision);
+    return {
+      status: 'conflict',
+      slug,
+      reason: row.deleted_at == null ? 'revision_mismatch' : 'soft_deleted',
+      expected_revision: expectedRevision,
+      current_revision: currentRevision,
+    };
   }
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {

@@ -40,7 +40,7 @@ async function truncateAll() {
   await engine.setConfig('auto_timeline', 'true');
 }
 
-function makeContext(): OperationContext {
+function makeContext(overrides: Partial<OperationContext> = {}): OperationContext {
   return {
     engine,
     config: { engine: 'pglite' } as any,
@@ -50,6 +50,7 @@ function makeContext(): OperationContext {
     // After F7b made `remote` required this needs to be explicit.
     remote: false,
     sourceId: 'default',
+    ...overrides,
   };
 }
 
@@ -216,6 +217,34 @@ Dana is a founder.
       return d;
     }).sort();
     expect(dates).toEqual(['2026-03-15', '2026-04-02']);
+  });
+
+  test('auto-timeline rows land on the exact non-default write source', async () => {
+    const slug = 'people/source-timeline';
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x')");
+    await engine.putPage(slug, {
+      type: 'person', title: 'Default Decoy', compiled_truth: '', timeline: '', frontmatter: {},
+    });
+
+    const putOp = operationsByName['put_page'];
+    const result = await putOp.handler(makeContext({ sourceId: 'team-x' }), {
+      slug,
+      content: `---
+type: person
+title: Team Timeline
+---
+
+## Timeline
+
+- **2026-05-01** | Shipped team milestone
+`,
+    });
+
+    expect((result as any).auto_timeline).toMatchObject({ created: 1 });
+    expect(await engine.getTimeline(slug, { sourceId: 'default' })).toHaveLength(0);
+    expect(await engine.getTimeline(slug, { sourceId: 'team-x' })).toEqual([
+      expect.objectContaining({ summary: 'Shipped team milestone' }),
+    ]);
   });
 
   test('auto-timeline is idempotent: re-write does not duplicate entries', async () => {

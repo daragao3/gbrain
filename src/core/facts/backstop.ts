@@ -51,11 +51,18 @@ export interface FactsBackstopCtx {
    * Provenance source string written into facts.source. Stable values:
    *   - 'sync:import'        — git sync post-import hook
    *   - 'mcp:put_page'       — MCP put_page backstop
+   *   - 'mcp:put_page_conditional' — MCP conditional put_page backstop
    *   - 'mcp:extract_facts'  — explicit MCP op (inline mode)
    *   - 'file_upload'        — file_upload import path
    *   - 'code_import'        — code import path
    */
-  source: 'sync:import' | 'mcp:put_page' | 'mcp:extract_facts' | 'file_upload' | 'code_import';
+  source:
+    | 'sync:import'
+    | 'mcp:put_page'
+    | 'mcp:put_page_conditional'
+    | 'mcp:extract_facts'
+    | 'file_upload'
+    | 'code_import';
   /** Execution mode — D8. Default 'queue' (fire-and-forget). */
   mode?: 'queue' | 'inline';
   /** Notability filter — D4. Default 'all'; sync uses 'high-only'. */
