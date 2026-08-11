@@ -84,6 +84,24 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   URL paths, and Git-relative paths retain `/` as their platform-independent separator.
   `scripts/check-path-sep-boundary.sh` guards this invariant; use `path-sep-guard-ok` only
   for a documented logical `/` contract.
+- **`saveConfig` writes the MACHINE-GLOBAL config; `GBRAIN_HOME` sandboxing is ADVISORY.**
+  `configDir()` reads `GBRAIN_HOME` fresh at call time and falls back to `homedir()`, so
+  honoring the sandbox is the caller's job and any caller that forgets silently rewrites the
+  user's real `~/.gbrain/config.json`. The damage is a SILENT FALSE NEGATIVE, not an error:
+  repointed at an empty brain, every later read returns `page_not_found` / "No pages found"
+  with nothing logged — indistinguishable from a deleted page, so an agent can conclude a
+  page is gone and recreate it, forking the subject, while the MCP server keeps serving the
+  real brain and nothing else looks wrong. The guard is therefore FAIL-CLOSED at the choke
+  point (`unsafeGlobalConfigWrite` in `src/core/config.ts`, called at the top of
+  `saveConfig`), not at any individual caller — the writer behind the observed incidents was
+  never findable by repo-wide search. It refuses exactly one shape: no `GBRAIN_HOME` plus a
+  `database_path` inside `tmpdir()` (containment via `isPathInside`, per the bullet above —
+  never `startsWith`). Sandboxed writes, durable PGLite brains and postgres configs are
+  untouched, so a deliberate migration is never reverted. A refusal appends pid/argv/cwd/stack
+  to `<audit>/config-repoint-refused.jsonl` so the offender names itself from inside its own
+  process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B lever that reproduces
+  pre-fix behavior. New code that writes config goes THROUGH `saveConfig` — never
+  `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows

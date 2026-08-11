@@ -15,7 +15,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, existsSync, readdirSync, statSync, rmSync } from 'fs';
+import { mkdtempSync, existsSync, readdirSync, readFileSync, statSync, rmSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join, resolve, sep } from 'path';
 
@@ -180,6 +180,50 @@ describe('GBRAIN_HOME write-side isolation', () => {
           expect(existsSync(join(fakeHome, '.gbrain', 'config.json'))).toBe(false);
         });
       } finally {
+        rmSync(join(target, '..'), { recursive: true, force: true });
+      }
+    });
+
+    test('a refusal appends a JSONL row naming the offending process', async () => {
+      // The refusal alone tells you SOMETHING tried to repoint the brain; the
+      // audit row is what tells you WHAT did. That is the whole point of the
+      // forensic path — the caller behind the observed incidents was an
+      // untracked script that a repo-wide search could not find, so the stack
+      // recorded from inside its own process is the only thing that names it.
+      const { saveConfig } = await import('../src/core/config.ts');
+      const auditDir = fresh();
+      const target = join(mkdtempSync(join(tmpdir(), 'gbrain-guard-target-')), 'brain.pglite');
+      const prevAudit = process.env.GBRAIN_AUDIT_DIR;
+      // Pin the audit dir explicitly: the shared bootstrap sets it
+      // process-globally, so asserting the default location would be reading
+      // another test's scratch dir.
+      process.env.GBRAIN_AUDIT_DIR = auditDir;
+      try {
+        withFakeHome(() => {
+          expect(() => saveConfig({ engine: 'pglite', database_path: target })).toThrow();
+        });
+
+        const rowsPath = join(auditDir, 'config-repoint-refused.jsonl');
+        expect(existsSync(rowsPath)).toBe(true);
+        const lines = readFileSync(rowsPath, 'utf8').trim().split('\n').filter(Boolean);
+        expect(lines.length).toBe(1);
+
+        const row = JSON.parse(lines[0]!);
+        expect(row.event).toBe('refused_global_config_repoint');
+        expect(row.pid).toBe(process.pid);
+        expect(row.database_path).toBe(target);
+        expect(row.engine).toBe('pglite');
+        expect(row.cwd).toBe(process.cwd());
+        expect(Array.isArray(row.argv)).toBe(true);
+        // The stack is the actual answer to "which code did this?".
+        expect(typeof row.stack).toBe('string');
+        expect(row.reason).toMatch(/temporary directory/i);
+        // Timestamp must be a real ISO instant, not a placeholder.
+        expect(Number.isNaN(Date.parse(row.ts))).toBe(false);
+      } finally {
+        if (prevAudit !== undefined) process.env.GBRAIN_AUDIT_DIR = prevAudit;
+        else delete process.env.GBRAIN_AUDIT_DIR;
+        rmSync(auditDir, { recursive: true, force: true });
         rmSync(join(target, '..'), { recursive: true, force: true });
       }
     });

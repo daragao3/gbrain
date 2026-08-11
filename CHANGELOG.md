@@ -2,6 +2,69 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.83.0] - 2026-08-11
+
+**GBrain now refuses to repoint your brain at a temporary folder, instead of quietly leaving you reading an empty one.**
+
+When something migrates your brain to a new location, it writes that location into your settings file. That file is shared by everything on your machine, so whatever it says last is where every later command looks. A script that migrates into a scratch folder is supposed to keep that private to itself, but nothing forces it to. If it forgets, your real settings get rewritten to point at the scratch folder.
+
+That folder is empty, and your operating system deletes it later anyway. From then on `gbrain get`, `gbrain list` and `gbrain timeline` all answer "not found" against the empty folder. Nothing fails, nothing warns, and your real brain is sitting there untouched the whole time. The MCP server keeps serving the real one, so nothing else looks wrong either.
+
+That is the worst shape a bug can take, because "not found" is also what a deleted page looks like. An agent that trusts the answer can decide a page is gone and write a fresh one, and now the same subject exists twice with half the history in each.
+
+GBrain now checks for exactly that shape before saving your settings, and refuses it.
+
+### How to use it
+
+Nothing to configure. Upgrade, and the write is blocked with a message naming the settings file and the folder it was about to point at.
+
+If your settings were already repointed before you upgraded, check where your brain currently lives:
+
+```bash
+gbrain config get database_path
+```
+
+If that prints a path inside your temp folder, your brain is not gone, only unreachable. Point it back:
+
+```bash
+gbrain config set database_path /path/to/your/real/brain
+```
+
+Migrating into a temporary folder on purpose is still allowed, you just have to say so:
+
+```bash
+GBRAIN_ALLOW_TEMP_BRAIN=1 gbrain migrate --to pglite --path "$TMPDIR/scratch"
+```
+
+If you are writing a test or a throwaway repro, prefer `GBRAIN_HOME` instead. It gives the process its own settings file, so it cannot reach the shared one at all.
+
+### Things to watch
+
+Only one shape is refused: no `GBRAIN_HOME` set, and the new brain path lands inside the operating system temp folder. Migrating your real brain to a PGLite file in a durable location is a normal thing to do and is untouched, as are Postgres settings and anything running under `GBRAIN_HOME`. A deliberate migration is never undone.
+
+When a write is refused, GBrain appends one line to `<config-dir>/audit/config-repoint-refused.jsonl` recording the process id, command line, working directory and call stack. That names the program responsible, which matters because the caller is often a script that is not in any repository you can search.
+
+### Itemized changes
+
+- `src/core/config.ts`: added `unsafeGlobalConfigWrite()`, which returns a reason string when a save would repoint the machine-global config at a path inside `tmpdir()` with no `GBRAIN_HOME` set, and `null` otherwise. `saveConfig()` now calls it first and throws on a non-null result. Containment uses `isPathInside()` from `path-confine.ts` per the path-boundary invariant, never a `startsWith` prefix test.
+- `src/core/config.ts`: added `auditUnsafeConfigWrite()`, a best-effort JSONL appender that records pid, ppid, argv, cwd, engine, target path and stack to `<config-dir>/audit/config-repoint-refused.jsonl`. Honors `GBRAIN_AUDIT_DIR`. Never throws, so it cannot turn a refusal into a different failure.
+- `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out of the check.
+- `test/gbrain-home-isolation.test.ts`: covers the refusal, the audit row, and each case that must stay allowed (`GBRAIN_HOME` set, durable PGLite path, Postgres config, opt-out set).
+- `CLAUDE.md`: recorded the invariant that `saveConfig` writes the machine-global config and `GBRAIN_HOME` sandboxing is advisory, so the guard belongs at the choke point rather than at each caller.
+
+## To take advantage of v0.42.83.0
+
+Confirm your brain is not currently pointed at a temporary folder. Run:
+
+```bash
+gbrain config get database_path
+gbrain list --limit 3
+```
+
+If the path is inside your temp folder, or `gbrain list` reports no pages while you know the brain has some, your settings were repointed at some earlier moment. The data is still in your real brain. Set `database_path` back to it with `gbrain config set database_path <path>`, then re-run `gbrain list` to confirm your pages are back.
+
+If both commands look right, there is nothing to do. The guard only acts on future writes.
+
 ## [0.42.81.0] - 2026-08-11
 
 **GBrain now warns you when a folder name is missing from your settings, instead of letting it quietly cost you links.**
