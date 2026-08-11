@@ -21,7 +21,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { LATEST_VERSION } from '../src/core/migrate.ts';
+import { hasPendingMigrations, LATEST_VERSION } from '../src/core/migrate.ts';
 
 // Tier 3 opt-out: this file tests the cold init / bootstrap path explicitly.
 // If GBRAIN_PGLITE_SNAPSHOT is set (ci:local sets it for unit shards), every
@@ -225,7 +225,7 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
     }
   }, 30000);
 
-  test('pre-v125 brain installs page revision state idempotently', async () => {
+  test('brain stamped at the collided v125 still applies page revision state', async () => {
     const engine = new PGLiteEngine();
     await engine.connect({});
     try {
@@ -236,8 +236,9 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
         DROP FUNCTION IF EXISTS bump_page_revision_fn;
         ALTER TABLE pages DROP COLUMN IF EXISTS revision;
       `);
-      await engine.setConfig('version', '124');
+      await engine.setConfig('version', '125');
 
+      expect(await hasPendingMigrations(engine)).toBe(true);
       await engine.initSchema();
       await engine.initSchema();
 

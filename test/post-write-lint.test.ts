@@ -13,10 +13,11 @@ import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import type { BrainEngine } from '../src/core/engine.ts';
 import { runPostWriteLint, isLintOnPutPageEnabled } from '../src/core/output/post-write.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
-let engine: BrainEngine;
+let engine: PGLiteEngine;
 let dbDir: string;
 
 beforeAll(async () => {
@@ -32,12 +33,11 @@ afterAll(async () => {
 });
 
 async function reset(): Promise<void> {
-  await engine.executeRaw('TRUNCATE pages, links, content_chunks, timeline_entries, tags, raw_data, page_versions, ingest_log RESTART IDENTITY CASCADE');
-  await engine.executeRaw(`DELETE FROM config WHERE key = 'writer.lint_on_put_page'`);
+  await resetPgliteState(engine);
 }
 
 describe('isLintOnPutPageEnabled', () => {
-  beforeEach(async () => { await reset(); });
+  beforeEach(async () => { await reset(); }, 120_000);
 
   test('defaults false when config unset', async () => {
     expect(await isLintOnPutPageEnabled(engine)).toBe(false);
@@ -65,7 +65,7 @@ describe('isLintOnPutPageEnabled', () => {
 });
 
 describe('runPostWriteLint', () => {
-  beforeEach(async () => { await reset(); });
+  beforeEach(async () => { await reset(); }, 120_000);
 
   test('flag disabled → returns ran=false, no findings', async () => {
     await engine.putPage('people/x', {
@@ -126,5 +126,81 @@ describe('runPostWriteLint', () => {
     const r = await runPostWriteLint(engine, 'people/clean', { noLog: true });
     expect(r.ran).toBe(true);
     expect(r.findings).toEqual([]);
+  });
+
+  test('nested link target lookup uses the exact non-default source', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x') ON CONFLICT (id) DO NOTHING");
+    await engine.putPage('people/target', {
+      type: 'person', title: 'Default Decoy', compiled_truth: '', frontmatter: {},
+    });
+    await engine.putPage('notes/source-link', {
+      type: 'note', title: 'Scoped Link',
+      compiled_truth: 'See [Target](people/target.md).',
+      frontmatter: {},
+    }, { sourceId: 'team-x' });
+
+    const r = await runPostWriteLint(engine, 'notes/source-link', {
+      force: true, noLog: true, sourceId: 'team-x',
+    });
+
+    expect(r.findings).toContainEqual(expect.objectContaining({
+      validator: 'link',
+      severity: 'error',
+      message: expect.stringContaining('Dangling wikilink to people/target'),
+    }));
+  });
+
+  test('nested backlink reads use the exact non-default source', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x') ON CONFLICT (id) DO NOTHING");
+    for (const sourceId of ['default', 'team-x']) {
+      await engine.putPage('notes/source-backlink', {
+        type: 'note', title: `Origin ${sourceId}`, compiled_truth: '', frontmatter: {},
+      }, { sourceId });
+      await engine.putPage('people/target', {
+        type: 'person', title: `Target ${sourceId}`, compiled_truth: '', frontmatter: {},
+      }, { sourceId });
+    }
+    await engine.addLink('notes/source-backlink', 'people/target', '', '', 'manual', undefined, undefined, {
+      fromSourceId: 'team-x', toSourceId: 'team-x', originSourceId: 'team-x',
+    });
+    await engine.addLink('people/target', 'notes/source-backlink', '', '', 'manual', undefined, undefined, {
+      fromSourceId: 'default', toSourceId: 'default', originSourceId: 'default',
+    });
+
+    const r = await runPostWriteLint(engine, 'notes/source-backlink', {
+      force: true, noLog: true, sourceId: 'team-x',
+    });
+
+    expect(r.findings).toContainEqual(expect.objectContaining({
+      validator: 'back-link',
+      severity: 'warning',
+      message: expect.stringContaining('people/target has no back-link'),
+    }));
+  });
+
+  test('durable writer lint log keeps the exact non-default source', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x') ON CONFLICT (id) DO NOTHING");
+    await engine.putPage('people/source-log', {
+      type: 'person', title: 'Default Decoy',
+      compiled_truth: '## See Also\n- [Source: decoy, 2026-04-18](https://example.com/decoy)',
+      frontmatter: {},
+    });
+    await engine.putPage('people/source-log', {
+      type: 'person', title: 'Scoped Log',
+      compiled_truth: 'Scoped Log raised $5M without a citation.',
+      frontmatter: {},
+    }, { sourceId: 'team-x' });
+
+    const r = await withEnv({ GBRAIN_HOME: dbDir }, () =>
+      runPostWriteLint(engine, 'people/source-log', {
+        force: true, sourceId: 'team-x',
+      }),
+    );
+    const lintRows = (await engine.getIngestLog({ limit: 10 }))
+      .filter(row => row.source_type === 'writer_lint' && row.source_ref === 'people/source-log');
+
+    expect(r.findings.length).toBeGreaterThan(0);
+    expect(lintRows).toHaveLength(1);
+    expect(lintRows[0].source_id).toBe('team-x');
   });
 });

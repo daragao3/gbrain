@@ -84,7 +84,7 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     expect(srcCheck).toHaveLength(1);
   });
 
-  test('pre-v125 brain installs page revision state idempotently', async () => {
+  test('brain stamped at v125 installs page revision state idempotently', async () => {
     const conn = (engine as any).sql;
     await engine.initSchema();
     try {
@@ -93,7 +93,7 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
         DROP FUNCTION IF EXISTS bump_page_revision_fn;
         ALTER TABLE pages DROP COLUMN IF EXISTS revision;
       `);
-      await engine.setConfig('version', '124');
+      await engine.setConfig('version', '125');
 
       await engine.initSchema();
       await engine.initSchema();
@@ -110,7 +110,7 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     } finally {
       // Restore the latest schema even if an assertion fails so later E2E files
       // do not inherit the down-mutated pages table.
-      await engine.setConfig('version', '124');
+      await engine.setConfig('version', '125');
       await engine.initSchema();
     }
   });

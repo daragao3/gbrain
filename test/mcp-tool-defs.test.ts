@@ -81,6 +81,16 @@ describe('buildToolDefs', () => {
     expect(buildToolDefs([])).toEqual([]);
   });
 
+  test('put_page_conditional schema is generated from the canonical registry', () => {
+    const def = buildToolDefs(operations).find(d => d.name === 'put_page_conditional');
+    expect(def).toBeDefined();
+    expect(def!.inputSchema.required).toEqual(['slug', 'content', 'mode']);
+    expect((def!.inputSchema.properties.mode as any).enum)
+      .toEqual(['create_only', 'compare_and_swap']);
+    expect((def!.inputSchema.properties.expected_revision as any).type).toBe('number');
+    expect(operations.find(o => o.name === 'put_page_conditional')?.scope).toBe('write');
+  });
+
   test('every def has object inputSchema with properties + required array', () => {
     for (const def of buildToolDefs(operations)) {
       expect(def.inputSchema.type).toBe('object');

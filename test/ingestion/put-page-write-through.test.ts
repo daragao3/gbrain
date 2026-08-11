@@ -83,6 +83,8 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
 }
 
 const putPage = operations.find((o) => o.name === 'put_page')!;
+const conditionalOp = operations.find(o => o.name === 'put_page_conditional');
+if (!conditionalOp) throw new Error('put_page_conditional missing');
 
 describe('put_page write-through — happy path', () => {
   test('writes the markdown file to disk at brainDir/<slug>.md', async () => {
@@ -123,6 +125,71 @@ describe('put_page write-through — happy path', () => {
     // YAML quotes strings containing `:` so the literal frontmatter line
     // is `ingested_via: 'mcp:put_page'`. Match the value substring.
     expect(onDisk).toMatch(/ingested_via:\s*['"]?mcp:put_page['"]?/);
+  });
+});
+
+describe('put_page_conditional write-through', () => {
+  test('created and updated outcomes reuse write-through', async () => {
+    const created = await conditionalOp.handler(makeCtx(), {
+      slug: 'inbox/conditional-wt',
+      content: '---\ntitle: Conditional V1\n---\n\nbody one',
+      mode: 'create_only',
+    });
+    expect(created).toMatchObject({
+      status: 'created',
+      write_through: { written: true, path: path.join(brainDir, 'inbox/conditional-wt.md') },
+    });
+    expect(fs.readFileSync(path.join(brainDir, 'inbox/conditional-wt.md'), 'utf8'))
+      .toMatch(/ingested_via:\s*put_page_conditional/);
+
+    const updated = await conditionalOp.handler(makeCtx(), {
+      slug: 'inbox/conditional-wt',
+      content: '---\ntitle: Conditional V2\n---\n\nbody two',
+      mode: 'compare_and_swap',
+      expected_revision: 1,
+    });
+    expect(updated).toMatchObject({ status: 'updated', write_through: { written: true } });
+    expect(fs.readFileSync(path.join(brainDir, 'inbox/conditional-wt.md'), 'utf8')).toContain('body two');
+  });
+
+  test('remote outcomes stamp conditional write-through provenance', async () => {
+    const remotePath = path.join(brainDir, 'inbox/conditional-remote.md');
+    await conditionalOp.handler(makeCtx({ remote: true }), {
+      slug: 'inbox/conditional-remote',
+      content: '---\ntitle: Conditional Remote\n---\n\nremote body',
+      mode: 'create_only',
+    });
+    expect(fs.readFileSync(remotePath, 'utf8'))
+      .toMatch(/ingested_via:\s*['"]?mcp:put_page_conditional['"]?/);
+  });
+
+  test('conflict and unchanged outcomes never run write-through', async () => {
+    const pagePath = path.join(brainDir, 'inbox/conditional-no-hook.md');
+    await conditionalOp.handler(makeCtx(), {
+      slug: 'inbox/conditional-no-hook',
+      content: '---\ntitle: Original\n---\n\noriginal body',
+      mode: 'create_only',
+    });
+    const before = fs.readFileSync(pagePath, 'utf8');
+
+    const conflict = await conditionalOp.handler(makeCtx(), {
+      slug: 'inbox/conditional-no-hook',
+      content: '---\ntitle: Rejected\n---\n\nrejected body',
+      mode: 'create_only',
+    });
+    expect(conflict).toMatchObject({ status: 'conflict' });
+    expect(conflict).not.toHaveProperty('write_through');
+    expect(fs.readFileSync(pagePath, 'utf8')).toBe(before);
+
+    const unchanged = await conditionalOp.handler(makeCtx(), {
+      slug: 'inbox/conditional-no-hook',
+      content: '---\ntitle: Original\n---\n\noriginal body',
+      mode: 'compare_and_swap',
+      expected_revision: 1,
+    });
+    expect(unchanged).toMatchObject({ status: 'unchanged' });
+    expect(unchanged).not.toHaveProperty('write_through');
+    expect(fs.readFileSync(pagePath, 'utf8')).toBe(before);
   });
 });
 
