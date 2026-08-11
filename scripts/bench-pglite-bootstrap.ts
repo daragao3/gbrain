@@ -200,7 +200,16 @@ async function main(): Promise<void> {
   const { MIGRATIONS } = await import('../src/core/migrate.ts');
   const { PGLITE_SCHEMA_SQL } = await import('../src/core/pglite-schema.ts');
   const crypto = await import('node:crypto');
-  const expectedSnapshotVersion = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+  // Same width the fixture is baked at and the per-run config.json above
+  // declares — the hash folds it in, so a mismatch here would report a
+  // perfectly good fixture as stale.
+  const { LEGACY_EMBEDDING_CONFIG } = await import('../test/helpers/legacy-embedding-config.ts');
+  const expectedSnapshotVersion = computeSnapshotSchemaHash(
+    MIGRATIONS,
+    PGLITE_SCHEMA_SQL,
+    crypto,
+    LEGACY_EMBEDDING_CONFIG.embedding_dimensions,
+  );
   const actualSnapshotVersion = readFileSync(SNAPSHOT_VERSION, 'utf8').trim();
   if (actualSnapshotVersion !== expectedSnapshotVersion) {
     console.error(`stale snapshot fixture — run: bun run build:pglite-snapshot`);
