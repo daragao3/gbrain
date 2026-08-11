@@ -36,7 +36,7 @@ import type { PageType } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import {
   extractPageLinks, parseTimelineEntries, inferLinkType, makeResolver,
-  extractFrontmatterLinks, isGlobalBasenameEnabled, LINK_EXTRACTOR_VERSION_TS,
+  extractFrontmatterLinks, isGlobalBasenameEnabled, getExtraEntityDirs, LINK_EXTRACTOR_VERSION_TS,
   WIKILINK_BASENAME_LINK_TYPE,
   buildBasenameIndex, queryBasenameIndex, stripCodeBlocks,
   type UnresolvedFrontmatterRef, type LinkCandidate,
@@ -1027,6 +1027,9 @@ async function extractForSlugs(
   let pagesProcessed = 0;
 
   // Issue #972: read the basename flag once per extract run.
+  // (No entityDirs read here: this path walks the filesystem via
+  // extractLinksFromFile, which resolves targets against allSlugs directly
+  // rather than through the DIR_PATTERN-gated regexes.)
   const globalBasename = await isGlobalBasenameEnabled(engine);
 
   const linkBatch: LinkBatchInput[] = [];
@@ -1381,6 +1384,11 @@ async function extractLinksFromDB(
   // Issue #972: opt-in global-basename wikilink resolution. Read once
   // per extract run; threaded into each extractPageLinks call.
   const globalBasename = await isGlobalBasenameEnabled(engine);
+  // Operator-declared extra entity dirs, read once per run for the same
+  // reason. The sweep and the put_page write path MUST agree on this set —
+  // if they disagree, every sweep re-creates edges the write path just
+  // decided against (or vice versa) and the graph never converges.
+  const entityDirs = await getExtraEntityDirs(engine);
   // v0.32.8: listAllPageRefs enumerates (slug, source_id) so we can thread
   // sourceId to getPage AND build a cross-source resolution map for link
   // disambiguation. Pre-fix used getAllSlugs() which collapsed
@@ -1461,7 +1469,7 @@ async function extractLinksFromDB(
     // basename lookup; off by default for back-compat.
     const extracted = await extractPageLinks(
       slug, fullContent, page.frontmatter, page.type, resolver,
-      { skipFrontmatter: !includeFrontmatter, globalBasename },
+      { skipFrontmatter: !includeFrontmatter, globalBasename, entityDirs },
     );
     unresolved.push(...extracted.unresolved);
 
@@ -1704,6 +1712,8 @@ export async function extractStaleFromDB(
   let afterPageId = 0;
   let linksCreated = 0, timelineCreated = 0, pagesProcessed = 0;
   let budgetHit = false;
+  // Same set the full sweep and put_page use — read once for the whole walk.
+  const staleEntityDirs = await getExtraEntityDirs(engine);
 
   for (;;) {
     const rows = await engine.listStalePagesForExtraction({
@@ -1719,6 +1729,7 @@ export async function extractStaleFromDB(
       const fullContent = page.compiled_truth + '\n' + page.timeline;
       const extracted = await extractPageLinks(
         page.slug, fullContent, page.frontmatter, page.type, activeResolver,
+        { entityDirs: staleEntityDirs },
       );
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(c, page.slug, page.source_id, allSlugs, slugToSources);
