@@ -1148,7 +1148,11 @@ export class PostgresEngine implements BrainEngine {
         page_kind = EXCLUDED.page_kind,
         title = EXCLUDED.title,
         compiled_truth = EXCLUDED.compiled_truth,
-        timeline = EXCLUDED.timeline,
+        -- Preserve-on-empty, like the provenance columns below. A body with no
+        -- timeline sentinel parses to '', which previously erased a stored
+        -- timeline on every unrelated edit. Callers that pass '' mean "not
+        -- applicable", not "clear it"; a non-empty value still replaces.
+        timeline = COALESCE(NULLIF(EXCLUDED.timeline, ''), pages.timeline),
         frontmatter = EXCLUDED.frontmatter,
         content_hash = EXCLUDED.content_hash,
         updated_at = now(),
@@ -1234,7 +1238,8 @@ export class PostgresEngine implements BrainEngine {
           page_kind = ${normalized.pageKind},
           title = ${page.title},
           compiled_truth = ${page.compiled_truth},
-          timeline = ${page.timeline || ''},
+          -- Preserve-on-empty — see putPage.
+          timeline = COALESCE(NULLIF(${page.timeline || ''}::text, ''), pages.timeline),
           frontmatter = ${sql.json(normalized.frontmatter as Parameters<typeof sql.json>[0])},
           content_hash = ${normalized.hash},
           updated_at = now(),
@@ -1386,7 +1391,8 @@ export class PostgresEngine implements BrainEngine {
     await sql`
       UPDATE pages
       SET compiled_truth = ${compiledTruth},
-          timeline = ${timeline},
+          -- Preserve-on-empty — see putPage.
+          timeline = COALESCE(NULLIF(${timeline}::text, ''), pages.timeline),
           content_hash = ${contentHash},
           updated_at = now()
       WHERE source_id = ${sourceId}

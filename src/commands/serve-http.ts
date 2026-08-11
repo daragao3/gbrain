@@ -1502,8 +1502,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Full engine stats. v0.28.10 moved this off /health (which is now liveness
   // only — see probeLiveness) so dashboards needing page_count / chunk_count
   // / etc. authenticate as admin and call this endpoint. probeHealth races
-  // engine.getStats() against HEALTH_TIMEOUT_MS so a saturated pool returns
-  // 503 rather than hanging.
+  // engine.getStats() against HEALTH_RESPONSE_TIMEOUT_MS so a slow stats query
+  // returns 503 rather than hanging. Unlike probeLiveness this one keeps a
+  // single deadline on purpose: six count(*) queries are real work, so a
+  // timeout here is genuinely ambiguous and the 503 says so rather than
+  // blaming pool saturation.
   app.get('/admin/api/full-stats', requireAdmin, async (_req: Request, res: Response) => {
     const result = await probeHealth(engine, config.engine || 'pglite', VERSION);
     res.status(result.status).json(result.body);
