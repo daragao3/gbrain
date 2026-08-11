@@ -1049,6 +1049,13 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Link resolution (issue #972)
   'link_resolution',
   'link_resolution.global_basename',
+  // Extra top-level slug dirs the extractor treats as entity namespaces,
+  // comma-separated. Brains organized under roots gbrain doesn't ship in
+  // DIR_PATTERN get no typed edges from their wikilinks without this.
+  'link_resolution.entity_dirs',
+  // Run the reduced (wikilink-only, add-only) reconciliation for remote
+  // put_page callers instead of skipping it. Off by default.
+  'link_resolution.remote_reconcile',
   // Spend controls (v0.42.42.0, issue #2139). Previously `--force`-only — the
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
