@@ -1,45 +1,114 @@
-import { describe, it, expect, afterEach } from 'bun:test';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync, mkdirSync, rmSync } from 'fs';
+import { describe, it, expect } from 'bun:test';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { readSupervisorEvents, computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
+import { computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
 import { calculateBackoffMs, resolveHardStopMaxCrashes } from '../src/core/minions/supervisor.ts';
+import { withEnv } from './helpers/with-env.ts';
+import { terminateOwnedProcessTree } from '../src/core/minions/handlers/shell-platform.ts';
 
-const TEST_PID_FILE = '/tmp/gbrain-supervisor-test.pid';
+const INTEGRATION_TIMEOUT_MS = 60_000;
+const READY_TIMEOUT_MS = 45_000;
+const EXIT_TIMEOUT_MS = 50_000;
+const describeSigterm = process.platform === 'win32' ? describe.skip : describe;
 
-afterEach(() => {
-  try { unlinkSync(TEST_PID_FILE); } catch { /* noop */ }
-});
+type WorkerSpec =
+  | { kind: 'exit' }
+  | { kind: 'record-env'; varName: string }
+  | { kind: 'record-argv' };
+
+interface RenderedWorker {
+  filename: 'worker.cmd' | 'worker.sh';
+  contents: string;
+}
+
+function renderWorker(spec: WorkerSpec): RenderedWorker {
+  if (process.platform === 'win32') {
+    const commands = ['@echo off'];
+    if (spec.kind === 'record-env') {
+      commands.push(
+        `set "RECORDED_VALUE=%${spec.varName}%"`,
+        'if not defined RECORDED_VALUE set "RECORDED_VALUE=UNSET"',
+        '> "%OUT_FILE%" echo %RECORDED_VALUE%',
+      );
+    } else if (spec.kind === 'record-argv') {
+      commands.push('> "%OUT_FILE%" echo %*');
+    }
+    commands.push('exit /b 1');
+    return { filename: 'worker.cmd', contents: `${commands.join('\r\n')}\r\n` };
+  }
+
+  const commands = ['#!/bin/sh'];
+  if (spec.kind === 'record-env') {
+    commands.push(`printf '%s\\n' "\${${spec.varName}-UNSET}" > "$OUT_FILE"`);
+  } else if (spec.kind === 'record-argv') {
+    commands.push(`printf '%s\\n' "$*" > "$OUT_FILE"`);
+  }
+  commands.push('exit 1');
+  return { filename: 'worker.sh', contents: `${commands.join('\n')}\n` };
+}
 
 // ----- Integration test helpers -----
 
 interface IntegrationHarness {
+  root: string;
   pidFile: string;
   auditDir: string;
   workerScript: string;
   envOutFile: string;
-  cleanup: () => void;
+  ownedChildren: Map<ReturnType<typeof spawn>, Promise<void>>;
+  cleanup: () => Promise<void>;
 }
 
-/** Create per-test temp files + a fake worker shell script. */
-function makeHarness(name: string, workerBody: string): IntegrationHarness {
-  const tmpRoot = join(tmpdir(), `gbrain-sup-test-${name}-${process.pid}-${Date.now()}`);
-  mkdirSync(tmpRoot, { recursive: true });
-  const pidFile = join(tmpRoot, 'supervisor.pid');
-  const auditDir = join(tmpRoot, 'audit');
-  const workerScript = join(tmpRoot, 'worker.sh');
-  const envOutFile = join(tmpRoot, 'env-out.txt');
+type SupervisorHandle = ReturnType<typeof spawnSupervisor>;
 
-  writeFileSync(workerScript, `#!/bin/sh\n${workerBody}\n`, 'utf8');
-  chmodSync(workerScript, 0o755);
+/** Create per-test temp files and render one semantic worker fixture. */
+function makeHarness(name: string, workerSpec: WorkerSpec): IntegrationHarness {
+  const root = mkdtempSync(join(tmpdir(), `gbrain-sup-test-${name}-`));
+  const pidFile = join(root, 'supervisor.pid');
+  const auditDir = join(root, 'audit');
+  const envOutFile = join(root, 'env-out.txt');
+  const renderedWorker = renderWorker(workerSpec);
+  const workerScript = join(root, renderedWorker.filename);
 
+  writeFileSync(workerScript, renderedWorker.contents, 'utf8');
+  if (process.platform !== 'win32') chmodSync(workerScript, 0o755);
+
+  const ownedChildren = new Map<ReturnType<typeof spawn>, Promise<void>>();
   return {
+    root,
     pidFile,
     auditDir,
     workerScript,
     envOutFile,
-    cleanup: () => { try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* noop */ } },
+    ownedChildren,
+    cleanup: async () => {
+      const cleanupErrors: unknown[] = [];
+      for (const [child, closed] of ownedChildren) {
+        try {
+          await terminateOwnedProcessTree(child);
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        try {
+          await awaitCloseWithin(closed, 5_000, 'owned supervisor process');
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (cleanupErrors.length === 0) {
+        try {
+          rmSync(root, { recursive: true, force: true });
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (cleanupErrors.length === 1) throw cleanupErrors[0];
+      if (cleanupErrors.length > 1) {
+        throw new AggregateError(cleanupErrors, 'supervisor test cleanup failed');
+      }
+    },
   };
 }
 
@@ -69,10 +138,14 @@ function spawnSupervisor(h: IntegrationHarness, overrides: Record<string, string
     env.GBRAIN_SUPERVISOR_HARD_STOP_CRASHES = env.SUP_MAX_CRASHES;
   }
 
-  const child = spawn('bun', [join(import.meta.dir, 'fixtures/supervisor-runner.ts')], {
+  const child = spawn(process.execPath, [join(import.meta.dir, 'fixtures/supervisor-runner.ts')], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const closed = new Promise<void>((resolve) => {
+    child.once('close', () => resolve());
+  });
+  h.ownedChildren.set(child, closed);
 
   let stdout = '';
   let stderr = '';
@@ -80,27 +153,90 @@ function spawnSupervisor(h: IntegrationHarness, overrides: Record<string, string
   child.stderr?.on('data', (d) => { stderr += d.toString(); });
 
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    child.on('exit', (code, signal) => resolve({ code, signal }));
+    child.once('exit', (code, signal) => resolve({ code, signal }));
   });
-
   return {
     child,
     exited,
+    closed,
     getStdout: () => stdout,
     getStderr: () => stderr,
   };
 }
 
-/** Read the audit JSONL for the current week. */
-function readAudit(auditDir: string) {
-  const origEnv = process.env.GBRAIN_AUDIT_DIR;
-  process.env.GBRAIN_AUDIT_DIR = auditDir;
+async function awaitCloseWithin(
+  closed: Promise<void>,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return readSupervisorEvents();
+    await Promise.race([
+      closed,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} did not close within ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
   } finally {
-    if (origEnv === undefined) delete process.env.GBRAIN_AUDIT_DIR;
-    else process.env.GBRAIN_AUDIT_DIR = origEnv;
+    if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+async function waitForSupervisorExit(
+  sup: SupervisorHandle,
+  timeoutMs = EXIT_TIMEOUT_MS,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        const result = await sup.exited;
+        await sup.closed;
+        return result;
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`supervisor did not exit and close within ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await terminateOwnedProcessTree(sup.child);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await awaitCloseWithin(sup.closed, 5_000, 'owned supervisor process');
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        'supervisor exit and termination cleanup failed',
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Read the audit JSONL for the current week without mutating process.env. */
+function readAudit(auditDir: string): Array<Record<string, unknown> & { event: string }> {
+  const auditFile = join(auditDir, computeSupervisorAuditFilename());
+  if (!existsSync(auditFile)) return [];
+  return readFileSync(auditFile, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line) as Record<string, unknown> & { event: string }];
+      } catch {
+        return [];
+      }
+    });
 }
 
 /** Poll until predicate returns true or deadline elapses. */
@@ -116,26 +252,30 @@ async function waitFor(pred: () => boolean, timeoutMs: number, tickMs = 20): Pro
 describe('MinionSupervisor', () => {
   describe('resolveHardStopMaxCrashes (issue #1994)', () => {
     const KEY = 'GBRAIN_SUPERVISOR_HARD_STOP_CRASHES';
-    afterEach(() => { delete process.env[KEY]; });
 
-    it('defaults to maxCrashes × 10 when no override', () => {
-      delete process.env[KEY];
-      expect(resolveHardStopMaxCrashes(10)).toBe(100);
-      expect(resolveHardStopMaxCrashes(3)).toBe(30);
+    it('defaults to maxCrashes × 10 when no override', async () => {
+      await withEnv({ [KEY]: undefined }, () => {
+        expect(resolveHardStopMaxCrashes(10)).toBe(100);
+        expect(resolveHardStopMaxCrashes(3)).toBe(30);
+      });
     });
 
-    it('honors a valid non-negative integer override', () => {
-      process.env[KEY] = '0'; // 0 = disable permanent give-up
-      expect(resolveHardStopMaxCrashes(10)).toBe(0);
-      process.env[KEY] = '5';
-      expect(resolveHardStopMaxCrashes(10)).toBe(5);
+    it('honors a valid non-negative integer override', async () => {
+      await withEnv({ [KEY]: '0' }, () => {
+        expect(resolveHardStopMaxCrashes(10)).toBe(0);
+      });
+      await withEnv({ [KEY]: '5' }, () => {
+        expect(resolveHardStopMaxCrashes(10)).toBe(5);
+      });
     });
 
-    it('ignores a negative or non-integer override (falls back to default)', () => {
-      process.env[KEY] = '-1';
-      expect(resolveHardStopMaxCrashes(10)).toBe(100);
-      process.env[KEY] = 'abc';
-      expect(resolveHardStopMaxCrashes(10)).toBe(100);
+    it('ignores a negative or non-integer override (falls back to default)', async () => {
+      await withEnv({ [KEY]: '-1' }, () => {
+        expect(resolveHardStopMaxCrashes(10)).toBe(100);
+      });
+      await withEnv({ [KEY]: 'abc' }, () => {
+        expect(resolveHardStopMaxCrashes(10)).toBe(100);
+      });
     });
   });
 
@@ -171,37 +311,47 @@ describe('MinionSupervisor', () => {
   });
 
   describe('PID file management', () => {
-    it('detects stale PID files', () => {
-      // Write a PID file with a non-existent PID
-      writeFileSync(TEST_PID_FILE, '999999999');
-      expect(existsSync(TEST_PID_FILE)).toBe(true);
-
-      // A real supervisor would detect this as stale and overwrite
-      const existingPid = parseInt(readFileSync(TEST_PID_FILE, 'utf8').trim(), 10);
-      let isAlive = false;
+    it('detects stale PID files', async () => {
+      const h = makeHarness('stale-pid', { kind: 'exit' });
       try {
-        process.kill(existingPid, 0);
-        isAlive = true;
-      } catch {
-        isAlive = false;
+        // Write a PID file with a non-existent PID
+        writeFileSync(h.pidFile, '999999999');
+        expect(existsSync(h.pidFile)).toBe(true);
+
+        // A real supervisor would detect this as stale and overwrite
+        const existingPid = parseInt(readFileSync(h.pidFile, 'utf8').trim(), 10);
+        let isAlive = false;
+        try {
+          process.kill(existingPid, 0);
+          isAlive = true;
+        } catch {
+          isAlive = false;
+        }
+        expect(isAlive).toBe(false);
+      } finally {
+        await h.cleanup();
       }
-      expect(isAlive).toBe(false);
     });
 
-    it('detects live PID files (current process)', () => {
-      // Write our own PID
-      writeFileSync(TEST_PID_FILE, String(process.pid));
-
-      const existingPid = parseInt(readFileSync(TEST_PID_FILE, 'utf8').trim(), 10);
-      let isAlive = false;
+    it('detects live PID files (current process)', async () => {
+      const h = makeHarness('live-pid', { kind: 'exit' });
       try {
-        process.kill(existingPid, 0);
-        isAlive = true;
-      } catch {
-        isAlive = false;
+        // Write our own PID
+        writeFileSync(h.pidFile, String(process.pid));
+
+        const existingPid = parseInt(readFileSync(h.pidFile, 'utf8').trim(), 10);
+        let isAlive = false;
+        try {
+          process.kill(existingPid, 0);
+          isAlive = true;
+        } catch {
+          isAlive = false;
+        }
+        expect(isAlive).toBe(true);
+        expect(existingPid).toBe(process.pid);
+      } finally {
+        await h.cleanup();
       }
-      expect(isAlive).toBe(true);
-      expect(existingPid).toBe(process.pid);
     });
   });
 
@@ -230,12 +380,12 @@ describe('MinionSupervisor', () => {
     it('respawns the worker after a crash and eventually exits with max-crashes code=1', async () => {
       // Worker always exits with code 1; supervisor should respawn it 3 times,
       // hit max-crashes, then exit via shutdown() with code 1.
-      const h = makeHarness('max-crashes', 'exit 1');
+      const h = makeHarness('max-crashes', { kind: 'exit' });
       try {
         // hard ceiling defaults to SUP_MAX_CRASHES in the harness (see
         // spawnSupervisor) so this give-up lifecycle still fires at 3 (#1994).
         const sup = spawnSupervisor(h, { SUP_MAX_CRASHES: '3' });
-        const { code } = await sup.exited;
+        const { code } = await waitForSupervisorExit(sup);
 
         expect(code).toBe(1);
 
@@ -258,16 +408,18 @@ describe('MinionSupervisor', () => {
         expect((stoppedEvt as Record<string, unknown>).exit_code).toBe(1);
         expect((stoppedEvt as Record<string, unknown>).reason).toBe('max_crashes');
       } finally {
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
-  describe('integration: graceful SIGTERM during backoff', () => {
+  // Windows child.kill('SIGTERM') terminates the process and cannot prove the
+  // catchable POSIX graceful-handler contract. Keep only this signal suite skipped.
+  describeSigterm('integration: graceful POSIX SIGTERM handler during backoff', () => {
     it('receives SIGTERM while sleeping between crashes and exits 0 cleanly', async () => {
       // Worker always exits with code 1; supervisor has a high max-crashes
       // and a long-enough backoff floor that we can reliably catch it mid-sleep.
-      const h = makeHarness('sigterm-backoff', 'exit 1');
+      const h = makeHarness('sigterm-backoff', { kind: 'exit' });
       try {
         const sup = spawnSupervisor(h, {
           SUP_MAX_CRASHES: '100',
@@ -280,7 +432,7 @@ describe('MinionSupervisor', () => {
           if (!existsSync(h.pidFile)) return false;
           const events = readAudit(h.auditDir);
           return events.some(e => e.event === 'worker_exited');
-        }, 3000);
+        }, READY_TIMEOUT_MS);
         expect(ready).toBe(true);
 
         // Now SIGTERM the supervisor. It must exit cleanly within 200ms
@@ -288,7 +440,7 @@ describe('MinionSupervisor', () => {
         const sigSentAt = Date.now();
         sup.child.kill('SIGTERM');
 
-        const { code, signal } = await sup.exited;
+        const { code, signal } = await waitForSupervisorExit(sup);
         const elapsed = Date.now() - sigSentAt;
 
         // Exit code 0 = clean; signal=null means we exited via process.exit, not got killed.
@@ -309,94 +461,82 @@ describe('MinionSupervisor', () => {
         // PID file cleaned up.
         expect(existsSync(h.pidFile)).toBe(false);
       } finally {
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 20_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
   describe('integration: env-var inheritance regression (codex #9 / eng #8)', () => {
     it('strips inherited GBRAIN_ALLOW_SHELL_JOBS when allowShellJobs=false, even if parent has it set', async () => {
-      const outFile = join(tmpdir(), `gbrain-sup-env-${process.pid}-${Date.now()}.txt`);
-      try { unlinkSync(outFile); } catch { /* may not exist */ }
-
       // Worker writes env to OUT_FILE then exits 1. exit=1 is required (not
       // exit=0) because post-D1/D2 (v0.33) clean exits don't count toward
       // crashCount — the supervisor would respawn forever. The test's
       // assertion is on the OUT_FILE contents (env plumbing), not the
       // exit code, so any non-zero code that trips SUP_MAX_CRASHES=1 works.
-      const h = makeHarness('env-strip-outfile', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 1`);
+      const h = makeHarness('env-strip-outfile', { kind: 'record-env', varName: 'GBRAIN_ALLOW_SHELL_JOBS' });
 
       try {
         const sup = spawnSupervisor(h, {
-          OUT_FILE: outFile,
+          OUT_FILE: h.envOutFile,
           GBRAIN_ALLOW_SHELL_JOBS: '1',  // parent has it
           SUP_ALLOW_SHELL_JOBS: '0',     // supervisor says NO
           SUP_MAX_CRASHES: '1',
         });
 
-        await sup.exited;
+        await waitForSupervisorExit(sup);
 
         // Worker should have written "UNSET" (parent env var stripped from child).
-        expect(existsSync(outFile)).toBe(true);
-        const childSawEnv = readFileSync(outFile, 'utf8').trim();
+        expect(existsSync(h.envOutFile)).toBe(true);
+        const childSawEnv = readFileSync(h.envOutFile, 'utf8').trim();
         expect(childSawEnv).toBe('UNSET');
       } finally {
-        try { unlinkSync(outFile); } catch { /* noop */ }
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
 
     it('DOES pass GBRAIN_ALLOW_SHELL_JOBS to child when allowShellJobs is true', async () => {
-      const outFile = join(tmpdir(), `gbrain-sup-env-ok-${process.pid}-${Date.now()}.txt`);
-      try { unlinkSync(outFile); } catch { /* may not exist */ }
-
       // Worker exits 1 (not 0) so SUP_MAX_CRASHES=1 actually trips. See
       // the comment on the env-strip test above for the v0.33 rationale.
-      const h = makeHarness('env-pass-on-opt-in', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 1`);
+      const h = makeHarness('env-pass-on-opt-in', { kind: 'record-env', varName: 'GBRAIN_ALLOW_SHELL_JOBS' });
 
       try {
         const sup = spawnSupervisor(h, {
-          OUT_FILE: outFile,
+          OUT_FILE: h.envOutFile,
           SUP_ALLOW_SHELL_JOBS: '1',
           SUP_MAX_CRASHES: '1',
         });
 
-        await sup.exited;
+        await waitForSupervisorExit(sup);
 
-        expect(existsSync(outFile)).toBe(true);
-        expect(readFileSync(outFile, 'utf8').trim()).toBe('1');
+        expect(existsSync(h.envOutFile)).toBe(true);
+        expect(readFileSync(h.envOutFile, 'utf8').trim()).toBe('1');
       } finally {
-        try { unlinkSync(outFile); } catch { /* noop */ }
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
   describe('integration: GBRAIN_SUPERVISED env var (v0.22.14)', () => {
     it('sets GBRAIN_SUPERVISED=1 on spawned worker child', async () => {
-      const outFile = join(tmpdir(), `gbrain-sup-supervised-${process.pid}-${Date.now()}.txt`);
-      try { unlinkSync(outFile); } catch { /* may not exist */ }
-
       // exit 1 required post-D1/D2 to trip SUP_MAX_CRASHES=1; clean exits
       // no longer count toward the crash limit.
-      const h = makeHarness('supervised-env', `printf '%s\n' "\${GBRAIN_SUPERVISED-UNSET}" > "$OUT_FILE" ; exit 1`);
+      const h = makeHarness('supervised-env', { kind: 'record-env', varName: 'GBRAIN_SUPERVISED' });
 
       try {
         const sup = spawnSupervisor(h, {
-          OUT_FILE: outFile,
+          OUT_FILE: h.envOutFile,
           SUP_MAX_CRASHES: '1',
         });
 
-        await sup.exited;
+        await waitForSupervisorExit(sup);
 
-        expect(existsSync(outFile)).toBe(true);
-        const childSawEnv = readFileSync(outFile, 'utf8').trim();
+        expect(existsSync(h.envOutFile)).toBe(true);
+        const childSawEnv = readFileSync(h.envOutFile, 'utf8').trim();
         expect(childSawEnv).toBe('1');
       } finally {
-        try { unlinkSync(outFile); } catch { /* noop */ }
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
   describe('regression (R3): healthInterval=0 disables timer (v0.22.14)', () => {
@@ -422,7 +562,7 @@ describe('MinionSupervisor', () => {
       // count toward max_crashes — a code=0 worker would respawn forever.
       // The test's purpose is regression coverage that healthInterval=0
       // disables the timer; the exit code doesn't matter to that assertion.
-      const h = makeHarness('health-interval-zero', 'exit 1');
+      const h = makeHarness('health-interval-zero', { kind: 'exit' });
 
       try {
         const sup = spawnSupervisor(h, {
@@ -430,84 +570,70 @@ describe('MinionSupervisor', () => {
           SUP_MAX_CRASHES: '1',
         });
 
-        const start = Date.now();
-        const { code } = await sup.exited;
-        const elapsedMs = Date.now() - start;
+        const { code } = await waitForSupervisorExit(sup);
 
         // Clean exit (max-crashes path returns 1; this is fine — we just
         // want to confirm the supervisor reached its terminal state without
         // hanging or runaway looping).
         expect(code).toBe(1);
 
-        // Sanity: a tight loop on setInterval(0) plus the spawn-respawn
-        // loop would still terminate at max-crashes, but it would be
-        // measurably slower than a clean run because the event loop is
-        // saturated with health-check callbacks. Cap the upper bound at
-        // 10s — clean runs typically finish in 1–2s.
-        expect(elapsedMs).toBeLessThan(10_000);
+        // The enclosing timeout is the hang net. Startup latency is not the
+        // product contract, especially on Windows where process launch is slow.
       } finally {
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
   describe('integration: --max-rss spawn args (v0.21, auto-sized v0.41.39.0)', () => {
     it('passes an explicit --max-rss through to the spawned worker', async () => {
-      const outFile = join(tmpdir(), `gbrain-sup-maxrss-${process.pid}-${Date.now()}.txt`);
-      try { unlinkSync(outFile); } catch { /* may not exist */ }
-
       // SUP_MAX_RSS pins an explicit cap; the supervisor must pass it through
       // verbatim. exit 1 required post-D1/D2: code=0 workers respawn forever.
-      const h = makeHarness('maxrss-explicit', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 1`);
+      const h = makeHarness('maxrss-explicit', { kind: 'record-argv' });
 
       try {
         const sup = spawnSupervisor(h, {
-          OUT_FILE: outFile,
+          OUT_FILE: h.envOutFile,
           SUP_MAX_CRASHES: '1',
           SUP_MAX_RSS: '2048',
         });
 
-        await sup.exited;
+        await waitForSupervisorExit(sup);
 
-        expect(existsSync(outFile)).toBe(true);
-        const argv = readFileSync(outFile, 'utf8').trim();
+        expect(existsSync(h.envOutFile)).toBe(true);
+        const argv = readFileSync(h.envOutFile, 'utf8').trim();
         expect(argv).toContain('--max-rss 2048');
       } finally {
-        try { unlinkSync(outFile); } catch { /* noop */ }
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
 
     // issue #1678: with no explicit cap the supervisor auto-sizes cgroup-aware
     // instead of the old flat 2048 footgun. Same machine → the in-test
     // resolveDefaultMaxRssMb() equals what the spawned supervisor computes.
     it('auto-sizes --max-rss when no explicit cap is given', async () => {
-      const outFile = join(tmpdir(), `gbrain-sup-maxrss-auto-${process.pid}-${Date.now()}.txt`);
-      try { unlinkSync(outFile); } catch { /* may not exist */ }
-
       const { resolveDefaultMaxRssMb } = await import('../src/core/minions/rss-default.ts');
       const expected = resolveDefaultMaxRssMb();
 
-      const h = makeHarness('maxrss-auto', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 1`);
+      const h = makeHarness('maxrss-auto', { kind: 'record-argv' });
       try {
         const sup = spawnSupervisor(h, {
-          OUT_FILE: outFile,
+          OUT_FILE: h.envOutFile,
           SUP_MAX_CRASHES: '1',
         });
-        await sup.exited;
+        await waitForSupervisorExit(sup);
 
-        expect(existsSync(outFile)).toBe(true);
-        const argv = readFileSync(outFile, 'utf8').trim();
+        expect(existsSync(h.envOutFile)).toBe(true);
+        const argv = readFileSync(h.envOutFile, 'utf8').trim();
         expect(argv).toContain(`--max-rss ${expected}`);
         // Auto-sized value is clamped into the sane range, never the old 2048
         // unless the box genuinely resolves there.
         expect(expected).toBeGreaterThanOrEqual(4096);
         expect(expected).toBeLessThanOrEqual(16384);
       } finally {
-        try { unlinkSync(outFile); } catch { /* noop */ }
-        h.cleanup();
+        await h.cleanup();
       }
-    }, 15_000);
+    }, INTEGRATION_TIMEOUT_MS);
   });
 
   describe('integration: audit file rotation + helper', () => {

@@ -39,6 +39,11 @@ import { normalizeAliasList } from './search/alias-normalize.ts';
 import { isUndefinedTableError, warnOncePerProcess, validateSlug } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
+import {
+  assessPlaceholderTruncation,
+  formatPlaceholderTruncationError,
+  type PlaceholderTruncationAssessment,
+} from './placeholder-truncation.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -212,6 +217,13 @@ export interface ImportResult {
   flagged?: boolean;
   /** Which flag tier fired, when `flagged`. */
   flag_reason?: 'markup_heavy' | 'oversized';
+  /**
+   * Placeholder-truncation guard (2026-08-10 KB incident): populated when the
+   * write was REFUSED because the incoming compiled truth both shrank
+   * materially and carried a standalone bracketed placeholder line. Lets
+   * callers name the offending line without re-parsing `error`.
+   */
+  truncation?: PlaceholderTruncationAssessment;
 }
 
 const MAX_FILE_SIZE = 5_000_000; // 5MB
@@ -293,6 +305,13 @@ export async function importFromContent(
      * leave it unset → markers preserved (the gate + CLI own them).
      */
     remote?: boolean;
+    /**
+     * Opt out of the placeholder-truncation guard for one call. The guard
+     * exists to stop SILENT content loss; a deliberate compaction is still
+     * legal, it just has to say so. `GBRAIN_NO_TRUNCATION_GUARD=1` is the
+     * process-wide equivalent for file-sync runs that have no per-call surface.
+     */
+    allowTruncation?: boolean;
   } = {},
 ): Promise<ImportResult> {
   // Normalize BEFORE any tx write: putPage lowercases via validateSlug but
@@ -616,6 +635,42 @@ export async function importFromContent(
 
   if (existing?.content_hash === hash && !opts.forceRechunk) {
     return { slug, status: 'skipped', chunks: 0, parsedPage };
+  }
+
+  // Placeholder-truncation guard (2026-08-10 KB incident; 3 pages, ~12KB of
+  // verified fact lost in 53 seconds).
+  //
+  // An abbreviated rewrite — most of the compiled truth replaced by a bracketed
+  // line claiming the rest is "unchanged" — used to land as a normal successful
+  // write. Nothing downstream could tell it apart from a legitimate edit, so
+  // the loss stayed invisible until someone happened to read the page.
+  //
+  // Refuse instead, mirroring the FRONTMATTER_PARSE guard above: the caller
+  // keeps whatever the page already had, and the error names the offending line
+  // so the agent can resend the full content. See placeholder-truncation.ts for
+  // why the detector is structural and why the refusal also requires a shrink.
+  //
+  // Runs AFTER the hash-equality short-circuit (identical content can't be a
+  // truncation) and BEFORE chunking + embedding, so a refused write costs no
+  // embedding spend.
+  if (!opts.allowTruncation && process.env.GBRAIN_NO_TRUNCATION_GUARD !== '1') {
+    const truncation = assessPlaceholderTruncation({
+      incoming: parsed.compiled_truth,
+      existing: existing?.compiled_truth,
+    });
+    if (truncation.shouldRefuse) {
+      process.stderr.write(
+        `[gbrain] placeholder-truncation refusal: ${slug} — would drop ` +
+        `${truncation.removedChars} chars behind ${truncation.placeholderLines[0]} (page unchanged)\n`,
+      );
+      return {
+        slug,
+        status: 'error',
+        chunks: 0,
+        error: formatPlaceholderTruncationError(truncation),
+        truncation,
+      };
+    }
   }
 
   // v0.41.13 (#1309) — identity-based cross-slug dedup pre-check.

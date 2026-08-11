@@ -694,6 +694,20 @@ export interface LinkCandidate {
 export interface PageLinksResult {
   candidates: LinkCandidate[];
   unresolved: UnresolvedFrontmatterRef[];
+  /**
+   * Literal `[[...]]` texts the body DOES carry but that produced no
+   * candidate — the generic (non-DIR_PATTERN) wikilink pass dropped them
+   * because `link_resolution.global_basename` is off, or because the
+   * resolver matched nothing.
+   *
+   * Load-bearing for reconciliation, NOT diagnostics. An empty `candidates`
+   * set has two very different causes: the body genuinely stopped
+   * referencing anything (stale edges SHOULD be removed) versus the
+   * extractor being unable to resolve refs that are still written on the
+   * page (removal would be silent, unrecoverable data loss — `links` has no
+   * tombstone column). Callers reconcile against this to tell them apart.
+   */
+  unresolvableRefs: string[];
 }
 
 /**
@@ -741,6 +755,11 @@ export async function extractPageLinks(
   } = {},
 ): Promise<PageLinksResult> {
   const candidates: LinkCandidate[] = [];
+  // Refs the body carries that we could not turn into a candidate. See the
+  // `unresolvableRefs` doc on PageLinksResult — this is what keeps a
+  // reconciling caller from reading "extractor can't resolve it" as
+  // "author deleted it".
+  const unresolvableRefs: string[] = [];
 
   // 1. Markdown entity refs.
   for (const ref of extractEntityRefs(content, {
@@ -756,6 +775,7 @@ export async function extractPageLinks(
     // DIR_PATTERN.
     if (ref.needsResolution) {
       if (!opts.globalBasename || typeof resolver.resolveBasenameMatches !== 'function') {
+        unresolvableRefs.push(ref.slug);
         continue;
       }
       // Issue #972 (codex): resolve by the wikilink TARGET (ref.slug — the
@@ -778,7 +798,10 @@ export async function extractPageLinks(
       if (slashIdx !== -1) {
         matches = matches.filter(m => m === ref.slug || m.endsWith(`/${ref.slug}`));
       }
-      if (matches.length === 0) continue;
+      if (matches.length === 0) {
+        unresolvableRefs.push(ref.slug);
+        continue;
+      }
       const idx = content.indexOf(ref.slug);
       const context = idx >= 0 ? excerpt(content, idx, 240) : ref.name;
       for (const matched of matches) {
@@ -869,7 +892,11 @@ export async function extractPageLinks(
     seen.add(key);
     result.push(c);
   }
-  return { candidates: result, unresolved: fmUnresolved };
+  return {
+    candidates: result,
+    unresolved: fmUnresolved,
+    unresolvableRefs: [...new Set(unresolvableRefs)],
+  };
 }
 
 /**

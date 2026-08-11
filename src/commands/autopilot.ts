@@ -547,11 +547,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
     stopping = true;
     console.log(`Autopilot stopping (${sig}).`);
     if (childSupervisor) {
-      childSupervisor.killChild('SIGTERM');
-      await childSupervisor.awaitChildExit(35_000);
-      if (childSupervisor.childAlive) {
-        childSupervisor.killChild('SIGKILL');
-      }
+      await childSupervisor.shutdownChild(35_000, 5_000);
     }
     // #1872: abort the in-flight inline cycle and close the engine BEFORE
     // process.exit — a hard exit mid-write corrupts PGLite's WASM Postgres.

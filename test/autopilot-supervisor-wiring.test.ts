@@ -76,12 +76,8 @@ describe('autopilot.ts ↔ ChildWorkerSupervisor wiring', () => {
     expect(AUTOPILOT_SRC).toMatch(/onMaxCrashesExceeded:[\s\S]{0,300}shutdown\('max_crashes'\)/);
   });
 
-  it('shutdown drains via supervisor.killChild + awaitChildExit (not workerProc.kill)', () => {
-    // The legacy shutdown reached into `workerProc` directly. Post-refactor
-    // those calls go through the supervisor's typed surface, which lets the
-    // class encapsulate the kill/drain sequence.
-    expect(AUTOPILOT_SRC).toContain("childSupervisor.killChild('SIGTERM')");
-    expect(AUTOPILOT_SRC).toContain('childSupervisor.awaitChildExit(35_000)');
+  it('shutdown terminates and settles one captured owned worker tree', () => {
+    expect(AUTOPILOT_SRC).toContain('childSupervisor.shutdownChild(35_000, 5_000)');
     expect(AUTOPILOT_SRC).not.toContain('workerProc');
   });
 });
