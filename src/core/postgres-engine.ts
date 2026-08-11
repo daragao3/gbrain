@@ -310,8 +310,8 @@ export class PostgresEngine implements BrainEngine {
       const timeouts = db.resolveSessionTimeouts();
       const opts: Record<string, unknown> = {
         max: size,
-        idle_timeout: 20,
-        connect_timeout: 10,
+        idle_timeout: db.POOL_IDLE_TIMEOUT_S,
+        connect_timeout: db.POOL_CONNECT_TIMEOUT_S,
         types: { bigint: postgres.BigInt },
         // Silence postgres NOTICE-level messages by default. See db.ts for
         // rationale (stdout-parsing callers like jobs-submit --json break when
