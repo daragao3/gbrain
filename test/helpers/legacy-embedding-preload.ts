@@ -20,11 +20,10 @@
  */
 import { configureGateway, getEmbeddingDimensions } from '../../src/core/ai/gateway.ts';
 import { beforeEach } from 'bun:test';
-
-const LEGACY_CONFIG = {
-  embedding_model: 'openai:text-embedding-3-large',
-  embedding_dimensions: 1536,
-} as const;
+// Shared with scripts/build-pglite-snapshot.ts so the Tier 3 fixture is baked
+// at the same width the suite runs at. See that module's header for why they
+// silently disagreed before.
+import { LEGACY_EMBEDDING_CONFIG as LEGACY_CONFIG } from './legacy-embedding-config.ts';
 
 function applyLegacy() {
   configureGateway({

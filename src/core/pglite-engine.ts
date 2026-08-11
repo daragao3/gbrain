@@ -119,6 +119,24 @@ function normalizePageWrite(page: PageInput): NormalizedPageWrite {
 // silently fall through to a normal initSchema (snapshot is just an
 // optimization, never authoritative).
 let _snapshotWarnLogged = false;
+
+/**
+ * The gateway's embedding width, resolved the same way `initSchema()` does
+ * (gateway first, canonical default on failure) but synchronously, because
+ * `tryLoadSnapshot` runs inside the sync hash check. `getEmbeddingDimensions()`
+ * THROWS when the gateway is unconfigured — it never returns falsy — so the
+ * catch is the only fallback path.
+ */
+function resolveEmbeddingDimsSync(): number {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const gw = require('./ai/gateway.ts') as typeof import('./ai/gateway.ts');
+    return gw.getEmbeddingDimensions();
+  } catch {
+    return DEFAULT_EMBEDDING_DIMENSIONS;
+  }
+}
+
 function tryLoadSnapshot(snapshotPath: string): Blob | null {
   try {
     // Lazy require so production builds without these imports don't crash.
@@ -145,7 +163,12 @@ function tryLoadSnapshot(snapshotPath: string): Blob | null {
       }
       return null;
     }
-    const expectedHash = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+    const expectedHash = computeSnapshotSchemaHash(
+      MIGRATIONS,
+      PGLITE_SCHEMA_SQL,
+      crypto,
+      resolveEmbeddingDimsSync(),
+    );
     const actualHash = fs.readFileSync(versionPath, 'utf8').trim();
     if (expectedHash !== actualHash) {
       if (!_snapshotWarnLogged) {
@@ -163,13 +186,26 @@ function tryLoadSnapshot(snapshotPath: string): Blob | null {
   }
 }
 
+/**
+ * `embeddingDims` is load-bearing, not decorative. `schemaSQL` is the TEMPLATE,
+ * which carries a `__EMBEDDING_DIMS__` placeholder and so hashes identically
+ * whether the fixture was baked at 1280 or 1536. Since a snapshot-loaded engine
+ * skips `initSchema()` (and therefore the gateway's dim resolution), a fixture
+ * at the wrong width would load cleanly and then reject every insert with
+ * `expected N dimensions, not M`. Folding the width in means a mismatched
+ * fixture fails the hash check and falls back to a normal cold init — the same
+ * silent, safe degradation as any other stale snapshot.
+ */
 export function computeSnapshotSchemaHash(
   migrations: Array<{ version: number; name: string; sql?: string; sqlFor?: { pglite?: string } }>,
   schemaSQL: string,
   crypto: typeof import('node:crypto'),
+  embeddingDims: number,
 ): string {
   const hash = crypto.createHash('sha256');
-  hash.update('schema:');
+  hash.update('embedding_dims:');
+  hash.update(String(embeddingDims));
+  hash.update('\nschema:');
   hash.update(schemaSQL);
   hash.update('\nmigrations:\n');
   for (const m of migrations) {
