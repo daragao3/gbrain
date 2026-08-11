@@ -344,6 +344,48 @@ async function main() {
   // them out of the engine try/catch is safe and unlocks routing.
   const params = parseOpArgs(op, subArgs);
 
+  // `gbrain put <slug> --file PATH` — CLI-ONLY, same shape as the
+  // `query --image <path>` transform below: the flag never enters
+  // `op.params`, so the MCP surface gains no file-read primitive (a remote
+  // caller must never be able to name a local path).
+  //
+  // Why this exists: passing a large page body as `--content` can kill the
+  // process before ANY gbrain code runs. `~/.bun/bin/gbrain.exe` is Bun's
+  // ~15KB Windows binstub shim, and it faults with an access violation
+  // (0xC0000005 / exit 3221225477) once the forwarded command line grows past
+  // roughly 16-20KB — no stdout, no error, no write. Because the fault is in
+  // the shim, gbrain cannot report it: the fix has to be a path that keeps the
+  // body out of argv entirely. Reading the file here does that, and unlike the
+  // former `capture --file` workaround it preserves put's exact semantics
+  // (capture normalizes the text and returns a hash that will not match
+  // `pages.content_hash`). Stdin still works and is applied below only when
+  // `content` is still unset, so `--file` wins over a pipe.
+  if (op.name === 'put_page' && typeof params.file === 'string' && params.file.length > 0) {
+    const filePath = params.file as string;
+    delete params.file;
+    if (typeof params.content === 'string' && params.content.length > 0) {
+      console.error('Error: pass either --content or --file, not both.');
+      process.exit(1);
+    }
+    try {
+      const buf = readFileSync(filePath);
+      const { detectBinaryNullByte } = await import('./commands/capture.ts');
+      const nulAt = detectBinaryNullByte(buf);
+      if (nulAt >= 0) {
+        console.error(
+          `Error: ${filePath} looks binary (NUL byte at offset ${nulAt}). ` +
+          `put writes markdown pages; use a content-type processor for binary input.`,
+        );
+        process.exit(1);
+      }
+      params.content = buf.toString('utf-8');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Error: could not read --file ${filePath}: ${msg}`);
+      process.exit(1);
+    }
+  }
+
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
   // piped input can't block the parse forever — the bounded read leaves the
   // param unset on timeout and the required-param check below fails fast.
@@ -2480,7 +2522,7 @@ SETUP
 
 PAGES
   get <slug>                         Read a page
-  put <slug> [< file.md]             Write/update a page
+  put <slug> [--file F | < file.md]  Write/update a page (--file for large bodies)
   delete <slug>                      Delete a page
   list [--type T] [--tag T] [-n N]   List pages
 

@@ -26,7 +26,8 @@
  */
 
 import { createWriteStream, type WriteStream } from 'fs';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
+import { terminateOwnedProcessTree } from '../minions/handlers/shell-platform.ts';
 import { dirname } from 'path';
 import { mkdirSync, existsSync } from 'fs';
 import type { TranscriptEvent, TranscriptSink } from './agent-runner.ts';
@@ -105,17 +106,57 @@ export interface SpawnResult {
 }
 
 const SIGTERM_GRACE_MS = 5_000;
+const CLEANUP_TIMEOUT_MS = 20_000;
 
-export async function spawnWithCapture(bin: string, args: string[], opts: SpawnOpts): Promise<SpawnResult> {
+type SpawnProcess = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ChildProcess;
+
+interface SpawnWithCaptureDeps {
+  platform?: NodeJS.Platform;
+  spawn?: SpawnProcess;
+  terminate?: (
+    child: ChildProcess,
+    platform?: NodeJS.Platform,
+    signal?: NodeJS.Signals,
+  ) => Promise<void>;
+  graceMs?: number;
+  cleanupTimeoutMs?: number;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+}
+
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+export async function spawnWithCapture(
+  bin: string,
+  args: string[],
+  opts: SpawnOpts,
+  deps: SpawnWithCaptureDeps = {},
+): Promise<SpawnResult> {
   const start = Date.now();
   return new Promise((resolve, reject) => {
+    const platform = deps.platform ?? process.platform;
+    const spawnProcess = deps.spawn ?? spawn;
+    const terminate = deps.terminate ?? terminateOwnedProcessTree;
+    const graceMs = deps.graceMs ?? SIGTERM_GRACE_MS;
+    const cleanupTimeoutMs = deps.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
+    const setTimer = deps.setTimer ?? setTimeout;
+    const clearTimer = deps.clearTimer ?? clearTimeout;
     let child: ChildProcess;
     try {
-      child = spawn(bin, args, {
+      child = spawnProcess(bin, args, {
         cwd: opts.cwd,
         env: opts.env,
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
+        // POSIX cleanup signals the owned process group by negative PID. Create
+        // that group explicitly; Windows keeps taskkill /T tree ownership.
+        detached: platform !== 'win32',
       });
     } catch (e) {
       reject(e);
@@ -123,20 +164,107 @@ export async function spawnWithCapture(bin: string, args: string[], opts: SpawnO
     }
 
     let timedOut = false;
+    let settled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
-    const wallClockTimer = setTimeout(() => {
+    let closeObservedResolve: (() => void) | undefined;
+    const closeObserved = new Promise<void>((resolveClose) => {
+      closeObservedResolve = resolveClose;
+    });
+
+    const clearKillTimer = () => {
+      if (killTimer === null) return;
+      clearTimer(killTimer);
+      killTimer = null;
+    };
+    const beginSettle = () => {
+      if (settled) return false;
+      settled = true;
+      clearTimer(wallClockTimer);
+      clearKillTimer();
+      return true;
+    };
+    const settle = (fn: () => void) => {
+      if (!beginSettle()) return;
+      fn();
+    };
+    const startOwnedTermination = () => {
+      if (platform !== 'win32') {
+        killTimer = setTimer(() => {
+          killTimer = null;
+          // `exit` only proves the detached group leader exited. Descendants
+          // can still retain inherited pipes, so escalate the owned group until
+          // `close` establishes the cleanup boundary.
+          void terminate(child, platform, 'SIGKILL').catch(() => {
+            // Cleanup must never replace the first process/transcript failure.
+          });
+        }, graceMs);
+      }
+      return terminate(child, platform, 'SIGTERM').catch(() => {
+        // Cleanup must never replace the first process/transcript failure.
+      });
+    };
+    const waitForCleanupBoundary = async (cleanup: Promise<void>) => {
+      await Promise.race([
+        Promise.all([cleanup, closeObserved]),
+        new Promise<void>((resolveBoundary) => {
+          const boundaryTimer = setTimer(resolveBoundary, cleanupTimeoutMs);
+          closeObserved.then(() => {
+            clearTimer(boundaryTimer);
+            resolveBoundary();
+          });
+        }),
+      ]);
+    };
+    const failFirst = (error: unknown) => {
+      if (!beginSettle()) return;
+      const primaryError = normalizeError(error);
+      void (async () => {
+        const cleanup = startOwnedTermination();
+        await waitForCleanupBoundary(cleanup);
+        clearKillTimer();
+        reject(primaryError);
+      })();
+    };
+    const capture = (channel: 'stdout' | 'stderr', chunk: Buffer) => {
+      if (settled) return;
+      try {
+        opts.transcriptSink.write({ ts: Date.now(), channel, bytes: chunk });
+      } catch (error) {
+        failFirst(error);
+      }
+    };
+    const wallClockTimer = setTimer(() => {
       timedOut = true;
-      try { child.kill('SIGTERM'); } catch { /* already gone */ }
-      killTimer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      }, SIGTERM_GRACE_MS);
+      if (!beginSettle()) return;
+      void (async () => {
+        const cleanup = startOwnedTermination();
+        await waitForCleanupBoundary(cleanup);
+        clearKillTimer();
+        resolve({
+          exitCode: 124,
+          durationMs: Date.now() - start,
+          timedOut: true,
+        });
+      })();
     }, opts.timeoutMs);
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      opts.transcriptSink.write({ ts: Date.now(), channel: 'stdout', bytes: chunk });
+    child.stdout?.on('data', (chunk: Buffer) => capture('stdout', chunk));
+    child.stderr?.on('data', (chunk: Buffer) => capture('stderr', chunk));
+    child.stdin?.on('error', failFirst);
+    child.on('exit', () => {
+      // A POSIX descendant may still hold inherited pipes after its detached
+      // group leader exits. Keep group escalation armed until `close`.
+      if (platform === 'win32') clearKillTimer();
     });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      opts.transcriptSink.write({ ts: Date.now(), channel: 'stderr', bytes: chunk });
+    child.on('error', failFirst);
+    child.on('close', (code) => {
+      clearKillTimer();
+      closeObservedResolve?.();
+      settle(() => resolve({
+        exitCode: typeof code === 'number' ? code : (timedOut ? 124 : 1),
+        durationMs: Date.now() - start,
+        timedOut,
+      }));
     });
 
     if (opts.stdinPayload !== undefined && child.stdin) {
@@ -147,26 +275,9 @@ export async function spawnWithCapture(bin: string, args: string[], opts: SpawnO
           bytes: Buffer.from(opts.stdinPayload, 'utf-8'),
         });
         child.stdin.end(opts.stdinPayload, 'utf-8');
-      } catch (e) {
-        reject(e);
-        return;
+      } catch (error) {
+        failFirst(error);
       }
     }
-
-    child.on('error', (err) => {
-      clearTimeout(wallClockTimer);
-      if (killTimer) clearTimeout(killTimer);
-      reject(err);
-    });
-
-    child.on('close', (code) => {
-      clearTimeout(wallClockTimer);
-      if (killTimer) clearTimeout(killTimer);
-      resolve({
-        exitCode: typeof code === 'number' ? code : (timedOut ? 124 : 1),
-        durationMs: Date.now() - start,
-        timedOut,
-      });
-    });
   });
 }

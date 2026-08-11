@@ -26,6 +26,9 @@ import { execSync } from 'child_process';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 // Helper: create a minimal valid markdown file
 function mdPage(title: string, body = 'Content.'): string {
@@ -252,12 +255,12 @@ describe('sync monorepo subdir-source support (#753/#774)', () => {
     }
   });
 
-  test('path-traversal: symlink subdir pointing outside repo is rejected (NAV-1 TOCTOU)', async () => {
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('path-traversal: symlink subdir pointing outside repo is rejected (NAV-1 TOCTOU)', async () => {
     const outsideDir = mkdtempSync(join(tmpdir(), 'gbrain-sym-target-'));
     writeFileSync(join(outsideDir, 'secret.md'), mdPage('Secret'));
     const symlinkPath = join(repoPath, 'symlink-escape');
     try {
-      symlinkSync(outsideDir, symlinkPath);
+      symlinkSync(outsideDir, symlinkPath, 'dir');
       const { performSync } = await import('../src/commands/sync.ts');
       await expect(
         performSync(engine, {

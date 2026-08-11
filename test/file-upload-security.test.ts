@@ -8,6 +8,9 @@ import {
   validateFilename,
   OperationError,
 } from '../src/core/operations.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 // --- validateUploadPath ---
 
@@ -65,11 +68,11 @@ describe('validateUploadPath', () => {
     expect(() => validateUploadPath('/etc/passwd', root)).toThrow(OperationError);
   });
 
-  it('rejects a symlink whose final component points outside root (B5 regression)', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('rejects a symlink whose final component points outside root (B5 regression)', () => {
     const target = join(outside, 'target.txt');
     writeFileSync(target, 'secret');
     const link = join(root, 'link-to-outside.txt');
-    symlinkSync(target, link);
+    symlinkSync(target, link, 'file');
     try {
       expect(() => validateUploadPath(link, root)).toThrow(OperationError);
     } finally {
@@ -77,9 +80,9 @@ describe('validateUploadPath', () => {
     }
   });
 
-  it('rejects a symlink whose parent dir points outside root (B5 parent-symlink regression)', () => {
+  it.skipIf(!FS_CAPABILITIES.directorySymlink)('rejects a symlink whose parent dir points outside root (B5 parent-symlink regression)', () => {
     const linkDir = join(root, 'link-dir');
-    symlinkSync(outside, linkDir);
+    symlinkSync(outside, linkDir, 'dir');
     const p = join(linkDir, 'secret.txt');
     writeFileSync(join(outside, 'secret.txt'), 'secret');
     try {

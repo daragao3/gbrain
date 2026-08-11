@@ -252,13 +252,63 @@ const MAX_FILE_SIZE = 5_000_000; // 5MB
 type ImportFromContentOptions = {
   noEmbed?: boolean;
   sourceId?: string;
+  /**
+   * v0.29.1: basename without extension for filename-date precedence on
+   * `daily/`, `meetings/` slugs. importFromFile threads this from the
+   * disk path; the put_page MCP op derives it from the slug tail.
+   */
   filename?: string;
+  /**
+   * v0.32.7 CJK wave: repo-relative path captured at import. Stored on
+   * `pages.source_path` so sync's delete/rename code can look up the
+   * page slug by path when the slug isn't derivable (frontmatter
+   * fallback). MCP `put_page` callers leave undefined (no file).
+   */
   sourcePath?: string;
+  /**
+   * v0.32.7 CJK wave (codex post-merge F1): bypass the
+   * `existing.content_hash === hash` short-circuit and ALWAYS re-chunk +
+   * re-embed. Used by `gbrain reindex --markdown` so a chunker version
+   * bump actually reaches unchanged-source pages. Without this, the
+   * sweep silently no-ops on every page whose markdown body hasn't
+   * been edited since the last import — defeating the whole purpose of
+   * the version bump.
+   */
   forceRechunk?: boolean;
+  /**
+   * v0.39.0.0 T1.5: active schema pack for type inference. When set, parseMarkdown
+   * uses the pack's path_prefixes instead of the hardcoded gbrain-base table.
+   * When unset, falls back to pre-v0.39 behavior (parity gate stays green).
+   * Callers thread this from `loadActivePack(ctx)` once per command —
+   * NEVER per file inside sync (codex perf finding #7).
+   */
   activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
+  /**
+   * v0.39.3.0 provenance write-through (WARN-8). When set, threaded to
+   * `tx.putPage` so the page's `source_kind`, `source_uri`,
+   * `ingested_via` DB columns get populated. The trust gate lives at the
+   * `put_page` op layer — by the time importFromContent sees these, the
+   * caller is already trusted (capture CLI sets them; remote MCP callers
+   * had theirs overridden to `mcp:put_page` upstream). `ingested_at` is
+   * NOT a caller-controllable param; the engine's putPage stamps it
+   * server-side via now() when any provenance write fires.
+   */
   source_kind?: string | null;
   source_uri?: string | null;
   ingested_via?: string | null;
+  /**
+   * v0.42 (#1699 trust boundary). When `true` (untrusted caller — remote MCP
+   * put_page), gate-owned frontmatter markers (`quarantine`, `content_flag`,
+   * `embed_skip`) are STRIPPED from the incoming content before the content-
+   * sanity gate runs, so only the gate itself can set them. Without this, a
+   * write-scoped OAuth client could `put_page` clean content carrying a
+   * hand-crafted `quarantine` marker to hide arbitrary pages from search, or
+   * a `content_flag.detail` to inject text into the agent-trusted warning
+   * channel. `put_page` passes `ctx.remote !== false` (fail-closed: anything
+   * not strictly local is untrusted, matching the v0.26.9 F7b posture).
+   * Local/trusted callers (sync, capture, dream, `quarantine clear/scan`)
+   * leave it unset → markers preserved (the gate + CLI own them).
+   */
   remote?: boolean;
   writePrecondition?: ConditionalWritePrecondition;
   /**

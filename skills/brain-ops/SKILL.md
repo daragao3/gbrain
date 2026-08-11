@@ -150,6 +150,13 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - Blocking the response to do enrichment
 - Overwriting user's direct statements with lower-authority sources
 - Creating brain pages for non-notable entities
+- Rewriting a page with sections replaced by a bracketed note such as
+  `[Remaining sections - unchanged]`. `put_page` is a whole-page write, not a
+  patch: whatever you send becomes the page. A payload that both shrinks the
+  page substantially and carries a standalone bracketed line is REFUSED
+  (`status: "error"`, `truncation.error: "placeholder_truncation"`, page left
+  untouched). Read the page, edit the full text, send all of it back. If a
+  large removal really is intended, pass `allow_truncation: true`.
 
 ## Tools Used
 

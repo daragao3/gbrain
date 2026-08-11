@@ -15,6 +15,9 @@ import {
 } from '../../../src/core/ingestion/sources/inbox-folder.ts';
 import { IngestionTestHarness } from '../../../src/core/ingestion/test-harness.ts';
 import type { FSWatcher } from 'chokidar';
+import { getFsCapabilities } from '../../helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 let tmpRoot: string;
 let inboxDir: string;
@@ -247,7 +250,7 @@ describe('InboxFolderSource — file ingestion', () => {
     await harness.stop();
   });
 
-  test('symlink is rejected and logged', async () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('symlink is rejected and logged', async () => {
     const stub = makeStubWatcher();
     const source = createInboxFolderSource({
       inboxDir,
@@ -263,7 +266,7 @@ describe('InboxFolderSource — file ingestion', () => {
     const target = path.join(tmpRoot, 'sensitive.md');
     fs.writeFileSync(target, '# secret');
     const link = path.join(inboxDir, 'evil.md');
-    fs.symlinkSync(target, link);
+    fs.symlinkSync(target, link, 'file');
 
     stub.fireAdd(link);
     await new Promise((r) => setTimeout(r, 150));

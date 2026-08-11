@@ -35,8 +35,10 @@ export async function endPoolBounded(
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const guard = new Promise<void>((resolve) => {
+    // Keep the hard bound referenced while awaiting the race. A never-settling
+    // pool may be the only remaining handle under Bun's test runner; unref()
+    // would then prevent this guard from firing at all.
     timer = setTimeout(resolve, POOL_END_TIMEOUT_SECONDS * 1000 + 500);
-    timer.unref?.();
   });
   try {
     await Promise.race([

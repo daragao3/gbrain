@@ -5,9 +5,8 @@
 > dashboard at `/admin`, scoped operations, and a live SSE activity feed.
 > Pre-v0.26 legacy bearer tokens still work — `verifyAccessToken` falls back
 > to the `access_tokens` table and grandfathers tokens to `read+write+admin`.
-> Postgres-only for the legacy fallback (the `access_tokens` table is Postgres-only);
-> OAuth tables work on both PGLite and Postgres. See [SECURITY.md](../../SECURITY.md)
-> for env vars and tunable defaults.
+> OAuth and operator-created bearer tokens work on both PGLite and Postgres.
+> See [SECURITY.md](../../SECURITY.md) for env vars and tunable defaults.
 
 Access your brain from any device, any AI client. GBrain ships two transports:
 `gbrain serve` (stdio) for local agents, and `gbrain serve --http` (v0.26.0+)
@@ -47,7 +46,7 @@ Supported clients:
 
 See the [OAuth 2.1 setup](#oauth-21-setup-v100) section below.
 
-### Remote with legacy bearer tokens (pre-v0.26 deployments) — Postgres only
+### Remote with legacy bearer tokens (pre-v0.26 deployments)
 
 ```
 Your AI client (Claude Desktop, Perplexity, etc.)
@@ -57,8 +56,7 @@ Your AI client (Claude Desktop, Perplexity, etc.)
 ```
 
 This requires:
-1. A Postgres-backed brain (the `access_tokens` table only exists on Postgres;
-   running `gbrain serve --http` against a PGLite install fails fast at startup)
+1. A PGLite- or Postgres-backed brain
 2. A machine running `gbrain serve --http`
 3. A public tunnel (ngrok, Tailscale, or cloud host)
 4. A bearer token created via `gbrain auth create <name>`
@@ -243,15 +241,10 @@ gbrain auth test \
 
 ## Operations
 
-All 30 GBrain operations are available remotely, including `sync_brain` and
-`file_upload` (no timeout limits with self-hosted server).
-
-**Security note on `file_upload`:** remote MCP callers are confined to the working
-directory where `gbrain serve` was launched. Symlinks, `..` traversal, and absolute
-paths outside cwd are rejected. Page slugs and filenames are allowlist-validated
-(alphanumeric + hyphens; no control chars, RTL overrides, or backslashes). Local
-CLI callers (`gbrain file upload ...`) keep unrestricted filesystem access since
-the user owns the machine.
+All non-`localOnly` GBrain operations are available remotely, subject to their
+`read`, `write`, or `admin` scope. The HTTP server rejects `sync_brain`,
+`file_upload`, `file_list`, and `file_url` before their handlers run because those
+operations require local filesystem access. Run them through the local CLI instead.
 
 ## Deployment Options
 

@@ -5,24 +5,22 @@
  * (the hook works even with the committed helper deleted).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import { hardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 
 // #2943 root cause: `env: process.env` is REQUIRED here. Bun snapshots
-// process.env at startup, so without it the spawned git — and any post-commit
-// hook it fires — is blind to beforeEach's HOME/GBRAIN_HOME mutations (the
-// same Bun quirk as #2747, see resolveGbrainCliPath in brain-repo-durability).
-// Pre-fix, the hook under test resolved ${GBRAIN_HOME:-$HOME/.gbrain} to the
-// OPERATOR'S REAL ~/.gbrain: it wrote its log lines there (polluting the real
-// brain-push.log on every run), the LOCAL-ONLY test never saw them in the
-// temp log it polls, and the assertion only passed when the scaffolding push
-// from beforeEach (spawned by hardenBrainRepo WITH explicit env) happened to
-// still be in flight, lose the ref race, and retry AFTER the test had pointed
-// origin at the dead path — an accidental, load-dependent signal. That race
-// is the CI flake.
+// process.env at startup, so without it spawned git commands and post-commit
+// hooks are blind to beforeEach's HOME/GBRAIN_HOME mutations (the same Bun
+// quirk as #2747, see resolveGbrainCliPath in brain-repo-durability). Without
+// the explicit environment, hooks under test pollute the operator's real
+// ~/.gbrain instead of the isolated test home.
+//
+// hardenBrainRepo commits scaffolding with core.hooksPath=/dev/null, pushes it
+// synchronously, and only then returns. There is deliberately no detached
+// scaffolding hook to await before the test body starts.
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], {
     stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', env: process.env,
@@ -47,32 +45,65 @@ async function waitForOrigin(bare: string, expectSha: string, ms = 30_000): Prom
   return false;
 }
 
-/** #2943 (index.lock form): hardenBrainRepo installs the post-commit hook
- * BEFORE committing the scaffolding, so that commit fires the hook and
- * detaches a background brain_push. If that push loses the ref race against
- * hardenBrainRepo's own synchronous push, it falls back to `git pull
- * --rebase`, which takes .git/index.lock — racing the test body's first git
- * calls ("Unable to create '.../.git/index.lock': File exists"). Wait for the
- * detached push's terminal log line before handing the repo to the test. */
-async function waitForHookPushSettled(ms = 30_000): Promise<void> {
-  const log = join(process.env.GBRAIN_HOME!, 'brain-push.log');
-  const terminal = /\[push\] (ok|lock-timeout|LOCAL-ONLY)/;
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (existsSync(log) && terminal.test(readFileSync(log, 'utf-8'))) return;
-    await new Promise(r => setTimeout(r, 150));
-  }
-  throw new Error(`detached hook push did not settle within ${ms}ms (${log})`);
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+function readIfPresent(path: string): string {
+  try { return readFileSync(path, 'utf8'); } catch { return ''; }
 }
 
 let root: string, work: string, bare: string;
 let oldHome: string | undefined, oldGbrainHome: string | undefined;
+let oldAllowFileTransport: string | undefined;
+let fixturePushLog: string;
+let fixturePushActiveDir: string;
+let expectedHookHead: string | undefined;
+let observeHookPush = false;
+
+async function waitForHookQuiescence(): Promise<void> {
+  if (!observeHookPush) return;
+  const deadline = Date.now() + 30_000;
+
+  while (Date.now() < deadline) {
+    const active = (() => {
+      try { return readdirSync(fixturePushActiveDir); } catch { return []; }
+    })();
+    const remoteHead = (() => {
+      try { return originHead(bare); } catch { return ''; }
+    })();
+    const targetReached = expectedHookHead === undefined || remoteHead === expectedHookHead;
+    if (targetReached && active.length === 0) return;
+    await delay(150);
+  }
+
+  throw new Error(
+    `timed out waiting for fixture hook marker cleanup (${fixturePushActiveDir})`,
+  );
+}
+
+async function removeFixtureTree(): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== 'EBUSY' && code !== 'EPERM') || Date.now() >= deadline) throw error;
+      await delay(50);
+    }
+  }
+}
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'bdh-'));
   oldHome = process.env.HOME; oldGbrainHome = process.env.GBRAIN_HOME;
+  oldAllowFileTransport = process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
   process.env.HOME = mkdtempSync(join(root, 'home-'));
   process.env.GBRAIN_HOME = join(process.env.HOME, '.gbrain');
+  fixturePushLog = join(process.env.GBRAIN_HOME, 'brain-push.log');
+  fixturePushActiveDir = join(process.env.GBRAIN_HOME, 'push-active');
+  expectedHookHead = undefined;
+  observeHookPush = false;
   process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT = '1';
   bare = mkdtempSync(join(root, 'origin-')) + '.git';
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare], { stdio: 'ignore', env: process.env });
@@ -83,20 +114,31 @@ beforeEach(async () => {
   git(work, 'add', 'README.md'); git(work, 'commit', '-qm', 'init'); git(work, 'push', '-q', 'origin', 'main');
   git(work, 'remote', 'set-head', 'origin', 'main');
   await hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false });
-  await waitForHookPushSettled();
 });
-afterEach(() => {
-  if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
-  if (oldGbrainHome === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = oldGbrainHome;
-  delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
-  rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  const cleanupErrors: unknown[] = [];
+  try {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldGbrainHome === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = oldGbrainHome;
+    if (oldAllowFileTransport === undefined) delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
+    else process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT = oldAllowFileTransport;
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  try { await waitForHookQuiescence(); } catch (error) { cleanupErrors.push(error); }
+  try { await removeFixtureTree(); } catch (error) { cleanupErrors.push(error); }
+
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, 'fixture cleanup failed');
 });
 
 describe('brain-commit-push.sh (D13 guarantee)', () => {
   test('add → commit → push lands on origin', () => {
     mkdirSync(join(work, 'people'), { recursive: true });
     writeFileSync(join(work, 'people', 'alice.md'), '# alice\n');
-    // helper requires explicit path; stages people/alice.md
+    // The helper's commit starts one detached hook push. Its synchronous push
+    // has already settled when execFileSync returns; await the hook marker too.
+    observeHookPush = true;
     execFileSync('bash', [join(work, 'scripts', 'brain-commit-push.sh'), 'add alice', 'people/alice.md'], {
       cwd: work, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
     });
@@ -109,6 +151,7 @@ describe('brain-commit-push.sh (D13 guarantee)', () => {
 
   test('refuses success when the push cannot land (exit non-zero)', () => {
     git(work, 'remote', 'set-url', 'origin', join(root, 'gone.git'));
+    observeHookPush = true;
     writeFileSync(join(work, 'x.md'), 'x\n');
     let code = 0;
     try {
@@ -165,6 +208,8 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
     writeFileSync(join(work, 'note.md'), 'note\n');
     git(work, 'add', 'note.md'); git(work, 'commit', '-qm', 'note'); // fires .git/hooks/post-commit
     const head = git(work, 'rev-parse', 'HEAD');
+    expectedHookHead = head;
+    observeHookPush = true;
     expect(await waitForOrigin(bare, head)).toBe(true);
   }, 60_000);
 
@@ -172,11 +217,14 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
     rmSync(join(work, 'scripts', 'brain-commit-push.sh'));
     git(work, 'add', '-A'); git(work, 'commit', '-qm', 'remove helper');
     const head = git(work, 'rev-parse', 'HEAD');
+    expectedHookHead = head;
+    observeHookPush = true;
     expect(await waitForOrigin(bare, head)).toBe(true);
   }, 60_000);
 
   test('logs a clear LOCAL-ONLY line when origin is unreachable', async () => {
     git(work, 'remote', 'set-url', 'origin', join(root, 'gone2.git'));
+    observeHookPush = true;
     writeFileSync(join(work, 'orphan.md'), 'o\n');
     git(work, 'add', 'orphan.md'); git(work, 'commit', '-qm', 'orphan');
     const log = join(process.env.GBRAIN_HOME!, 'brain-push.log');

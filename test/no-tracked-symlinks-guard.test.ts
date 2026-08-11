@@ -20,15 +20,19 @@ import { existsSync, statSync, mkdtempSync, rmSync, writeFileSync, symlinkSync }
 import { resolve, join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
 const GUARD = resolve(REPO_ROOT, 'scripts/check-no-tracked-symlinks.sh');
 const VERIFY_DISPATCHER = resolve(REPO_ROOT, 'scripts/run-verify-parallel.sh');
+const FS_CAPABILITIES = getFsCapabilities(tmpdir());
 
 describe('check-no-tracked-symlinks.sh', () => {
-  it('exists and is executable', () => {
+  it('exists and is executable on POSIX', () => {
     expect(existsSync(GUARD)).toBe(true);
-    expect((statSync(GUARD).mode & 0o100) !== 0).toBe(true);
+    if (process.platform !== 'win32') {
+      expect((statSync(GUARD).mode & 0o100) !== 0).toBe(true);
+    }
   });
 
   it('passes on this repo (no tracked symlinks)', () => {
@@ -37,7 +41,7 @@ describe('check-no-tracked-symlinks.sh', () => {
     expect(r.stdout).toContain('OK');
   });
 
-  it('fails and names the offender when a symlink is tracked', () => {
+  it.skipIf(!FS_CAPABILITIES.directorySymlink)('fails and names the offender when a symlink is tracked', () => {
     // Build a throwaway repo rather than poisoning this one's index.
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-symlink-guard-'));
     try {
@@ -50,12 +54,13 @@ describe('check-no-tracked-symlinks.sh', () => {
 
       writeFileSync(join(dir, 'README.md'), '# fixture\n');
       // Absolute target that does not exist — the exact shape of the bug.
-      symlinkSync('/tmp/does-not-exist/node_modules', join(dir, 'node_modules'));
+      const missingTarget = join(dir, 'does-not-exist', 'node_modules');
+      symlinkSync(missingTarget, join(dir, 'node_modules'), 'dir');
       git('add', '-A');
 
       const r = spawnSync('bash', [GUARD], { cwd: dir, encoding: 'utf-8' });
       expect(r.status).toBe(1);
-      expect(r.stdout).toContain('node_modules -> /tmp/does-not-exist/node_modules');
+      expect(r.stdout).toContain(`node_modules -> ${missingTarget}`);
       expect(r.stdout).toContain('git rm --cached');
     } finally {
       rmSync(dir, { recursive: true, force: true });

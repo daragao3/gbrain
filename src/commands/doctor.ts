@@ -28,7 +28,7 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import type { DbUrlSource } from '../core/config.ts';
 import { gbrainPath, loadConfig } from '../core/config.ts';
 import { reflexEnabled } from '../core/context/reflex.ts';
-import { resolveSocketPath } from '../core/context/resolve-ipc.ts';
+import { resolveIpcEndpoint } from '../core/context/resolve-ipc.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 import { homedir } from 'os';
 import { isPathInside, isPathStrictlyInside } from '../core/path-confine.ts';
@@ -40,7 +40,9 @@ import {
   isGlobalBasenameEnabled,
   buildBasenameIndex,
   queryBasenameIndex,
+  getExtraEntityDirs,
 } from '../core/link-extraction.ts';
+import { scanOrphanedMarkdownEdges } from '../core/entity-dirs-guard.ts';
 import { probeSourceGitState } from '../core/git-head.ts';
 // v0.41.32.0: remote staleness reads the stored newest_content_at column via
 // this pure comparator (no git subprocess on the HTTP MCP doctor path).
@@ -963,6 +965,11 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // thin-client parity so `gbrain remote doctor` sees the same hint.
   checks.push(await checkLinkResolutionOpportunity(engine));
 
+  // 11b. entity_dirs_orphaned_edges — the safety twin of 11a. Whether an
+  // entity_dirs prefix is declared is brain state, not local state, so the
+  // thin client must see the same armed-delete warning the local doctor does.
+  checks.push(await checkEntityDirsOrphanedEdges(engine));
+
   // 12. v0.40.5.0 Federated Sync v2 (T12) — federation_health:
   //   - Per-source lag, embed coverage, failed-job rate.
   //   - Single-source brain short-circuits to ok.
@@ -1318,6 +1325,85 @@ export async function checkLinkResolutionOpportunity(
       name,
       status: 'ok',
       message: `${wouldResolveCount}/${bareCount} bare wikilinks (${pct}%) would resolve — below the 20% / 5-link threshold for surfacing a hint${sampledNote}.`,
+    };
+  } catch (e) {
+    return {
+      name,
+      status: 'ok',
+      message: `Skipped (${e instanceof Error ? e.message : String(e)})`,
+    };
+  }
+}
+
+/**
+ * entity_dirs_orphaned_edges — the safety half of `link_resolution.entity_dirs`.
+ *
+ * That key reads as a recall knob, but `runAutoLink`'s removal loop deletes
+ * every reconcilable edge missing from the freshly-extracted desired set. A
+ * prefix that is not declared is not extractable, so its existing edges are
+ * hard-deleted on the next local put_page — and `links` has no tombstone
+ * column. This check answers "would the config as it stands right now orphan
+ * anything?" and hands back the exact prefix to re-add.
+ *
+ * `fail`, not `warn`: nothing is broken yet, but the delete is unrecoverable
+ * and the fix is a single command.
+ *
+ * Reads the EFFECTIVE dirs via getExtraEntityDirs, so the env override
+ * (GBRAIN_LINK_RESOLUTION_ENTITY_DIRS) — which outranks the DB plane and
+ * therefore bypasses the config-set preflight — is caught here.
+ */
+export async function checkEntityDirsOrphanedEdges(
+  engine: BrainEngine,
+  progress?: ProgressReporter,
+): Promise<Check> {
+  const name = 'entity_dirs_orphaned_edges';
+  try {
+    const entityDirs = await getExtraEntityDirs(engine);
+    const scan = await scanOrphanedMarkdownEdges(engine, { entityDirs, progress });
+    const truncNote = scan.truncated
+      ? ` (scan hit its time budget after ${scan.pagesScanned} page(s) — the real count may be higher)`
+      : '';
+
+    if (scan.atRisk.length === 0) {
+      return {
+        name,
+        status: 'ok',
+        message:
+          `No links are orphaned by the current entity_dirs${truncNote}. ` +
+          `Declared: ${entityDirs.length > 0 ? entityDirs.join(', ') : '(canonical dirs only)'}.`,
+        details: { at_risk_edges: 0, declared_prefixes: entityDirs },
+      };
+    }
+
+    const missing = Object.keys(scan.byPrefix).sort();
+    // The remedy re-sets the FULL list. Emitting only the missing prefixes
+    // would drop the ones already declared and arm a fresh hazard.
+    const remedy = [...entityDirs, ...missing].sort().join(',');
+    const examples = scan.atRisk
+      .slice(0, 5)
+      .map((e) => `${e.fromSlug} → ${e.toSlug}`)
+      .join(', ');
+    const more = scan.atRisk.length > 5 ? `, +${scan.atRisk.length - 5} more` : '';
+    const breakdown = missing.map((p) => `${scan.byPrefix[p]} under '${p}/'`).join(', ');
+
+    return {
+      name,
+      status: 'fail',
+      message:
+        `${scan.atRisk.length} link(s) across ${scan.pagesAffected} page(s) reference prefixes ` +
+        `that link_resolution.entity_dirs does not declare (${breakdown})${truncNote}. ` +
+        `The next local put_page on those pages re-extracts, misses these references, and ` +
+        `hard-deletes the links — links has no tombstone column, so that is unrecoverable. ` +
+        `Examples: ${examples}${more}. ` +
+        `Re-add the prefixes: gbrain config set link_resolution.entity_dirs '${remedy}'`,
+      details: {
+        at_risk_edges: scan.atRisk.length,
+        pages_affected: scan.pagesAffected,
+        missing_prefixes: missing,
+        by_prefix: scan.byPrefix,
+        declared_prefixes: entityDirs,
+        truncated: scan.truncated,
+      },
     };
   } catch (e) {
     return {
@@ -4630,7 +4716,10 @@ export async function computePoolReapHealthCheck(
  * Policy-skill install state is reported in details (it ships into the HOST
  * repo, so absence in gbrain's own skills dir is expected, not a failure).
  */
-export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
+export function buildRetrievalReflexCheck(
+  skillsDir: string | null,
+  platform: NodeJS.Platform = process.platform,
+): Check {
   const name = 'retrieval_reflex_health';
   try {
     const cfg = loadConfig();
@@ -4667,9 +4756,19 @@ export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
       pathDesc = 'postgres direct';
       viablePathVisible = true;
     } else if (engineKind === 'pglite' && cfg?.database_path) {
-      const socket = resolveSocketPath(cfg.database_path);
-      viablePathVisible = existsSync(socket);
-      pathDesc = viablePathVisible ? 'pglite via serve IPC' : 'pglite — serve IPC socket not present';
+      const endpoint = resolveIpcEndpoint(cfg.database_path, platform);
+      if (endpoint.kind === 'windows-pipe') {
+        // Named-pipe liveness is not filesystem-visible. Report the configured
+        // transport without claiming that a server is listening; the recent
+        // heartbeat remains the authority for observed runtime activity.
+        viablePathVisible = false;
+        pathDesc = 'pglite via serve IPC named pipe';
+      } else {
+        viablePathVisible = existsSync(endpoint.address);
+        pathDesc = viablePathVisible
+          ? 'pglite via serve IPC'
+          : 'pglite — serve IPC socket not present';
+      }
     } else {
       pathDesc = `engine ${engineKind}`;
       viablePathVisible = false;
@@ -7683,6 +7782,13 @@ export async function buildChecks(
     // budget so a huge brain never wedges doctor on this check.
     progress.heartbeat('link_resolution_opportunity');
     checks.push(await checkLinkResolutionOpportunity(engine, progress));
+    // entity_dirs_orphaned_edges — the safety twin of the check above.
+    // link_resolution_opportunity asks "could we extract MORE?"; this asks
+    // "is the current config armed to DELETE what we already have?" A prefix
+    // that stops being declared stops being extractable, and runAutoLink
+    // hard-deletes its edges on the next put_page. links has no tombstone.
+    progress.heartbeat('entity_dirs_orphaned_edges');
+    checks.push(await checkEntityDirsOrphanedEdges(engine, progress));
     // v0.36.0.0 (A5): ZE embedding key health + schema/config width consistency.
     progress.heartbeat('ze_embedding_health');
     checks.push(await checkZeEmbeddingHealth(engine));

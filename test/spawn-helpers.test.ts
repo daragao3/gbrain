@@ -17,11 +17,11 @@ describe('buildSpawnInvocation', () => {
     expect(result).toEqual({ cmd: '/bin/gbrain', args: ['jobs', 'work'] });
   });
 
-  test('with tini: wraps cliPath with tini and "--" separator', () => {
+  test('with tini: forwards signals to the worker process group', () => {
     const result = buildSpawnInvocation('/usr/bin/tini', '/bin/gbrain', ['jobs', 'work']);
     expect(result).toEqual({
       cmd: '/usr/bin/tini',
-      args: ['--', '/bin/gbrain', 'jobs', 'work'],
+      args: ['-g', '--', '/bin/gbrain', 'jobs', 'work'],
     });
   });
 
@@ -32,7 +32,7 @@ describe('buildSpawnInvocation', () => {
     });
     expect(buildSpawnInvocation('/usr/bin/tini', '/bin/gbrain', [])).toEqual({
       cmd: '/usr/bin/tini',
-      args: ['--', '/bin/gbrain'],
+      args: ['-g', '--', '/bin/gbrain'],
     });
   });
 });
