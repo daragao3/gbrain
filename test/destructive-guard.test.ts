@@ -15,6 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { useColdPglite } from './helpers/cold-pglite.ts';
 import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
@@ -29,8 +30,10 @@ import {
 } from '../src/core/destructive-guard.ts';
 
 // Tier 3 opt-out — these tests need the cold-init schema path so the v33
-// migration columns exist on the brain under test.
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+// migration columns exist on the brain under test. File-scoped: a bare
+// module-level delete would force every LATER file in this shard's bun process
+// cold too (see test/helpers/cold-pglite.ts).
+useColdPglite();
 
 async function setupBrain(): Promise<PGLiteEngine> {
   const engine = new PGLiteEngine();

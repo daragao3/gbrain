@@ -104,6 +104,24 @@ export function resolvePrepare(url: string): boolean | undefined {
   return undefined;
 }
 
+/**
+ * postgres.js pool timing, in seconds. Exported (rather than left inlined at
+ * each `postgres(url, opts)` call site) so downstream readiness/health logic
+ * can derive its deadlines from the pool's OWN budget instead of guessing at
+ * one — and so changing the budget here moves those deadlines with it.
+ *
+ * Why this is load-bearing: `idle_timeout` closes idle backends, so the first
+ * query after a quiet period MUST open a fresh one, and opening one is allowed
+ * up to `connect_timeout`. Any health deadline shorter than
+ * POOL_CONNECT_TIMEOUT_S is therefore unsatisfiable by construction and will
+ * report a merely-cold pool as a dead backend. That is exactly what /health
+ * did until 2026-08-11 with a 3s deadline over this 10s budget. The invariant
+ * is now pinned by test/serve-http-health.test.ts; see HEALTH_HARD_CEILING_MS
+ * in src/commands/serve-http.ts.
+ */
+export const POOL_IDLE_TIMEOUT_S = 20;
+export const POOL_CONNECT_TIMEOUT_S = 10;
+
 export function resolvePoolSize(explicit?: number): number {
   if (typeof explicit === 'number' && explicit > 0) return explicit;
   const raw = process.env.GBRAIN_POOL_SIZE;
@@ -237,8 +255,8 @@ export async function connect(config: EngineConfig): Promise<boolean> {
     const timeouts = resolveSessionTimeouts();
     const opts: Record<string, unknown> = {
       max: resolvePoolSize(),
-      idle_timeout: 20,
-      connect_timeout: 10,
+      idle_timeout: POOL_IDLE_TIMEOUT_S,
+      connect_timeout: POOL_CONNECT_TIMEOUT_S,
       types: {
         // Register pgvector type
         bigint: postgres.BigInt,

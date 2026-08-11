@@ -122,6 +122,24 @@ function normalizePageWrite(page: PageInput): NormalizedPageWrite {
 // silently fall through to a normal initSchema (snapshot is just an
 // optimization, never authoritative).
 let _snapshotWarnLogged = false;
+
+/**
+ * The gateway's embedding width, resolved the same way `initSchema()` does
+ * (gateway first, canonical default on failure) but synchronously, because
+ * `tryLoadSnapshot` runs inside the sync hash check. `getEmbeddingDimensions()`
+ * THROWS when the gateway is unconfigured — it never returns falsy — so the
+ * catch is the only fallback path.
+ */
+function resolveEmbeddingDimsSync(): number {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const gw = require('./ai/gateway.ts') as typeof import('./ai/gateway.ts');
+    return gw.getEmbeddingDimensions();
+  } catch {
+    return DEFAULT_EMBEDDING_DIMENSIONS;
+  }
+}
+
 // Exported for test: the staleness guard is safety-critical (a stale snapshot
 // would restore an out-of-date schema) and cannot be pinned while private.
 export function tryLoadSnapshot(snapshotPath: string): Blob | null {
@@ -150,7 +168,12 @@ export function tryLoadSnapshot(snapshotPath: string): Blob | null {
       }
       return null;
     }
-    const expectedHash = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+    const expectedHash = computeSnapshotSchemaHash(
+      MIGRATIONS,
+      PGLITE_SCHEMA_SQL,
+      crypto,
+      resolveEmbeddingDimsSync(),
+    );
     const actualHash = fs.readFileSync(versionPath, 'utf8').trim();
     if (expectedHash !== actualHash) {
       if (!_snapshotWarnLogged) {
@@ -168,13 +191,26 @@ export function tryLoadSnapshot(snapshotPath: string): Blob | null {
   }
 }
 
+/**
+ * `embeddingDims` is load-bearing, not decorative. `schemaSQL` is the TEMPLATE,
+ * which carries a `__EMBEDDING_DIMS__` placeholder and so hashes identically
+ * whether the fixture was baked at 1280 or 1536. Since a snapshot-loaded engine
+ * skips `initSchema()` (and therefore the gateway's dim resolution), a fixture
+ * at the wrong width would load cleanly and then reject every insert with
+ * `expected N dimensions, not M`. Folding the width in means a mismatched
+ * fixture fails the hash check and falls back to a normal cold init — the same
+ * silent, safe degradation as any other stale snapshot.
+ */
 export function computeSnapshotSchemaHash(
   migrations: Array<{ version: number; name: string; sql?: string; sqlFor?: { pglite?: string } }>,
   schemaSQL: string,
   crypto: typeof import('node:crypto'),
+  embeddingDims: number,
 ): string {
   const hash = crypto.createHash('sha256');
-  hash.update('schema:');
+  hash.update('embedding_dims:');
+  hash.update(String(embeddingDims));
+  hash.update('\nschema:');
   hash.update(schemaSQL);
   hash.update('\nmigrations:\n');
   for (const m of migrations) {
@@ -1151,7 +1187,11 @@ export class PGLiteEngine implements BrainEngine {
          page_kind = EXCLUDED.page_kind,
          title = EXCLUDED.title,
          compiled_truth = EXCLUDED.compiled_truth,
-         timeline = EXCLUDED.timeline,
+         -- Preserve-on-empty, like the provenance columns below. A body with no
+         -- timeline sentinel parses to '', which previously erased a stored
+         -- timeline on every unrelated edit. Callers that pass '' mean "not
+         -- applicable", not "clear it"; a non-empty value still replaces.
+         timeline = COALESCE(NULLIF(EXCLUDED.timeline, ''), pages.timeline),
          frontmatter = EXCLUDED.frontmatter,
          content_hash = EXCLUDED.content_hash,
          updated_at = now(),
@@ -1256,7 +1296,8 @@ export class PGLiteEngine implements BrainEngine {
            page_kind = $4,
            title = $5,
            compiled_truth = $6,
-           timeline = $7,
+           -- Preserve-on-empty — see putPage.
+           timeline = COALESCE(NULLIF($7::text, ''), pages.timeline),
            frontmatter = $8::jsonb,
            content_hash = $9,
            updated_at = now(),
@@ -1420,7 +1461,8 @@ export class PGLiteEngine implements BrainEngine {
     await this.db.query(
       `UPDATE pages
          SET compiled_truth = $1,
-             timeline = $2,
+             -- Preserve-on-empty — see putPage.
+             timeline = COALESCE(NULLIF($2::text, ''), pages.timeline),
              content_hash = $3,
              updated_at = now()
        WHERE source_id = $4
