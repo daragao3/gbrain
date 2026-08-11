@@ -18,7 +18,7 @@
  *     verdict instead of looking identical to a clean migration.
  */
 
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -28,6 +28,26 @@ import { saveConfig, loadConfigFileOnly } from '../src/core/config.ts';
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
+
+/**
+ * Each `runMigrateEngine` test below stands up two or three PGLite engines and
+ * runs two complete migrations; every engine instance replays 121 schema
+ * migrations first. On a loaded developer box the three tests measured 31.7s /
+ * 46.2s / 61.9s — all three blew the previous 30s budget, and the slowest had
+ * not finished at 61.9s, so the repo's usual 60s ceiling is short too.
+ *
+ * Do NOT read a timeout here as evidence of a cross-test env race. bun does not
+ * overlap anything: a per-test timeout does not abandon the promise, it awaits
+ * it to settle and reports the true elapsed time. The tell is arithmetic — this
+ * file's 31.7 + 46.2 + 61.9 sums to 139.8s against a reported total of 145.85s,
+ * so nothing ran concurrently and no test's `finally` can fire during another
+ * test's migration.
+ *
+ * Runtime is dominated by whatever else the machine is doing — the same test has
+ * both passed under a 180s budget and overrun a 300s one — so treat this number
+ * as headroom, not a guarantee.
+ */
+const MIGRATION_TEST_TIMEOUT_MS = 300_000;
 
 function fakePage(overrides: Partial<Page> = {}): Page {
   return {
@@ -111,6 +131,46 @@ describe('copyPageToTarget — undefined-column normalization (#3194)', () => {
 });
 
 describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3194)', () => {
+  // A clean `runMigrateEngine` ends in `saveConfig(newConfig)`, and `configDir()`
+  // resolves GBRAIN_HOME at CALL time — so a caller that forgets it silently
+  // rewrites the machine-global ~/.gbrain/config.json. Each test below already
+  // sandboxes itself correctly, setting GBRAIN_HOME and restoring it in a
+  // `finally`, and this file is NOT the source of the repeatedly-observed clobber
+  // of that global config: a negative control ran it under a fake home with all
+  // three migrate tests timing out and left paired temp dirs with the sentinel
+  // config untouched. The artifact settles it independently — the clobbered file
+  // carried the user's real keys (self_upgrade, embedding_model, schema_pack),
+  // which can only come from `...existingFile` reading the REAL config, whereas
+  // this file's guard-only `saveConfig` would have left a 2-key object first.
+  //
+  // The file-scoped pin below is therefore cheap defence in depth, not a fix for
+  // that bug. It makes `prevGbrainHome` DEFINED for every test in the file, so no
+  // per-test restore can leave GBRAIN_HOME unset for whatever runs next in this
+  // process, and any write that escapes a test lands inside the sandbox. The real
+  // containment is the fail-closed guard in `saveConfig` itself.
+  let fileSandbox: string;
+  let prevFileGbrainHome: string | undefined;
+
+  beforeAll(() => {
+    prevFileGbrainHome = process.env.GBRAIN_HOME;
+    fileSandbox = mkdtempSync(join(tmpdir(), 'gbrain-migrate-filesandbox-'));
+    process.env.GBRAIN_HOME = fileSandbox;
+    // The sandbox must hold a READABLE config, not just exist. Anything that
+    // resolves `configDir()` here while no per-test home is active — an
+    // overrunning test's trailing work, or the window before a test's own
+    // `saveConfig` lands — calls `loadConfig()`, and an empty gbrain home makes
+    // that abort the whole process with "No brain configured. Run: gbrain init",
+    // taking the rest of the file's tests down with it. Same inert guard-only
+    // shape each test writes into its own home.
+    saveConfig({ engine: 'postgres', database_url: 'postgresql://unused/guard-only' });
+  });
+
+  afterAll(() => {
+    if (prevFileGbrainHome !== undefined) process.env.GBRAIN_HOME = prevFileGbrainHome;
+    else delete process.env.GBRAIN_HOME;
+    rmSync(fileSandbox, { recursive: true, force: true });
+  });
+
   afterEach(() => {
     _resetCliExitVerdictForTests();
   });
@@ -226,7 +286,7 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       rmSync(gbrainHome, { recursive: true, force: true });
       rmSync(join(targetDbPath, '..'), { recursive: true, force: true });
     }
-  }, 30000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   test('a run where every page fails AFTER putPage lands still writes a manifest — no --force needed to resume', async () => {
     const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-migrate-home-'));
@@ -306,7 +366,7 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       rmSync(gbrainHome, { recursive: true, force: true });
       rmSync(join(targetDbPath, '..'), { recursive: true, force: true });
     }
-  }, 30000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 
   test('--force always resets the manifest, even when the target looks empty (stale manifest from a recreated target)', async () => {
     const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-migrate-home-'));
@@ -371,5 +431,5 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       rmSync(gbrainHome, { recursive: true, force: true });
       rmSync(targetDir, { recursive: true, force: true });
     }
-  }, 30000);
+  }, MIGRATION_TEST_TIMEOUT_MS);
 });
