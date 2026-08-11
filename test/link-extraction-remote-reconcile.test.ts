@@ -11,6 +11,7 @@ import {
   type SlugResolver,
 } from '../src/core/link-extraction.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const nullResolver: SlugResolver = { resolve: async () => null };
 
@@ -264,14 +265,12 @@ describe('isRemoteReconcileEnabled', () => {
   test('env var overrides the DB plane in both directions', async () => {
     const on = configEngine({ 'link_resolution.remote_reconcile': 'on' });
     const off = configEngine({});
-    process.env.GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE = '0';
-    try {
+    await withEnv({ GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE: '0' }, async () => {
       expect(await isRemoteReconcileEnabled(on)).toBe(false);
-      process.env.GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE = '1';
+    });
+    await withEnv({ GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE: '1' }, async () => {
       expect(await isRemoteReconcileEnabled(off)).toBe(true);
-    } finally {
-      delete process.env.GBRAIN_LINK_RESOLUTION_REMOTE_RECONCILE;
-    }
+    });
   });
 });
 
@@ -290,11 +289,8 @@ describe('getExtraEntityDirs', () => {
 
   test('env var overrides the DB plane', async () => {
     const engine = configEngine({ 'link_resolution.entity_dirs': 'sessions' });
-    process.env.GBRAIN_LINK_RESOLUTION_ENTITY_DIRS = 'markets';
-    try {
+    await withEnv({ GBRAIN_LINK_RESOLUTION_ENTITY_DIRS: 'markets' }, async () => {
       expect(await getExtraEntityDirs(engine)).toEqual(['markets']);
-    } finally {
-      delete process.env.GBRAIN_LINK_RESOLUTION_ENTITY_DIRS;
-    }
+    });
   });
 });
