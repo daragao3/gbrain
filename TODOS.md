@@ -127,8 +127,9 @@
   it was deliberately not bundled into the data-loss fix.
   Where: `src/core/link-extraction.ts` (`DIR_PATTERN`, `WIKILINK_RE`).
 - [ ] **P2 - frontmatter-derived edges have the same exposure and are NOT protected.**
-  `runAutoLink`'s safety net keys on `unresolvableRefs`, which only covers body
-  wikilinks. An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
+  `runAutoLink`'s safety net keys on `unresolvableRefs`, which covers body
+  references only (all four shapes as of v0.42.84.0, but nothing from
+  frontmatter). An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
   a slug, so it cannot be matched against `to_slug` and was left out rather than
   half-matched. A frontmatter field whose value stops resolving therefore still drops
   its edge. Closing this needs the frontmatter resolver to report the slug it was
