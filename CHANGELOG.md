@@ -46,9 +46,29 @@ Turning on `link_resolution.global_basename` does not cover this. A reference un
 
 The check names a folder only when a real link depends on it. A reference you wrote to a page that was never linked is not reported, because there is nothing to lose.
 
+### Also in this release: the settings the guard is about
+
+This release is the first to carry `link_resolution.entity_dirs` and `link_resolution.remote_reconcile`, so both are new here.
+
+**`link_resolution.entity_dirs` lets you name your own top-level folders.** GBrain ships a fixed list of folder names it recognizes in references. A brain organized under other names got no links from its references at all: the page rendered the reference, the graph stayed empty, and nothing reported an error. Name your folders and the normal link path applies to them:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'sessions,systems,runbooks'
+```
+
+**`link_resolution.remote_reconcile` builds the graph for pages written over the network.** Writing a page through the HTTP interface reported success while quietly skipping link and timeline building, so wikilinks never became links and a written out `## Timeline` never became timeline entries. Since most writing now happens that way, that was the normal path. With this on, a network write builds timeline entries in full and builds links from explicit `[[wikilinks]]` only, and it only ever adds. Removing links stays a local operation, so a network caller cannot prune links someone else wrote:
+
+```bash
+gbrain config set link_resolution.remote_reconcile true
+```
+
+Both settings are off by default and are now accepted by `gbrain config set` directly. Previously they existed but were not registered, so the documented command failed with "Unknown config key" and you had to find `--force` by reading the source.
+
 ## To take advantage of v0.42.81.0
 
 Run `gbrain doctor` once after upgrading. If it reports stranded links, copy the command it prints and run it. That puts the missing folder names back, so those references start producing links again and the existing ones resume being kept up to date. If it reports nothing, your settings already cover every folder your pages reference and there is no action to take.
+
+If your pages live under folder names GBrain does not ship by default, set `link_resolution.entity_dirs` to name them. If you write pages over the network and your graph looks empty, turn on `link_resolution.remote_reconcile`.
 
 If any of your own scripts narrow `link_resolution.entity_dirs`, they now need `--yes` to keep working.
 
@@ -60,8 +80,14 @@ If any of your own scripts narrow `link_resolution.entity_dirs`, they now need `
 - **`src/core/entity-dirs-guard.ts`** holds the shared scan behind both surfaces. It reads existing links and page bodies with plain queries, so no schema change and no engine change were needed. It reports a link only when a reference under an undeclared folder is backed by a real link, and it says so explicitly when a scan stops early rather than reporting a partial count as a complete one.
 - **`extractUndeclaredPrefixRefs` in `src/core/link-extraction.ts`** finds references the extractor can no longer see. It mirrors all four reference shapes the extractor understands and lives beside them so the two cannot drift apart.
 
+#### Added (carried in with this release)
+- **Operator-declared folder names.** `link_resolution.entity_dirs` (comma separated) extends the recognized top-level folder set that gates reference matching. `normalizeEntityDirs` lowercases, trims, drops duplicates and canonical names, and rejects anything that is not a plain lowercase slug, since these strings are built into a pattern. Resolution order is the `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` environment variable, then stored config, then empty.
+- **Graph building for network writes.** `link_resolution.remote_reconcile` runs timeline building in full and link building from explicit wikilinks only, add only, for a `put_page` that arrives over the network. Removal remains local only. Off by default.
+- **Both keys are accepted by `gbrain config set`.** They were previously reachable only through `--force`.
+
 #### Tests
 - `test/entity-dirs-undeclared-refs.test.ts`, `test/entity-dirs-guard-scan.test.ts`, `test/doctor-entity-dirs-orphaned-edges.test.ts`, and `test/config-entity-dirs-preflight.test.ts` cover each reference shape, references inside code blocks and URLs, links that are not eligible for removal, the environment override, the refusal and its `--yes` override, the row cap, and a regression for the page shape that lost links in the first place.
+- `test/link-extraction-remote-reconcile.test.ts` covers the network write path, including that it only ever adds.
 
 
 ## [0.42.80.0] - 2026-08-11

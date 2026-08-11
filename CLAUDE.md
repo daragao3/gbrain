@@ -117,6 +117,19 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   parent to a release that explicitly admits the fixed line before raising the override.
   Keep direct pins, `package.json` overrides, and `bun.lock` synchronized; regenerate the
   lockfile rather than hand-editing it. Pinned by `test/dependency-security.test.ts`.
+- **`link_resolution.entity_dirs` is load-bearing SAFETY, not a recall knob.** It reads as
+  coverage ("which top-level dirs produce typed edges"), but `runAutoLink` — the only
+  automatic link-deletion path — deletes every reconcilable edge whose key is missing from
+  the freshly-extracted desired set, and that removal loop is NOT gated on the desired set
+  being empty. A prefix that stops being declared stops being extractable, so its edges are
+  hard-deleted on the next local `put_page`, and `links` has no tombstone column. Narrowing
+  that key is a destructive operation wearing a config change's clothes: gate it, never
+  "simplify" it. `global_basename` is NOT a mitigation (it resolves via the basename path,
+  which emits a different `link_source` + `link_type`, so the original edge still misses the
+  desired set). v0.42.80.0's `unresolvableRefs` net covers the generic-wikilink shape ONLY —
+  markdown-link, bare-slug and qualified-wikilink refs never become a ref, so they never
+  reach it (`TODOS.md` P1). Guarded by the `entity_dirs_orphaned_edges` doctor check and the
+  `gbrain config set/unset` preflight; detail in `docs/architecture/KEY_FILES.md`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by
