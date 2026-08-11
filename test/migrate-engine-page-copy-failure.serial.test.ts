@@ -36,16 +36,16 @@ import type { Page } from '../src/core/types.ts';
  * 46.2s / 61.9s — all three blew the previous 30s budget, and the slowest had
  * not finished at 61.9s, so the repo's usual 60s ceiling is short too.
  *
- * A timeout here is not a cosmetic red test. The runner cannot cancel the
- * abandoned body, so it keeps running and its env-restoring `finally` fires
- * while a sibling test is still migrating — see the sandbox note in the
- * describe below for what that used to corrupt.
+ * Do NOT read a timeout here as evidence of a cross-test env race. bun does not
+ * overlap anything: a per-test timeout does not abandon the promise, it awaits
+ * it to settle and reports the true elapsed time. The tell is arithmetic — this
+ * file's 31.7 + 46.2 + 61.9 sums to 139.8s against a reported total of 145.85s,
+ * so nothing ran concurrently and no test's `finally` can fire during another
+ * test's migration.
  *
- * Treat this number as a frequency reducer, NOT as the fix. Runtime here is
- * dominated by whatever else the machine is doing (the same test has both
- * passed under a 180s budget and overrun a 300s one), so no value is reliably
- * "enough". The file-scoped sandbox below is the actual containment and holds
- * even when a test does time out.
+ * Runtime is dominated by whatever else the machine is doing — the same test has
+ * both passed under a 180s budget and overrun a 300s one — so treat this number
+ * as headroom, not a guarantee.
  */
 const MIGRATION_TEST_TIMEOUT_MS = 300_000;
 
@@ -132,26 +132,22 @@ describe('copyPageToTarget — undefined-column normalization (#3194)', () => {
 
 describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3194)', () => {
   // A clean `runMigrateEngine` ends in `saveConfig(newConfig)`, and `configDir()`
-  // resolves GBRAIN_HOME at CALL time — so whatever the env says the moment that
-  // last write happens is the config that gets rewritten. Each test below sandboxes
-  // itself by setting GBRAIN_HOME and restoring the previous value in a `finally`.
+  // resolves GBRAIN_HOME at CALL time — so a caller that forgets it silently
+  // rewrites the machine-global ~/.gbrain/config.json. Each test below already
+  // sandboxes itself correctly, setting GBRAIN_HOME and restoring it in a
+  // `finally`, and this file is NOT the source of the repeatedly-observed clobber
+  // of that global config: a negative control ran it under a fake home with all
+  // three migrate tests timing out and left paired temp dirs with the sentinel
+  // config untouched. The artifact settles it independently — the clobbered file
+  // carried the user's real keys (self_upgrade, embedding_model, schema_pack),
+  // which can only come from `...existingFile` reading the REAL config, whereas
+  // this file's guard-only `saveConfig` would have left a 2-key object first.
   //
-  // That is not enough on its own. These tests each drive two full PGLite
-  // migrations (121 schema migrations per engine instance); when one blows its
-  // time budget, the runner advances to the next test while the abandoned body is
-  // still in flight. The abandoned test's `finally` then restores GBRAIN_HOME to
-  // its own pre-test value while a sibling migration is still running toward
-  // `saveConfig`. If that pre-test value was `undefined` — which it is whenever
-  // the file is run without GBRAIN_HOME already in the environment — the restore
-  // DELETES the variable, and the sibling's final `saveConfig` lands on the
-  // developer's real machine-global ~/.gbrain/config.json, repointing it at a
-  // %TEMP%\gbrain-migrate-target-* directory. Every subsequent `gbrain get/list`
-  // then returns `page_not_found` against an empty temp brain — a silent false
-  // negative indistinguishable from a deleted page.
-  //
-  // Pinning a file-scoped sandbox here makes `prevGbrainHome` DEFINED for every
-  // test in the file, so no per-test restore can ever leave GBRAIN_HOME unset.
-  // A write that escapes its own test still lands inside the sandbox.
+  // The file-scoped pin below is therefore cheap defence in depth, not a fix for
+  // that bug. It makes `prevGbrainHome` DEFINED for every test in the file, so no
+  // per-test restore can leave GBRAIN_HOME unset for whatever runs next in this
+  // process, and any write that escapes a test lands inside the sandbox. The real
+  // containment is the fail-closed guard in `saveConfig` itself.
   let fileSandbox: string;
   let prevFileGbrainHome: string | undefined;
 
