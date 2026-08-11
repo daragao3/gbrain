@@ -21,6 +21,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PageType, TimelineInput } from '../types.ts';
 import type { ResolverContext } from '../resolvers/interface.ts';
 import { SlugRegistry } from './slug-registry.ts';
+import { normalizeLineEndings } from '../line-endings.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -121,6 +122,27 @@ export interface WriteTx {
   readonly context: ResolverContext;
 }
 
+/**
+ * Storage is LF-only, and this class is the one write surface that does NOT
+ * inherit that from `importFromContent` — every method below calls
+ * `engine.putPage` / `engine.addTimelineEntry` directly, bypassing the ingest
+ * chokepoint where `normalizeLineEndings` otherwise runs.
+ *
+ * Today's callers synthesize their content from an LLM, so it is LF by
+ * construction and these calls are no-ops (`normalizeLineEndings` returns the
+ * same reference when the string holds no CR). That is a property of the
+ * current callers, not of the surface — a future caller that reads a file, a
+ * webhook payload, or a Windows checkout would silently reintroduce the
+ * 2026-08-10 defect: stored CRLF makes a page invisible to `\n`-based search,
+ * so the page reads as "already gone" while sitting right there.
+ *
+ * Normalizing here makes the LF invariant hold at the write, independent of
+ * who calls it. The read-back paths (`setFrontmatterField`, and the timeline
+ * carried through `setCompiledTruth`) normalize too, so a rewrite heals a
+ * legacy CR-bearing page instead of copying its CR forward.
+ *
+ * See src/core/line-endings.ts for the incident.
+ */
 class WriteTxImpl implements WriteTx {
   readonly touchedSlugs = new Set<string>();
   private slugRegistry: SlugRegistry;
@@ -160,8 +182,8 @@ class WriteTxImpl implements WriteTx {
     await this.engine.putPage(slug, {
       type: input.type,
       title: input.displayName,
-      compiled_truth: input.compiledTruth,
-      timeline: input.timeline ?? '',
+      compiled_truth: normalizeLineEndings(input.compiledTruth),
+      timeline: normalizeLineEndings(input.timeline ?? ''),
       frontmatter: input.frontmatter ?? {},
     });
     this.touchedSlugs.add(slug);
@@ -169,7 +191,12 @@ class WriteTxImpl implements WriteTx {
   }
 
   async appendTimeline(slug: string, entry: TimelineInput): Promise<void> {
-    await this.engine.addTimelineEntry(slug, entry); // gbrain-allow-direct-insert: BrainWriter is the canonical synthesize-phase write surface — output gets fenced into pages via putPage in the same transaction
+    const normalized: TimelineInput = {
+      ...entry,
+      summary: normalizeLineEndings(entry.summary),
+      ...(entry.detail === undefined ? {} : { detail: normalizeLineEndings(entry.detail) }),
+    };
+    await this.engine.addTimelineEntry(slug, normalized); // gbrain-allow-direct-insert: BrainWriter is the canonical synthesize-phase write surface — output gets fenced into pages via putPage in the same transaction
     this.touchedSlugs.add(slug);
   }
 
@@ -179,8 +206,8 @@ class WriteTxImpl implements WriteTx {
     await this.engine.putPage(slug, {
       type: existing.type,
       title: existing.title,
-      compiled_truth: body,
-      timeline: existing.timeline,
+      compiled_truth: normalizeLineEndings(body),
+      timeline: normalizeLineEndings(existing.timeline),
       frontmatter: existing.frontmatter,
     });
     this.touchedSlugs.add(slug);
@@ -193,8 +220,8 @@ class WriteTxImpl implements WriteTx {
     await this.engine.putPage(slug, {
       type: existing.type,
       title: existing.title,
-      compiled_truth: existing.compiled_truth,
-      timeline: existing.timeline,
+      compiled_truth: normalizeLineEndings(existing.compiled_truth),
+      timeline: normalizeLineEndings(existing.timeline),
       frontmatter: nextFm,
     });
     this.touchedSlugs.add(slug);
