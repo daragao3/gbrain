@@ -1,5 +1,27 @@
 # TODOS
 
+## v0.42.79.0 follow-ups (placeholder-truncation guard)
+
+- [ ] **P2 - nothing surfaces pages that were ALREADY truncated this way.** The
+  v0.42.79.0 guard stops new placeholder-shaped truncations at write time, but a brain
+  damaged before the upgrade carries the loss silently forever. The signature is cheap to
+  detect on stored content: a page whose compiled truth contains a standalone bracketed
+  line (`findPlaceholderLines` from `src/core/placeholder-truncation.ts`) and whose latest
+  `page_versions` row is substantially longer than the live body. That is the same two-part
+  test the write-time guard uses, evaluated against history instead of an incoming payload.
+  Wire it as a `lint` rule (sibling of `huge-page` / `scraper-junk`, which already reuse the
+  `content-sanity` assessor the same way) and surface the count in `gbrain doctor`. The
+  repair path already exists: `page_versions` holds the pre-write content.
+  Where: `src/commands/lint.ts`, `src/commands/doctor.ts`.
+- [ ] **P3 - the shrink thresholds are validated against one corpus only.**
+  `PLACEHOLDER_MIN_REMOVED_CHARS` (500) and `PLACEHOLDER_MAX_RETAINED_RATIO` (0.75) were
+  picked to clear the three observed incidents (which retained 0.24, 0.35, and 0.56) with
+  margin, and checked for false positives against a single 490-page brain where the
+  line-shape test matched 3 benign lines on 2 pages. They are exported constants, so tuning
+  them touches no call sites. If a second corpus shows the shape matching materially more
+  often, revisit before tightening anything else.
+  Where: `src/core/placeholder-truncation.ts`.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns every
