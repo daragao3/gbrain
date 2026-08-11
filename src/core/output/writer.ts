@@ -93,6 +93,10 @@ export interface PageValidationContext {
   timeline: string;
   frontmatter: Record<string, unknown>;
   engine: BrainEngine;
+  /** Exact scalar source for write-scoped validation reads. */
+  sourceId?: string;
+  /** Federated read scope; takes precedence over sourceId. */
+  sourceIds?: string[];
 }
 
 // ---------------------------------------------------------------------------

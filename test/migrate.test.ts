@@ -6,6 +6,62 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
+describe('migrate v126 — page_revision_cas', () => {
+  const migration = MIGRATIONS.find(m => m.version === 126);
+
+  test('adds revision and installs an idempotent page-state trigger', () => {
+    expect(migration?.name).toBe('page_revision_cas');
+    expect(migration?.sql).toContain(
+      'ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1',
+    );
+    expect(migration?.sql).toContain('CREATE OR REPLACE FUNCTION bump_page_revision_fn()');
+    expect(migration?.sql).toContain('DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages');
+    expect(migration?.sql).toContain('CREATE TRIGGER bump_page_revision_trg');
+    expect(migration?.sql).toContain('OLD.deleted_at IS DISTINCT FROM NEW.deleted_at');
+    expect(migration?.sql).not.toContain('OLD.emotional_weight IS DISTINCT FROM NEW.emotional_weight');
+    expect(migration?.sql).not.toContain('OLD.contextual_retrieval_mode IS DISTINCT FROM NEW.contextual_retrieval_mode');
+  });
+});
+
+describe('migrate v126 — page revision trigger behavior on PGLite', () => {
+  let engine: PGLiteEngine;
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    await engine.initSchema();
+  }, 30000);
+
+  afterAll(async () => {
+    await engine.disconnect();
+  }, 30000);
+
+  test('advances only for client-observable page-state changes', async () => {
+    const first = await engine.putPage('test/revision-trigger', {
+      type: 'concept',
+      title: 'Revision Trigger',
+      compiled_truth: 'v1',
+      timeline: '',
+    });
+    expect(first.revision).toBe(1);
+
+    await engine.executeRaw(
+      `UPDATE pages SET title = $1 WHERE slug = $2`,
+      ['Revision Trigger v2', 'test/revision-trigger'],
+    );
+    const changed = await engine.getPage('test/revision-trigger');
+    expect(changed?.revision).toBe(2);
+
+    await engine.executeRaw(
+      `UPDATE pages SET emotional_weight = $1 WHERE slug = $2`,
+      [0.75, 'test/revision-trigger'],
+    );
+    const neutral = await engine.getPage('test/revision-trigger');
+    expect(neutral?.revision).toBe(2);
+  });
+});
+
 describe('migrate', () => {
   test('LATEST_VERSION is a number >= 1', () => {
     expect(typeof LATEST_VERSION).toBe('number');

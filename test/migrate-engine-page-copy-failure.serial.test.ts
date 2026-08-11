@@ -39,6 +39,7 @@ function fakePage(overrides: Partial<Page> = {}): Page {
     timeline: '',
     frontmatter: {},
     source_id: 'default',
+    revision: 1,
     created_at: new Date(),
     updated_at: new Date(),
     ...overrides,

@@ -10,6 +10,7 @@ import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
+import type { ConditionalWritePrecondition, ImportResult } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
@@ -18,6 +19,7 @@ import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, isRemoteReconcileEnabled, getExtraEntityDirs, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
+import { logPutPagePostProcessing } from './audit/put-page-audit.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
 import { getContentFlag } from './quarantine.ts';
@@ -853,167 +855,244 @@ const get_page: Operation = {
   cliHints: { name: 'get', positional: ['slug'] },
 };
 
-const put_page: Operation = {
-  name: 'put_page',
-  description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
-  params: {
-    slug: { type: 'string', required: true, description: 'Page slug' },
-    content: {
-      type: 'string',
-      required: true,
-      description:
-        'Full markdown content with YAML frontmatter. The `---` block MUST be valid YAML — ' +
-        'if it is not, the write is REFUSED (status "error", frontmatter.error "unparseable") and ' +
-        'the page is left untouched. Two mistakes cause nearly all failures: (1) a leading space ' +
-        'before a key (" type: theme" instead of "type: theme"); (2) an unquoted colon inside a ' +
-        'value (title: Fed regime: no guidance) — wrap the whole value in quotes.',
-    },
-    allow_empty: { type: 'boolean', required: false, description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.' },
-    // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
-    // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
-    // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
-    // server stamps below; the params are accepted on the wire only so the
-    // op schema stays uniform across transports. Audit-trail spoofing is
-    // closed structurally — clients cannot poison source_kind labels.
-    source_kind: { type: 'string', required: false, description: 'Ingestion channel taxonomy (capture-cli | put_page | webhook | …). Remote callers: SERVER-STAMPED, client value ignored.' },
-    source_uri: { type: 'string', required: false, description: 'Original URI/path/message-id the event carried. Remote callers: SERVER-STAMPED null.' },
-    ingested_via: { type: 'string', required: false, description: 'Richer label paired with source_kind. Remote callers: SERVER-STAMPED.' },
-  },
-  mutating: true,
-  scope: 'write',
-  handler: async (ctx, p) => {
-    const slug = p.slug as string;
+type ActivePackSummary = {
+  page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }>;
+};
 
-    // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
-    // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
-    // autopilot, dream cycle, file watcher) may populate source_kind /
-    // source_uri / ingested_via from their own state. Anything else
-    // (HTTP MCP, stdio MCP, subagent) gets the server-stamped
-    // `mcp:put_page` regardless of what was passed.
-    //
-    // Closes the spoofing surface CV6 identified: pre-fix a write-scope
-    // OAuth token could send `source_kind: 'capture-cli'` to poison the
-    // audit trail. Fail-closed: `ctx.remote === false` is the ONLY truthy
-    // condition that admits client-supplied provenance.
-    let provenanceKind: string | null;
-    let provenanceUri: string | null;
-    let provenanceVia: string | null;
-    if (ctx.remote === false) {
-      // Trusted local caller: honor the client params (may be null/undefined
-      // for legacy local callers that don't set them).
-      provenanceKind = (p.source_kind as string | undefined) ?? null;
-      provenanceUri = (p.source_uri as string | undefined) ?? null;
-      provenanceVia = (p.ingested_via as string | undefined) ?? null;
-    } else {
-      // Remote caller or unset trust: server stamps. Mirrors the existing
-      // write-through stamping at the file-side (~:637).
-      provenanceKind = 'mcp:put_page';
-      provenanceUri = null;
-      provenanceVia = 'mcp:put_page';
+type PutPageMode =
+  | { kind: 'legacy' }
+  | { kind: 'conditional'; precondition: ConditionalWritePrecondition };
+
+const putPageContentDescription =
+  'Full markdown content with YAML frontmatter. The `---` block MUST be valid YAML — ' +
+  'if it is not, the write is REFUSED (status "error", frontmatter.error "unparseable") and ' +
+  'the page is left untouched. Two mistakes cause nearly all failures: (1) a leading space ' +
+  'before a key (" type: theme" instead of "type: theme"); (2) an unquoted colon inside a ' +
+  'value (title: Fed regime: no guidance) — wrap the whole value in quotes.';
+
+const putPageSourceKindParam: ParamDef = {
+  type: 'string', required: false,
+  description: 'Ingestion channel taxonomy (capture-cli | put_page | webhook | …). Remote callers: SERVER-STAMPED, client value ignored.',
+};
+const putPageSourceUriParam: ParamDef = {
+  type: 'string', required: false,
+  description: 'Original URI/path/message-id the event carried. Remote callers: SERVER-STAMPED null.',
+};
+const putPageIngestedViaParam: ParamDef = {
+  type: 'string', required: false,
+  description: 'Richer label paired with source_kind. Remote callers: SERVER-STAMPED.',
+};
+// Placeholder-truncation guard (2026-08-10 KB incident). Shared by put_page and
+// put_page_conditional: the guard is a content-sanity refusal independent of any
+// write precondition, so a conditional write must be able to opt out the same way.
+const putPageAllowEmptyParam: ParamDef = {
+  type: 'boolean',
+  required: false,
+  description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.',
+};
+const putPageAllowTruncationParam: ParamDef = {
+  type: 'boolean',
+  required: false,
+  description:
+    'Permit a write that drops a large share of the existing compiled truth while ' +
+    'containing a standalone bracketed placeholder line (e.g. "[Remaining sections - ' +
+    'unchanged]"). That combination is normally REFUSED (status "error", truncation.error ' +
+    '"placeholder_truncation") because it is the signature of an abbreviated rewrite that ' +
+    'silently destroys content. Prefer resending the FULL compiled truth; set this only ' +
+    'when the removal is genuinely intended.',
+};
+
+async function executePutPage(
+  ctx: OperationContext,
+  p: Record<string, unknown>,
+  mode: PutPageMode,
+): Promise<Record<string, unknown>> {
+  const slug = p.slug as string;
+  const writeSourceId = ctx.sourceId || 'default';
+  const operationName = mode.kind === 'legacy' ? 'put_page' : 'put_page_conditional';
+  const remoteProvenance = mode.kind === 'legacy'
+    ? 'mcp:put_page'
+    : 'mcp:put_page_conditional';
+
+  let provenanceKind: string | null;
+  let provenanceUri: string | null;
+  let provenanceVia: string | null;
+  if (ctx.remote === false) {
+    provenanceKind = (p.source_kind as string | undefined) ?? null;
+    provenanceUri = (p.source_uri as string | undefined) ?? null;
+    provenanceVia = (p.ingested_via as string | undefined) ?? null;
+  } else {
+    provenanceKind = remoteProvenance;
+    provenanceUri = null;
+    provenanceVia = remoteProvenance;
+  }
+
+  enforceSubagentSlugFence(ctx, slug, operationName);
+  if (ctx.dryRun) return { dry_run: true, action: operationName, slug: p.slug };
+
+  // Empty-overwrite guard: empty/whitespace-only content over an existing
+  // non-empty page is almost always an input-plumbing failure (e.g. a
+  // caller that meant file input — put has no --file flag — so the missing
+  // --content fell back to reading an empty non-interactive stdin), not an
+  // intentional write. Refuse loudly unless the caller opts in with
+  // allow_empty. The read is scoped to the exact (source_id, slug) row the
+  // write below targets. New-slug creates and soft-deleted-page overwrites
+  // stay allowed — nothing recoverable is lost there.
+  // Legacy-only: put_page_conditional carries no allow_empty param, so
+  // applying this to conditional writes would refuse a write the caller has
+  // no documented way to permit. Extending it there is a product decision,
+  // not a merge decision.
+  if (mode.kind === 'legacy' && (p.content as string).trim() === '' && p.allow_empty !== true) {
+    const existing = await ctx.engine.getPage(slug, { sourceId: writeSourceId });
+    const existingBody = existing
+      ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
+      : '';
+    if (existingBody !== '') {
+      throw new OperationError(
+        'invalid_params',
+        `Refusing to overwrite existing non-empty page '${slug}' with empty content.`,
+        'For file input use `gbrain capture --file PATH --slug SLUG` (put has no --file flag). To intentionally blank the page, pass allow_empty: true (CLI: --allow-empty).',
+      );
     }
+  }
 
-    // Subagent namespace enforcement (v0.15+). Runs BEFORE the dry-run
-    // short-circuit so preview calls surface the same rejection. See
-    // enforceSubagentSlugFence for the fail-closed policy.
-    enforceSubagentSlugFence(ctx, slug, 'put_page');
-
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
-
-    // Empty-overwrite guard: empty/whitespace-only content over an existing
-    // non-empty page is almost always an input-plumbing failure (e.g. a
-    // caller that meant file input — put has no --file flag — so the missing
-    // --content fell back to reading an empty non-interactive stdin), not an
-    // intentional write. Refuse loudly unless the caller opts in with
-    // allow_empty. The read is scoped to the exact (source_id, slug) row the
-    // write below targets (engine.putPage defaults to 'default' when
-    // sourceId is unset). New-slug creates and soft-deleted-page overwrites
-    // stay allowed — nothing recoverable is lost there.
-    if ((p.content as string).trim() === '' && p.allow_empty !== true) {
-      const existing = await ctx.engine.getPage(slug, { sourceId: ctx.sourceId ?? 'default' });
-      const existingBody = existing
-        ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
-        : '';
-      if (existingBody !== '') {
-        throw new OperationError(
-          'invalid_params',
-          `Refusing to overwrite existing non-empty page '${slug}' with empty content.`,
-          'For file input use `gbrain capture --file PATH --slug SLUG` (put has no --file flag). To intentionally blank the page, pass allow_empty: true (CLI: --allow-empty).',
-        );
-      }
-    }
-
-    // Skip embedding when the AI gateway has no embedding provider configured.
-    // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
-    // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
-    const { isAvailable } = await import('./ai/gateway.ts');
-    const noEmbed = !isAvailable('embedding');
-    // v0.31.8 (D7 / codex OV-1): thread ctx.sourceId so put_page on a
-    // multi-source brain lands in the intended source instead of the
-    // default-source clobber path. importFromContent already accepts
-    // opts.sourceId (PR #707/#757 engine work); previously the op handler
-    // just didn't pass it.
-    // v0.39 T1.5: load active pack ONCE per put_page invocation; thread to
-    // parseMarkdown via importFromContent so type inference honors user-defined
-    // page_types. Best-effort: pack load failure falls back to legacy inferType
-    // (parity gate preserved). Federated-read closure correction is T19's scope.
-    let activePack: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
-    try {
-      const { loadActivePack } = await import('./schema-pack/load-active.ts');
-      const { loadConfig } = await import('./config.ts');
-      const resolved = await loadActivePack({
-        cfg: loadConfig(),
-        remote: ctx.remote === false ? false : true,
-        sourceId: ctx.sourceId,
-      });
-      activePack = { page_types: resolved.manifest.page_types };
-    } catch {
-      // Pack load failed; fall through to legacy inferType behavior.
-      activePack = undefined;
-    }
-    const result = await importFromContent(ctx.engine, slug, p.content as string, {
-      noEmbed,
-      // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
-      // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
-      // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
-      remote: ctx.remote !== false,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
-      // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
-      // inferType behavior when undefined).
-      ...(activePack ? { activePack } : {}),
-      // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
-      // computed above; ingested_at is server-stamped at the engine layer.
-      // Null-valued fields signal "no provenance write this call" and the
-      // engine's COALESCE-preserve UPDATE keeps the prior first-write
-      // record intact (CV12 audit-trail survival).
-      source_kind: provenanceKind,
-      source_uri: provenanceUri,
-      ingested_via: provenanceVia,
+  const { isAvailable } = await import('./ai/gateway.ts');
+  const noEmbed = !isAvailable('embedding');
+  let activePack: ActivePackSummary | undefined;
+  try {
+    const { loadActivePack } = await import('./schema-pack/load-active.ts');
+    const { loadConfig } = await import('./config.ts');
+    const resolved = await loadActivePack({
+      cfg: loadConfig(),
+      remote: ctx.remote === false ? false : true,
+      sourceId: ctx.sourceId,
     });
+    activePack = { page_types: resolved.manifest.page_types };
+  } catch {
+    activePack = undefined;
+  }
 
-    // Frontmatter parse-failure short-circuit (2026-07-23 KB audit).
-    // importFromContent refuses the write when the `---` block exists but its
-    // YAML doesn't parse (pre-fix: silent reset to slug-derived title /
-    // type=concept / tags=[]). Return immediately with an explicit
-    // `frontmatter` field so the agent sees WHY nothing was written, instead
-    // of a normal-looking `created_or_updated`. Nothing downstream (write-
-    // through, auto-link, backstops, lint) should run for a refused write.
-    if (result.status === 'error' && result.error?.startsWith('FRONTMATTER_PARSE:')) {
-      return {
-        slug,
-        status: 'error',
-        chunks: 0,
-        error: result.error,
-        frontmatter: {
-          error: 'unparseable',
-          detail: result.error.replace(/^FRONTMATTER_PARSE:\s*/, ''),
-          page_unchanged: true,
-          hint:
-            'Common causes: a leading space before a key (" type: theme"), or an ' +
-            'unquoted colon inside a value (title: A: B) — quote the whole value.',
-        },
-      };
-    }
+  const sharedOpts = {
+    noEmbed,
+    remote: ctx.remote !== false,
+    sourceId: writeSourceId,
+    ...(activePack ? { activePack } : {}),
+    source_kind: provenanceKind,
+    source_uri: provenanceUri,
+    ingested_via: provenanceVia,
+    // Placeholder-truncation guard (2026-08-10 KB incident). Opt-in override for a
+    // deliberate compaction; absent it, a placeholder-shaped shrink is refused.
+    // Available to remote callers on purpose — the goal is to kill the SILENT
+    // failure, and an explicit flag makes the removal deliberate and auditable
+    // rather than invisible. Applies to conditional writes too: import-file
+    // evaluates this guard BEFORE the create/CAS precondition, so bad content is
+    // refused regardless of revision and neither path mutates the page.
+    allowTruncation: p.allow_truncation === true,
+  };
+  const result: ImportResult = mode.kind === 'conditional'
+    ? await importFromContent(ctx.engine, slug, p.content as string, {
+        ...sharedOpts,
+        writePrecondition: mode.precondition,
+      })
+    : await importFromContent(ctx.engine, slug, p.content as string, sharedOpts);
 
+  if (result.status === 'error' && result.error?.startsWith('FRONTMATTER_PARSE:')) {
+    return {
+      slug,
+      status: 'error',
+      chunks: 0,
+      error: result.error,
+      frontmatter: {
+        error: 'unparseable',
+        detail: result.error.replace(/^FRONTMATTER_PARSE:\s*/, ''),
+        page_unchanged: true,
+        hint:
+          'Common causes: a leading space before a key (" type: theme"), or an ' +
+          'unquoted colon inside a value (title: A: B) — quote the whole value.',
+      },
+    };
+  }
+
+  // Placeholder-truncation short-circuit (2026-08-10 KB incident).
+  // importFromContent refuses the write when the incoming compiled truth both
+  // shrinks materially and carries a standalone bracketed placeholder line
+  // (pre-fix: ~12KB of verified fact vanished across three pages inside 53
+  // seconds, every write reporting success). Return immediately with an
+  // explicit `truncation` field — the same loud-envelope shape the
+  // frontmatter guard uses — so the agent sees WHAT it was about to delete
+  // instead of a normal-looking `created_or_updated`. Nothing downstream
+  // (write-through, auto-link, backstops, lint) runs for a refused write.
+  // This precedes the conditional conflict branches on purpose: import-file
+  // evaluates the truncation guard before the create/CAS precondition, so a
+  // refused conditional write reports the content defect rather than a
+  // revision verdict it never got far enough to compute. Neither path mutates.
+  if (result.status === 'error' && result.error?.startsWith('PLACEHOLDER_TRUNCATION:')) {
+    const t = result.truncation;
+    return {
+      slug,
+      status: 'error',
+      chunks: 0,
+      error: result.error,
+      truncation: {
+        error: 'placeholder_truncation',
+        detail: result.error.replace(/^PLACEHOLDER_TRUNCATION:\s*/, ''),
+        page_unchanged: true,
+        placeholder_lines: t?.placeholderLines ?? [],
+        removed_chars: t?.removedChars ?? 0,
+        hint:
+          'Resend the FULL compiled truth — include every section you did not intend to ' +
+          'edit, not a bracketed summary of it. If the removal is genuinely intended, ' +
+          'retry the same call with allow_truncation: true.',
+      },
+    };
+  }
+
+  if (mode.kind === 'conditional' && result.status === 'conflict') {
+    return {
+      status: result.status,
+      slug: result.slug,
+      reason: result.reason,
+      ...(result.expected_revision !== undefined ? { expected_revision: result.expected_revision } : {}),
+      ...(result.current_revision !== undefined ? { current_revision: result.current_revision } : {}),
+    };
+  }
+  if (mode.kind === 'conditional' && result.status === 'unchanged') {
+    return { status: result.status, slug: result.slug, revision: result.revision, chunks: result.chunks };
+  }
+  if (mode.kind === 'conditional' && result.status !== 'created' && result.status !== 'updated') {
+    return {
+      slug: result.slug,
+      status: result.status,
+      chunks: result.chunks,
+    };
+  }
+
+  const hooks = await runPutPageSuccessHooks(ctx, slug, result, activePack, operationName, writeSourceId);
+  return {
+    slug: result.slug,
+    status: mode.kind === 'legacy' && result.status === 'imported'
+      ? 'created_or_updated'
+      : result.status,
+    ...(mode.kind === 'conditional' && result.revision !== undefined
+      ? { revision: result.revision }
+      : {}),
+    chunks: result.chunks,
+    ...hooks,
+  };
+}
+
+async function runPutPageSuccessHooks(
+  ctx: OperationContext,
+  slug: string,
+  result: ImportResult,
+  activePack: ActivePackSummary | undefined,
+  operationName: 'put_page' | 'put_page_conditional',
+  writeSourceId: string,
+): Promise<Record<string, unknown>> {
+    const imported = result.status === 'imported' || result.status === 'created' || result.status === 'updated';
+    const hookProvenance = ctx.remote === false ? operationName : `mcp:${operationName}`;
+    const factsProvenance: 'mcp:put_page' | 'mcp:put_page_conditional' =
+      operationName === 'put_page' ? 'mcp:put_page' : 'mcp:put_page_conditional';
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
     // Contract (codex finding #8 honored — 7 cases covered):
@@ -1027,9 +1106,9 @@ const put_page: Operation = {
     //     non-TTY contract preserves their semantics.
     //   - Pack-load failures (activePack undefined) skip the gate entirely
     //     since "unknown" has no meaning without a pack reference.
-    if (activePack && result.status === 'imported') {
+    if (activePack && imported) {
       try {
-        const pageType = (result as { page?: { type?: string } }).page?.type ?? null;
+        const pageType = result.parsedPage?.type ?? null;
         const knownTypes = new Set(activePack.page_types.map((t) => t.name));
         if (pageType && !knownTypes.has(pageType)) {
           const { logSchemaEvent } = await import('./schema-events.ts');
@@ -1063,17 +1142,15 @@ const put_page: Operation = {
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
-      const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
       // --save`). Renders the file from the saved DB row and writes it
       // atomically; never throws (failures land in skipped/error).
       writeThrough = await writePageThrough(ctx.engine, result.slug, {
-        sourceId,
+        sourceId: writeSourceId,
         frontmatterOverrides: {
-          ingested_via: provenanceVia,
+          ingested_via: hookProvenance,
           ingested_at: new Date().toISOString(),
-          source_kind: provenanceVia,
+          source_kind: hookProvenance,
         },
         logger: ctx.logger,
       });
@@ -1142,6 +1219,7 @@ const put_page: Operation = {
           if (entries.length > 0) {
             const batch = entries.map(e => ({
               slug,
+              source_id: writeSourceId,
               date: e.date,
               summary: e.summary,
               detail: e.detail || '',
@@ -1183,9 +1261,9 @@ const put_page: Operation = {
         },
         {
           engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
+          sourceId: writeSourceId,
           sessionId: (ctx as { source_session?: string }).source_session ?? null,
-          source: 'mcp:put_page',
+          source: factsProvenance,
           mode: 'queue',
         },
       );
@@ -1211,7 +1289,7 @@ const put_page: Operation = {
     // behind the SAME trust gate as auto-link/timeline + the auto_chronicle
     // flag. Enqueues a chronicle_extract job; never blocks the write.
     let chronicleQueued: { queued: boolean } | { skipped: string } | undefined;
-    if (result.status !== 'imported') {
+    if (!imported) {
       chronicleQueued = { skipped: 'not_imported' };
     } else if (ctx.remote !== false && !trustedWorkspace) {
       chronicleQueued = { skipped: 'remote' };
@@ -1225,7 +1303,7 @@ const put_page: Operation = {
             compiled_truth: result.parsedPage.compiled_truth,
             frontmatter: result.parsedPage.frontmatter,
           },
-          { engine: ctx.engine, sourceId: ctx.sourceId ?? 'default' },
+          { engine: ctx.engine, sourceId: writeSourceId },
         );
         chronicleQueued = r.enqueued ? { queued: true } : { skipped: r.skipped ?? 'skipped' };
       } catch {
@@ -1241,7 +1319,7 @@ const put_page: Operation = {
     let writerLint: { error_count: number; warning_count: number } | { skipped: string } | undefined;
     try {
       const { runPostWriteLint } = await import('./output/post-write.ts');
-      const lint = await runPostWriteLint(ctx.engine, result.slug);
+      const lint = await runPostWriteLint(ctx.engine, result.slug, { sourceId: writeSourceId });
       if (lint.ran) {
         writerLint = {
           error_count: lint.findings.filter(f => f.severity === 'error').length,
@@ -1254,10 +1332,7 @@ const put_page: Operation = {
       // Non-fatal; never blocks put_page.
     }
 
-    return {
-      slug: result.slug,
-      status: result.status === 'imported' ? 'created_or_updated' : result.status,
-      chunks: result.chunks,
+    const postProcessing = {
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
@@ -1265,8 +1340,93 @@ const put_page: Operation = {
       ...(chronicleQueued ? { chronicle_backstop: chronicleQueued } : {}),
       ...(writeThrough ? { write_through: writeThrough } : {}),
     };
+
+    // These results are reported to the caller ONLY as the response body, so
+    // they used to be exactly as durable as the response. Over the HTTP MCP
+    // transport the SSE headers are flushed BEFORE this handler runs, so a
+    // server that dies mid-request returns HTTP 200 with a zero-length body
+    // while the write has already committed — the write survives, the report
+    // of what it DID does not. auto_timeline.created is the field that matters
+    // (nonzero on an edit means duplicate timeline rows were minted), and
+    // recovering it after the fact otherwise needs a psql snapshot taken
+    // BEFORE the write. Persist a row so any caller can recover it after.
+    // Best-effort by construction: the audit writer never throws.
+    logPutPagePostProcessing(
+      result.slug,
+      writeSourceId,
+      result.status,
+      ctx.remote === true,
+      postProcessing,
+    );
+
+    return postProcessing;
+}
+
+const put_page: Operation = {
+  name: 'put_page',
+  description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug' },
+    content: { type: 'string', required: true, description: putPageContentDescription },
+    allow_empty: putPageAllowEmptyParam,
+    allow_truncation: putPageAllowTruncationParam,
+    source_kind: putPageSourceKindParam,
+    source_uri: putPageSourceUriParam,
+    ingested_via: putPageIngestedViaParam,
   },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => executePutPage(ctx, p, { kind: 'legacy' }),
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
+};
+
+const put_page_conditional: Operation = {
+  name: 'put_page_conditional',
+  description: 'Atomically create an absent page or update an active page at an expected revision. Conflicts are normal typed results and never overwrite.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug' },
+    content: { type: 'string', required: true, description: putPageContentDescription },
+    mode: {
+      type: 'string', required: true,
+      enum: ['create_only', 'compare_and_swap'],
+      description: 'create_only inserts only when the exact source-scoped slug is absent; compare_and_swap updates only expected_revision.',
+    },
+    expected_revision: {
+      type: 'number', required: false,
+      description: 'Required positive safe integer for compare_and_swap; forbidden for create_only.',
+    },
+    allow_truncation: putPageAllowTruncationParam,
+    source_kind: putPageSourceKindParam,
+    source_uri: putPageSourceUriParam,
+    ingested_via: putPageIngestedViaParam,
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const mode = p.mode;
+    const expected = p.expected_revision;
+    if (mode === 'create_only') {
+      if (expected !== undefined) {
+        throw new OperationError('invalid_params', 'mode=create_only rejects expected_revision');
+      }
+      return executePutPage(ctx, p, {
+        kind: 'conditional', precondition: { mode: 'create_only' },
+      });
+    }
+    if (mode === 'compare_and_swap') {
+      if (!Number.isSafeInteger(expected) || (expected as number) <= 0) {
+        throw new OperationError(
+          'invalid_params',
+          'mode=compare_and_swap requires expected_revision to be a positive safe integer',
+        );
+      }
+      return executePutPage(ctx, p, {
+        kind: 'conditional',
+        precondition: { mode: 'compare_and_swap', expected_revision: expected as number },
+      });
+    }
+    throw new OperationError('invalid_params', `Unknown conditional write mode: ${String(mode)}`);
+  },
 };
 
 // v0.31.2: isFactsBackstopEligible moved to src/core/facts/eligibility.ts
@@ -5955,7 +6115,7 @@ const extraction_review: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, put_page, delete_page, list_pages,
+  get_page, put_page, put_page_conditional, delete_page, list_pages,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)
   restore_page, purge_deleted_pages,
   // Search

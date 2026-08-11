@@ -7,7 +7,8 @@
 # All services are pulled as `image:` (no build) so `docker compose pull`
 # refreshes everything. The bun version floats with `oven/bun:1` to track CI's
 # `bun-version: latest`. Named volumes isolate the Linux container's deps from
-# the host's darwin-arm64 deps and keep bun + postgres data warm across runs.
+# the host's darwin-arm64 deps. They are ephemeral by default; only the
+# canonical-checkout `--keep-volumes` mode retains them for debugging.
 #
 # Why 4 postgres services: bun's E2E suite shares one DB across 36 files and
 # uses TRUNCATE CASCADE in setupDB(). Running files in parallel against ONE DB
@@ -19,6 +20,10 @@
 # Postgres host ports default to 5434-5437 (avoid 5432 manual `gbrain-test-pg`
 # and 5433 sibling-project conflicts). Override BASE port with GBRAIN_CI_PG_PORT;
 # shards take BASE..BASE+3.
+
+x-gbrain-ci-volume-labels: &gbrain-ci-volume-labels
+  com.gbrain.ci.volume: "true"
+  com.gbrain.ci.retention: "ephemeral"
 
 services:
   postgres-1:
@@ -146,8 +151,14 @@ services:
 
 volumes:
   gbrain-ci-pg-data-1:
+    labels: *gbrain-ci-volume-labels
   gbrain-ci-pg-data-2:
+    labels: *gbrain-ci-volume-labels
   gbrain-ci-pg-data-3:
+    labels: *gbrain-ci-volume-labels
   gbrain-ci-pg-data-4:
+    labels: *gbrain-ci-volume-labels
   gbrain-ci-node-modules:
+    labels: *gbrain-ci-volume-labels
   gbrain-ci-bun-cache:
+    labels: *gbrain-ci-volume-labels

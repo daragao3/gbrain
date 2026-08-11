@@ -2,6 +2,50 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.76.0] - 2026-07-29
+
+**Fresh installs and upgrades no longer pull the three dependency releases flagged by the repository's security scan.**
+
+The affected packages arrive through GBrain's web server, request parser, and schema validator dependencies. This release raises each dependency to a patched version and moves the MCP SDK to a release that officially supports the newer server adapter. Normal GBrain commands and configuration stay the same.
+
+One originally recommended server version has since received another security advisory, so this release skips past it to the current patched line instead of stopping at the older minimum. The result is a lockfile that passes the same official OSV scanner used by pull requests.
+
+### How to use it
+
+Nothing to configure or migrate. Upgrade normally, then run:
+
+```bash
+gbrain doctor
+```
+
+Contributors can verify the dependency floors with:
+
+```bash
+bun test test/dependency-security.test.ts
+```
+
+### Things to watch
+
+The server adapter's new major version supports Node 20 and newer. GBrain itself runs on Bun, and its HTTP and stdio MCP paths are covered by focused tests. Applications that reuse GBrain's dependency tree from Node 18 should move to Node 20 or newer.
+
+## To take advantage of v0.42.76.0
+
+Nothing to configure or migrate. Upgrade normally. The patched dependency graph takes effect when the new package and lockfile are installed.
+
+### Itemized changes
+
+#### Security
+- **The MCP transport stack stays on a currently patched server adapter.** `package.json` upgrades `@modelcontextprotocol/sdk` to `1.30.0`, whose declared range supports Hono adapter v2, and sets the `@hono/node-server` floor to `2.0.12`.
+- **Request parsing and URI validation stay above their patched floors.** Root overrides keep `body-parser` at `2.3.0` or newer and `fast-uri` at `3.1.4` or newer.
+- **The committed dependency graph is reproducible.** `bun.lock` resolves the audited versions for every install.
+
+#### Tests
+- **Security floors cannot silently regress.** `test/dependency-security.test.ts` checks the manifest policy and the versions resolved in `bun.lock`.
+- **Transport compatibility is exercised.** Focused HTTP, OAuth, and real stdio MCP round-trip tests cover the updated SDK and server adapter.
+
+#### Maintenance
+- **GitHub Actions pins are current.** The gitleaks workflow reference now resolves to the current immutable v2 commit.
+
 ## [0.42.75.0] - 2026-07-28
 
 **Folder safety checks now agree on what “inside this folder” means on Windows, Mac, and Linux.**
