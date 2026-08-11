@@ -2,8 +2,19 @@
 
 ## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 
-- [ ] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
-  ABSENT, never when it is STALE.** The guard is
+- [x] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
+  ABSENT, never when it is STALE.** Done. The staleness check moved INTO the builder as
+  `bun run scripts/build-pglite-snapshot.ts --if-stale`, which rebuilds when the fixture
+  is absent, when its `.version` sidecar is absent or unreadable, or when the recorded
+  hash no longer matches `computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto,
+  LEGACY_EMBEDDING_CONFIG.embedding_dimensions)` — and is a ~4s no-op otherwise. Keeping
+  the comparison in the builder rather than in shell means the 4-arg hash call is not
+  duplicated a third time (builder, serial test, and now CI would each have had their own
+  copy, and a drifting arg list reports a current fixture as stale). ci-local.sh's Tier 3
+  block is now that single line. Verified against a deliberately corrupted `.version`:
+  the old else-branch left it stale and the serial test died at module scope
+  (`0 pass / 1 fail`); `--if-stale` rebuilds and the test passes `1 pass / 0 fail`.
+  The original report follows. The guard was
   `if [ ! -f test/fixtures/pglite-snapshot.tar ] || [ ! -f ...version ]; then build; else
   "engine will validate hash at load time"; fi`. Hash validation at load time is the right
   behavior for the ENGINE, which degrades to a normal cold init on a mismatch. It is not

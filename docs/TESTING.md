@@ -152,6 +152,14 @@ Why this exact shape: `beforeAll` creates a single engine per file (PGLite WASM 
 
 `scripts/ci-local.sh` exports `GBRAIN_PGLITE_SNAPSHOT` for all four unit shards, so
 every PGLite file restores a pre-migrated fixture instead of replaying ~120 migrations.
+It builds that fixture with `bun run scripts/build-pglite-snapshot.ts --if-stale`, which
+rebuilds when the fixture is absent *or* when its `.version` sidecar no longer matches the
+current schema/migration/embedding-width hash, and is a no-op otherwise. An exists-only
+check is not enough: the engine degrades to a cold init on a hash mismatch, but
+`test/pglite-snapshot-file-seeding.serial.test.ts` throws `snapshot fixture stale` at
+module scope, so a cached fixture from before a schema change would fail the run until
+someone rebuilt it by hand.
+
 A file that genuinely asserts on the cold path (bootstrap behaviour, migration ledgers,
 fresh-install state) opts out with `useColdPglite()` from `test/helpers/cold-pglite.ts`,
 registered at the top of the file, above its own `beforeAll`:

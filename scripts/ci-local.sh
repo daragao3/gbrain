@@ -236,12 +236,14 @@ bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
-echo \"[runner] Tier 3: building PGLite snapshot fixture (cached across reruns)\"
-if [ ! -f test/fixtures/pglite-snapshot.tar ] || [ ! -f test/fixtures/pglite-snapshot.version ]; then
-  bun run build:pglite-snapshot
-else
-  echo \"[runner] snapshot fixture exists; engine will validate hash at load time\"
-fi
+echo \"[runner] Tier 3: PGLite snapshot fixture (cached across reruns, rebuilt when stale)\"
+# --if-stale rebuilds when the fixture is ABSENT *or* when its recorded schema
+# hash no longer matches (schema, migration, or embedding-width change), and is
+# a no-op otherwise. An exists-only check is not enough: the engine degrades to
+# a cold init on a hash mismatch, but test/pglite-snapshot-file-seeding.serial.test.ts
+# throws 'snapshot fixture stale' at module scope, so a cached fixture from
+# before a schema change fails the run until somebody rebuilds it by hand.
+bun run scripts/build-pglite-snapshot.ts --if-stale
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
