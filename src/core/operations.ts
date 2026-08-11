@@ -869,6 +869,17 @@ const put_page: Operation = {
         'value (title: Fed regime: no guidance) — wrap the whole value in quotes.',
     },
     allow_empty: { type: 'boolean', required: false, description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.' },
+    allow_truncation: {
+      type: 'boolean',
+      required: false,
+      description:
+        'Permit a write that drops a large share of the existing compiled truth while ' +
+        'containing a standalone bracketed placeholder line (e.g. "[Remaining sections - ' +
+        'unchanged]"). That combination is normally REFUSED (status "error", truncation.error ' +
+        '"placeholder_truncation") because it is the signature of an abbreviated rewrite that ' +
+        'silently destroys content. Prefer resending the FULL compiled truth; set this only ' +
+        'when the removal is genuinely intended.',
+    },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -988,6 +999,12 @@ const put_page: Operation = {
       source_kind: provenanceKind,
       source_uri: provenanceUri,
       ingested_via: provenanceVia,
+      // Placeholder-truncation guard (2026-08-10 KB incident). Opt-in override
+      // for a deliberate compaction; absent it, a placeholder-shaped shrink is
+      // refused. Available to remote callers on purpose — the goal is to kill
+      // the SILENT failure, and an explicit flag makes the removal deliberate
+      // and auditable rather than invisible.
+      allowTruncation: p.allow_truncation === true,
     });
 
     // Frontmatter parse-failure short-circuit (2026-07-23 KB audit).
@@ -1010,6 +1027,36 @@ const put_page: Operation = {
           hint:
             'Common causes: a leading space before a key (" type: theme"), or an ' +
             'unquoted colon inside a value (title: A: B) — quote the whole value.',
+        },
+      };
+    }
+
+    // Placeholder-truncation short-circuit (2026-08-10 KB incident).
+    // importFromContent refuses the write when the incoming compiled truth both
+    // shrinks materially and carries a standalone bracketed placeholder line
+    // (pre-fix: ~12KB of verified fact vanished across three pages inside 53
+    // seconds, every write reporting success). Return immediately with an
+    // explicit `truncation` field — the same loud-envelope shape the
+    // frontmatter guard uses — so the agent sees WHAT it was about to delete
+    // instead of a normal-looking `created_or_updated`. Nothing downstream
+    // (write-through, auto-link, backstops, lint) runs for a refused write.
+    if (result.status === 'error' && result.error?.startsWith('PLACEHOLDER_TRUNCATION:')) {
+      const t = result.truncation;
+      return {
+        slug,
+        status: 'error',
+        chunks: 0,
+        error: result.error,
+        truncation: {
+          error: 'placeholder_truncation',
+          detail: result.error.replace(/^PLACEHOLDER_TRUNCATION:\s*/, ''),
+          page_unchanged: true,
+          placeholder_lines: t?.placeholderLines ?? [],
+          removed_chars: t?.removedChars ?? 0,
+          hint:
+            'Resend the FULL compiled truth — include every section you did not intend to ' +
+            'edit, not a bracketed summary of it. If the removal is genuinely intended, ' +
+            'retry the same call with allow_truncation: true.',
         },
       };
     }

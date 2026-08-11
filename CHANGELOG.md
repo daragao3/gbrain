@@ -62,6 +62,65 @@ Nothing to migrate or reconfigure. Links that earlier versions removed are not r
 
 #### Tests
 - **Regression coverage pins both directions.** `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` covers a no-op save, a genuine rewrite, the reported `withheld` count, and two cases confirming genuinely stale links are still removed. `test/put-page-file-flag.test.ts` covers the flag's boundaries and that it stays off the operation surface.
+## [0.42.79.0] - 2026-08-11
+
+**A page can no longer be quietly gutted by a write that claims it changed nothing.**
+
+There is a failure mode where an agent rewrites a page, keeps a section or two, and replaces everything else with a single line in square brackets saying the rest is unchanged. The write succeeds. The page now holds a fraction of what it held before, and nothing anywhere says so. A reader who was not watching sees a page that simply looks short. On one brain this happened to three pages inside a minute and removed about 12,000 characters of checked facts before anyone noticed.
+
+GBrain now refuses that write. When incoming content both drops a large share of what the page already held and contains a line that is nothing but a bracketed note, the write is rejected and the stored page is left exactly as it was. The error quotes the offending line back to you, so an agent can see what its own payload was about to delete and send the full text instead.
+
+The check looks at the shape of the line, not its wording. Matching phrases like "omitted for brevity" would have missed one of the three real cases outright. Shape catches all of them.
+
+### How to use it
+
+Nothing to configure. The guard is on by default for every write path: `put_page`, `gbrain capture`, `gbrain import`, and `gbrain sync`.
+
+If a shrink is genuinely what you want, say so. Over MCP, pass `allow_truncation: true` to `put_page`. From a shell, the same parameter goes through raw tool invocation:
+
+```bash
+gbrain call put_page '{"slug":"my/slug","content":"...","allow_truncation":true}'
+```
+
+For a bulk file-sync run, where there is no per-call parameter to set:
+
+```bash
+GBRAIN_NO_TRUNCATION_GUARD=1 gbrain sync
+```
+
+### The numbers that matter
+
+| Behavior | Before | Now |
+|---|---|---|
+| Page loses most of its content behind a bracketed note | Write succeeds, no signal | Write refused, page untouched |
+| Signal reaching the caller | A normal success response | `status: "error"` plus a `truncation` object naming the line |
+| Embedding spend on a refused write | Full chunk and embed | None, the check runs before chunking |
+| Deliberate shrink with no bracketed note | Allowed | Allowed, unchanged |
+| Page holding steady or growing | Allowed | Allowed, unchanged |
+| New page with no prior content | Allowed | Allowed, unchanged |
+
+Thresholds: the write is refused only when at least 500 characters disappear and the incoming content keeps less than 75 percent of what the page held. Scanned across a 490-page brain, the line-shape check matched three lines in total, all of them ordinary content on pages that were not shrinking, so none of them would be blocked.
+
+### Things to watch
+
+- The comparison is on compiled truth only, not the timeline. A growing timeline can no longer mask a body that is being emptied.
+- The guard sees the page as it exists in the brain. A first write to a slug that does not exist yet is never refused.
+- If you hit a refusal you believe is wrong, the message names the exact line. Reword it or use the override, and the write goes through.
+
+### Itemized changes
+
+- `src/core/placeholder-truncation.ts` (new): `findPlaceholderLines` scans for a trimmed line matching `^\[.{10,}\]$` excluding wikilinks; `assessPlaceholderTruncation` pairs that with the shrink test; `formatPlaceholderTruncationError` builds the refusal message.
+- `src/core/import-file.ts`: `importFromContent` refuses with a `PLACEHOLDER_TRUNCATION` error after the hash-equality short-circuit and before chunking and embedding. New `allowTruncation` option, new `truncation` field on `ImportResult`.
+- `src/core/operations.ts`: `put_page` gains an `allow_truncation` parameter and returns a `truncation` object with the offending lines, the character count, and a hint, matching the shape the frontmatter guard already uses.
+- `test/put-page-placeholder-truncation-guard.test.ts` (new): 28 tests covering line-shape detection, wikilink and markdown-link exclusion, the shrink pairing, both override paths, and the `put_page` response envelope.
+
+## To take advantage of v0.42.79.0
+
+Upgrade and you are done. The guard applies to every write path with no configuration.
+
+If you have automation that intentionally compacts pages, add `allow_truncation: true` to those `put_page` calls, or set `GBRAIN_NO_TRUNCATION_GUARD=1` for the run. Everything else keeps working as before.
+
+Worth doing once after upgrading: look for pages that already lost content this way. A page whose body is mostly a bracketed note is the signature, and `page_versions` still holds the text that preceded the write that emptied it.
 
 ## [0.42.78.0] - 2026-07-30
 
