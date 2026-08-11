@@ -19,6 +19,7 @@ import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, isRemoteReconcileEnabled, getExtraEntityDirs, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
+import { logPutPagePostProcessing } from './audit/put-page-audit.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
 import { getContentFlag } from './quarantine.ts';
@@ -1226,7 +1227,7 @@ async function runPutPageSuccessHooks(
       // Non-fatal; never blocks put_page.
     }
 
-    return {
+    const postProcessing = {
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
@@ -1234,6 +1235,26 @@ async function runPutPageSuccessHooks(
       ...(chronicleQueued ? { chronicle_backstop: chronicleQueued } : {}),
       ...(writeThrough ? { write_through: writeThrough } : {}),
     };
+
+    // These results are reported to the caller ONLY as the response body, so
+    // they used to be exactly as durable as the response. Over the HTTP MCP
+    // transport the SSE headers are flushed BEFORE this handler runs, so a
+    // server that dies mid-request returns HTTP 200 with a zero-length body
+    // while the write has already committed — the write survives, the report
+    // of what it DID does not. auto_timeline.created is the field that matters
+    // (nonzero on an edit means duplicate timeline rows were minted), and
+    // recovering it after the fact otherwise needs a psql snapshot taken
+    // BEFORE the write. Persist a row so any caller can recover it after.
+    // Best-effort by construction: the audit writer never throws.
+    logPutPagePostProcessing(
+      result.slug,
+      writeSourceId,
+      result.status,
+      ctx.remote === true,
+      postProcessing,
+    );
+
+    return postProcessing;
 }
 
 const put_page: Operation = {
