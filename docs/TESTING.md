@@ -284,6 +284,8 @@ Unit tests and what they cover:
 - `test/extract-db.test.ts` — `gbrain extract --source db`: typed link inference, idempotency, `--type` filter, `--dry-run` JSON output.
 - `test/extract-fs.test.ts` — `gbrain extract --source fs`: first-run inserts + second-run reports zero, dry-run dedups candidates across files, second-run perf regression guard for the N+1 dedup bug.
 - `test/link-extraction.test.ts` — canonical `extractEntityRefs` both formats, `extractPageLinks` dedup, `inferLinkType` heuristics, `parseTimelineEntries` date variants, `isAutoLinkEnabled` config.
+- `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` — the auto-link removal safety net. A no-op (`skipped`) save and a genuine rewrite both leave links untouched when the body still carries wikilinks the extractor cannot resolve; `auto_links.withheld` reports the held-back count. Two CONTRA cases pin that a wikilink actually removed from the body still reconciles its edge away (all of them, or just the one dropped), and one pins that `link_source='manual'` edges are never touched.
+- `test/put-page-file-flag.test.ts` — `gbrain put <slug> --file PATH` boundaries: the flag stays OFF `put_page.params` (so remote callers gain no file read), `parseOpArgs` carries the undeclared flag through, and the empty-content refusal routes to `--file`.
 - `test/graph-query.test.ts` — direction in/out/both, type filter, indented tree output.
 - `test/features.test.ts` — feature scanning, brain_score calculation, CLI routing, persistence.
 - `test/file-upload-security.test.ts` — symlink traversal, cwd confinement, slug + filename allowlists, remote vs local trust.

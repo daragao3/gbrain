@@ -2,6 +2,66 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.80.0] - 2026-08-11
+
+**Saving a page no longer deletes the links that page still points at.**
+
+GBrain builds a page's outbound links by reading the wikilinks in its body. When it could not turn a wikilink into a link, it read the absence as "you deleted this" and dropped the link from the graph. Saving the same page again was enough to lose every automatically built link on it, and the links table keeps no trash can, so the loss could not be undone.
+
+This hit pages whose wikilinks point at folders outside the built-in list GBrain recognizes by default. Those wikilinks never became links in the first place, so on the next save the links already in the table looked stale and were dropped. Saving the page a third time did not bring them back, because nothing about the second save was special.
+
+GBrain now tells the two cases apart. If a page still mentions something GBrain cannot resolve, the existing link stays. If you actually take a wikilink out of the body, its link is removed exactly as before. Any removal that gets held back is counted in the response, so it is visible instead of silent.
+
+This release also adds a way to write a large page from the command line without passing the whole body as an argument.
+
+### How to use it
+
+Nothing to configure for the link fix. To write a page from a file:
+
+```bash
+gbrain put notes/my-page --file ./body.md
+```
+
+To see what a save did to your links:
+
+```bash
+gbrain put notes/my-page --file ./body.md --json
+```
+
+The `auto_links` block reports `created`, `removed`, and `withheld`. A non-zero `withheld` means GBrain kept links for references it could not resolve.
+
+### The numbers that matter
+
+| Situation | Previous outcome | Current outcome |
+|---|---|---|
+| Re-saving a page whose wikilinks do not resolve | Every automatically built outbound link removed | Links kept, count reported as `withheld` |
+| Taking a wikilink out of the body | Link removed | Link removed, unchanged |
+| Removing one wikilink out of several | All links removed | Only that one removed |
+| Hand-created links | Untouched | Untouched, unchanged |
+| Writing a large page with `--content` | Could end the process with no output and no save | `--file` reads the body from disk instead |
+
+### Things to watch
+
+A held-back link can go stale. If you delete a wikilink that GBrain could not resolve anyway, its link stays until you remove it with `gbrain link-rm`. That trade is deliberate: a kept link takes one command to remove, and a deleted one cannot be recovered at all. Turning on `link_resolution.global_basename` lets more wikilinks resolve into real links, which shrinks the held-back set.
+
+On Windows, handing a large page body to `--content` can end the process before GBrain starts running, which means no error can be printed and nothing is saved. Use `--file` for anything sizable.
+
+## To take advantage of v0.42.80.0
+
+Nothing to migrate or reconfigure. Links that earlier versions removed are not restored automatically, because the removal left no record behind. If you know a page lost links, re-add them with `gbrain link`, or turn on `link_resolution.global_basename` and save the page again so the wikilinks resolve on their own.
+
+### Itemized changes
+
+#### Link reconciliation
+- **A reference the page still carries protects its link.** `extractPageLinks` in `src/core/link-extraction.ts` now returns `unresolvableRefs`, the wikilink texts present in the body that produced no link candidate.
+- **Reconciliation withholds those removals.** `runAutoLink` in `src/core/operations.ts` keeps a managed link whose target is still referenced by an unresolvable wikilink, or whose target could not be validated against the current source. Matching covers the full written text, a path suffix, and a bare name.
+- **Withheld removals are reported.** The `put_page` response's `auto_links` block gains a `withheld` count.
+
+#### Command line
+- **`gbrain put` accepts `--file`.** Handled in `src/cli.ts`, it reads the body as a buffer using the same binary-content check `capture` uses, and refuses `--content` and `--file` together. The flag is command-line only and is deliberately not a `put_page` parameter, so it adds no file-reading ability for remote callers.
+
+#### Tests
+- **Regression coverage pins both directions.** `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` covers a no-op save, a genuine rewrite, the reported `withheld` count, and two cases confirming genuinely stale links are still removed. `test/put-page-file-flag.test.ts` covers the flag's boundaries and that it stays off the operation surface.
 ## [0.42.79.0] - 2026-08-11
 
 **A page can no longer be quietly gutted by a write that claims it changed nothing.**
