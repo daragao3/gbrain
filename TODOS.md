@@ -1,5 +1,38 @@
 # TODOS
 
+## v0.42.84.0 follow-ups (four-shape removal protection)
+
+- [ ] **P2 - undeclared-prefix protection over-reports, so an edge can now go
+  stale instead of being reconciled.** Follow-up from v0.42.84.0.
+  `extractUndeclaredPrefixRefs` is deliberately permissive (its own doc says so:
+  callers are expected to intersect against real edges), and `isProtectedTarget`
+  additionally matches on bare basename. So prose mentioning an unrelated
+  `foo/bar` path can pin an existing edge to `*/bar` that the author really did
+  stop referencing. This errs in the safe direction — a stale edge is
+  re-reconcilable by `gbrain extract`, a hard delete is not, and `links` still
+  has no tombstone column — but it is a real behavior change worth measuring on
+  a large brain before tightening. Options: require the protected literal to
+  match `to_slug`'s full path rather than its basename, or scope basename
+  matching to refs that came from the generic wikilink pass (where the basename
+  IS the resolution key) and use exact/suffix matching for undeclared-prefix
+  refs. Needs a before/after `withheld` count on a real corpus, not a guess.
+  Where: `src/core/operations.ts` (`runAutoLink` `isProtectedTarget`,
+  `protectedBasenames`).
+
+- [ ] **P2 - `src/core/link-extraction.ts` contains a raw NUL byte, so ripgrep
+  treats it as binary and every ripgrep-based guard silently skips it.**
+  Byte offset 17046 (in `extractUndeclaredPrefixRefs`) is a literal `0x00` used
+  as a separator inside a template literal — `` `${dir}<NUL>${slug}` `` — where
+  every other separator key in the file spells it `\u0000`. Compiles and behaves
+  identically, which is why it went unnoticed. The cost is tooling, not runtime:
+  `grep`/`rg` report `Binary file ... matches` and emit NO line hits, so Claude
+  Code's Grep tool returns "no matches" for this file, and the repo's own
+  ripgrep-backed CI guards (`scripts/check-*.sh`) cannot see its contents. One
+  character to fix (replace the raw byte with the `\u0000` escape); left out of
+  the v0.42.84.0 change so a data-loss fix stays reviewable on its own.
+  Where: `src/core/link-extraction.ts` (`extractUndeclaredPrefixRefs`, the
+  `seen` key).
+
 ## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 
 - [x] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
@@ -79,37 +112,6 @@
   three exposed shapes, while the generic-wikilink control group stays green.
   Where: `src/core/link-extraction.ts` (`extractPageLinks` tail,
   `PageLinksResult.unresolvableRefs` doc).
-
-- [ ] **P2 - undeclared-prefix protection over-reports, so an edge can now go
-  stale instead of being reconciled.** Follow-up from the P1 fix above.
-  `extractUndeclaredPrefixRefs` is deliberately permissive (its own doc says so:
-  callers are expected to intersect against real edges), and `isProtectedTarget`
-  additionally matches on bare basename. So prose mentioning an unrelated
-  `foo/bar` path can pin an existing edge to `*/bar` that the author really did
-  stop referencing. This errs in the safe direction — a stale edge is
-  re-reconcilable by `gbrain extract`, a hard delete is not, and `links` still
-  has no tombstone column — but it is a real behavior change worth measuring on
-  a large brain before tightening. Options: require the protected literal to
-  match `to_slug`'s full path rather than its basename, or scope basename
-  matching to refs that came from the generic wikilink pass (where the basename
-  IS the resolution key) and use exact/suffix matching for undeclared-prefix
-  refs. Needs a before/after `withheld` count on a real corpus, not a guess.
-  Where: `src/core/operations.ts` (`runAutoLink` `isProtectedTarget`,
-  `protectedBasenames`).
-
-- [ ] **P2 - `src/core/link-extraction.ts` contains a raw NUL byte, so ripgrep
-  treats it as binary and every ripgrep-based guard silently skips it.**
-  Byte offset 17046 (in `extractUndeclaredPrefixRefs`) is a literal `0x00` used
-  as a separator inside a template literal — `` `${dir}<NUL>${slug}` `` — where
-  every other separator key in the file spells it `\u0000`. Compiles and behaves
-  identically, which is why it went unnoticed. The cost is tooling, not runtime:
-  `grep`/`rg` report `Binary file ... matches` and emit NO line hits, so Claude
-  Code's Grep tool returns "no matches" for this file, and the repo's own
-  ripgrep-backed CI guards (`scripts/check-*.sh`) cannot see its contents. One
-  character to fix (replace the raw byte with the `\u0000` escape); left out of
-  the P1 change so a data-loss fix stays reviewable on its own.
-  Where: `src/core/link-extraction.ts` (`extractUndeclaredPrefixRefs`, the
-  `seen` key).
 
 ## v0.42.80.0 follow-ups (auto-link removal safety net)
 

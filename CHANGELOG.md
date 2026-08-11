@@ -2,6 +2,70 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.84.0] - 2026-08-11
+
+**The last three ways of writing a reference are now protected from losing their links when you save a page.**
+
+GBrain builds a page's links by reading the references in its body. It only recognizes references under folder names it knows about, and folder names you invented are taught to it through a setting. When a folder name is missing from that setting, GBrain stops seeing the references under it.
+
+That turns an ordinary save into a loss. GBrain could not tell "the author removed this reference" from "GBrain can no longer read this reference", and it treated both the same way, so it dropped the links. The links table keeps no trash can.
+
+The previous two releases closed part of this. One stopped the loss for references written as `[[notes/quarterly-plan]]`. The other added warnings so you could find the folder names you were missing. References written as a plain markdown link, as bare text, or with a source name in front were still dropped. This release covers all four ways of writing one.
+
+### How to use it
+
+Nothing to turn on. Upgrade, then check whether your settings name every folder your pages reference:
+
+```bash
+gbrain doctor
+```
+
+A healthy brain reports nothing. If it names folders, copy the command it prints to put them back, then rebuild the links those references should have produced:
+
+```bash
+gbrain extract links
+```
+
+### The numbers that matter
+
+| How the reference is written | Before | Now |
+|---|---|---|
+| `[[notes/quarterly-plan]]` | kept | kept |
+| `[Quarterly plan](notes/quarterly-plan)` | link dropped on save | kept |
+| bare `notes/quarterly-plan` | link dropped on save | kept |
+| `[[archive:notes/quarterly-plan]]` | link dropped on save | kept |
+
+| Check | Result |
+|---|---|
+| The four reference shapes, end to end | 23 pass, 0 fail |
+| The two related save paths | 16 pass, 0 fail |
+| Reference reading and folder settings | 262 pass, 0 fail |
+
+### Things to watch
+
+A reference you genuinely removed from a page is still cleaned up on the next save. That behavior is unchanged, and each of the four shapes has a matching test for it.
+
+The protection is deliberately generous about what counts as a reference. Prose that happens to mention a folder path can now hold on to a link you really did stop pointing at, so a link can go stale instead of being removed. That is the safer of the two mistakes, because a stale link is rebuilt by `gbrain extract links` and a removed one cannot be recovered. Tightening it is tracked as a follow-up.
+
+Links written under folder names GBrain already recognizes were never affected, and neither were links you added by hand.
+
+## To take advantage of v0.42.84.0
+
+Nothing to configure or migrate. Upgrade normally.
+
+If `gbrain doctor` names folders your settings are missing, run the command it prints, then run `gbrain extract links` to rebuild the links those references should have produced. Links dropped by an earlier version come back this way, because they are rebuilt from what your pages actually say.
+
+### Itemized changes
+
+#### Fixed
+- **The removal safety net covers all four reference shapes.** `extractPageLinks` in `src/core/link-extraction.ts` reported an unresolvable reference only from its generic wikilink pass, so a body carrying `[label](dir/slug)`, a bare `dir/slug`, or a qualified `[[source:dir/slug]]` under an undeclared folder produced no link candidates and no unresolvable references at all. To a caller reconciling links, that is indistinguishable from the author deleting the reference, so those links were removed. `extractPageLinks` now folds `extractUndeclaredPrefixRefs(content, opts.entityDirs)` into the reported set. That is the same matcher the stranded-links check in `gbrain doctor` already uses, so detection and protection share one definition of what counts as a reference and cannot drift apart.
+
+#### Tests
+- **`test/e2e/put-page-autolink-unresolvable-ref-shapes-pglite.test.ts`** covers each of the four shapes through a real save: the reference present and its link kept, the reference gone and its link removed, and a page that drops one reference while keeping another so only the matching link goes. It also covers a folder path that appears inside a URL, a reference inside a code span, and links added by hand.
+
+#### Documentation
+- **`docs/architecture/KEY_FILES.md`** records that the safety net now has two populating paths, and that its entries are literals lifted from the page body rather than validated slugs, so a consumer must match them against links that already exist and must never build a link from one.
+
 ## [0.42.82.0] - 2026-08-11
 
 **The test suite's database speed-up fixture is now built at the same vector size the tests run at, so tests that save embeddings pass instead of failing on a size mismatch.**
