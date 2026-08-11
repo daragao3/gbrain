@@ -1786,6 +1786,9 @@ export async function extractStaleFromDB(
     for (const page of rows) {
       const fullContent = page.compiled_truth + '\n' + page.timeline;
       const extracted = await extractPageLinks(
+        // `activeResolver` was a branch-only rename that master never took;
+        // `resolver` is the one in scope here. Opts are the union, matching
+        // the sibling call site above.
         page.slug, fullContent, page.frontmatter, page.type, resolver,
         { skipFrontmatter: !includeFrontmatter, globalBasename, entityDirs: staleEntityDirs },
       );

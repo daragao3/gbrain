@@ -4,7 +4,7 @@ import {
   connectWithRetry,
   POOL_CONNECT_TIMEOUT_S,
 } from '../src/core/db.ts';
-import type { BrainEngine } from '../src/core/types.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 
 /**
  * Regression: `gbrain serve --http` died at boot on a TRANSIENT Postgres

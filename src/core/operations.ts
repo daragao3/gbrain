@@ -1495,6 +1495,12 @@ async function runAutoLink(
   // pages live under roots gbrain doesn't ship in DIR_PATTERN gets no typed
   // edges from its wikilinks at all — they fall to the generic pass and are
   // dropped unless global_basename is on.
+  //
+  // Declaring a dir here and the `unresolvableRefs` safety net below are
+  // complementary, not redundant: the net keeps an undeclared prefix from
+  // DELETING edges, while declaring the dir is what lets those edges keep
+  // being CREATED and MAINTAINED. A withheld edge survives but stops being
+  // reconciled, so it silently goes stale.
   const entityDirs = await getExtraEntityDirs(engine);
   const { candidates, unresolved, unresolvableRefs } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,

@@ -1,5 +1,25 @@
 # TODOS
 
+## v0.42.81.0 follow-ups (entity_dirs safety guard)
+
+- [ ] **P1 - the v0.42.80.0 removal safety net covers ONE of four reference shapes.**
+  `unresolvableRefs` is populated only in `extractPageLinks`'s `ref.needsResolution`
+  branch, which only the generic wikilink pass reaches. Probed against the merged
+  extractor with `entityDirs: []` and `globalBasename: false`, using a passing
+  control:
+  `[[sessions/foo]]` -> `unresolvableRefs: ["sessions/foo"]` (PROTECTED);
+  `[x](sessions/foo)`, bare `sessions/foo`, and `[[wiki:sessions/foo]]` -> all
+  `candidates=0` AND `unresolvableRefs=[]` (NOT protected, still hard-deleted).
+  Those three shapes miss the dir-gated regexes entirely, so they never become a
+  ref and never reach the net. v0.42.81.0's `entity_dirs_orphaned_edges` DETECTS
+  this, but detection is not protection. Fix candidates: emit a
+  `needsResolution` ref from the markdown-link and bare-slug passes when the
+  prefix looks like a slug dir but is undeclared, or key the net on a
+  body-substring check for `to_slug` rather than on extracted refs.
+  Where: `src/core/link-extraction.ts` (`extractEntityRefs` passes 1/2a/2c,
+  `extractPageLinks` unresolvableRefs pushes), `src/core/operations.ts`
+  (`runAutoLink` `isProtectedTarget`).
+
 ## v0.42.80.0 follow-ups (auto-link removal safety net)
 
 - [ ] **P2 - decide whether `DIR_PATTERN` should stop being a hardcoded whitelist.**
