@@ -2,6 +2,98 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.82.0] - 2026-08-11
+
+**The test suite's database speed-up fixture is now built at the same vector size the tests run at, so tests that save embeddings pass instead of failing on a size mismatch.**
+
+GBrain's test suite can restore a prebuilt database instead of rebuilding the schema from scratch for every test file. The tool that builds that prebuilt database and the test suite itself disagreed about how wide an embedding vector is. The builder recorded one width, the tests wrote another, and every test that saved an embedding failed with a dimension mismatch.
+
+Nothing caught the disagreement. The freshness check that decides whether a prebuilt database is still usable looked at the schema template, where the width appears as a placeholder that reads identically at any size. A restored database also skips the normal schema setup, so a test file could not correct the width on its own.
+
+A second problem made the speed-up mostly ineffective. A test file that needed the slow path opted out by clearing a setting shared by the whole process, which switched every file loaded after it to the slow path too. Which files were affected depended on how the runner packed them into shards, so adding any test file reshuffled it.
+
+Nothing changes for normal CLI use or for stored brain data. This affects contributors running the test suite.
+
+### How to use it
+
+The prebuilt fixture is not checked in. Build it once, then point the suite at it:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test
+```
+
+`bun run ci:local` does both steps for you, and rebuilds the fixture whenever it has gone out of date. You can ask for the same thing directly:
+
+```bash
+bun run scripts/build-pglite-snapshot.ts --if-stale
+```
+
+That rebuilds only when the fixture is missing or no longer matches the schema it was built from. When it is already current it costs about 4 seconds and does nothing.
+
+If you change the width the suite runs at, edit it in one place, `test/helpers/legacy-embedding-config.ts`. The builder and the suite's preload both read that file, and the freshness check folds the width in, so a fixture built at the old width stops matching and falls back to a normal cold start.
+
+### The numbers that matter
+
+| Check | Result |
+|---|---|
+| Tests that save embeddings, with the fixture active | 15 pass, 0 fail |
+| Fixture build, 120 migrations applied | schema setup in ~12s, 44 MB fixture |
+| Fixture and cold start produce the same schema | 5 pass, 0 fail |
+
+### Things to watch
+
+A fixture built before this release will not match the new freshness check. It is reported as stale and the engine falls back to a normal cold start, which is correct but slower. `bun run ci:local` rebuilds it for you. If you run the suite by hand, rebuild it once with `bun run build:pglite-snapshot` to get the speed-up back.
+
+Test files that genuinely need the slow path now opt out through `useColdPglite()`, which brackets a single file instead of changing the setting for the whole process. Files that run before or after keep whatever the runner gave them.
+
+## To take advantage of v0.42.82.0
+
+Nothing to configure or migrate for normal use. Upgrade normally.
+
+If you develop on GBrain and keep a prebuilt test fixture around, rebuild it once:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+Then confirm the fixture and the cold start still agree:
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test test/pglite-snapshot-file-seeding.serial.test.ts
+```
+
+If that reports a stale fixture after a rebuild, please file an issue at
+https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and
+the command you ran.
+
+### Itemized changes
+
+#### Fixed
+- **The fixture builder pins the same embedding config the test preload pins.** `scripts/build-pglite-snapshot.ts` runs under `bun run`, which does not apply the test runner's preload, so it fell back to the production default width. It now calls `configureGateway()` with the shared config and logs the width it baked.
+- **The freshness check covers the embedding width.** `computeSnapshotSchemaHash()` in `src/core/pglite-engine.ts` takes the width as an argument and folds it into the hash. A fixture at the wrong width now fails the check and degrades to a normal cold start rather than loading and rejecting every insert.
+- **`tryLoadSnapshot()` resolves the width the same way schema setup does.** A synchronous helper reads the gateway's width and falls back to the canonical default when the gateway is not configured.
+- **The local CI run rebuilds an out-of-date fixture instead of skipping it.** `scripts/ci-local.sh` rebuilt the fixture only when the file was missing, so a fixture left over from an older schema was kept and the suite ran against it. `scripts/build-pglite-snapshot.ts` takes a new `--if-stale` flag that rebuilds when the fixture is absent, when its recorded version is absent or unreadable, or when that version no longer matches the current schema, and ci-local now calls it that way. The staleness comparison lives in the builder rather than in shell, so the hash is computed in one place.
+
+#### Added
+- **One definition of the width the unit suite runs at.** `test/helpers/legacy-embedding-config.ts` is read by both `test/helpers/legacy-embedding-preload.ts` and the fixture builder. It deliberately imports nothing from the test runner so a plain script can use it.
+- **A file-scoped slow-path opt-out.** `test/helpers/cold-pglite.ts` exposes `useColdPglite()`, which clears and restores the setting around one file instead of leaking to every file after it.
+
+#### Tests
+- **The width agreement is pinned.** `test/pglite-snapshot-embedding-width.test.ts` covers the shared config, the hash folding the width in, and a wrong-width fixture degrading rather than failing.
+- **Five files moved to the scoped opt-out.** `test/bootstrap.test.ts`, `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, `test/schema-bootstrap-coverage.test.ts`, and `test/e2e/schema-drift.test.ts` use `useColdPglite()` and still exercise the cold path.
+- **The seeded and cold schemas are compared at the correct width.** `test/pglite-snapshot-file-seeding.serial.test.ts` passes the shared width into the freshness check so a current fixture is not reported stale.
+
+#### Documentation
+- **`docs/TESTING.md`** explains how to build the fixture, how the width is shared, when to reach for the scoped opt-out, and how `--if-stale` decides whether a rebuild is needed.
+- **`docs/architecture/KEY_FILES.md`** records the widened hash signature.
+
+#### Maintenance
+- **`scripts/bench-pglite-bootstrap.ts`** passes the width through to the hash helper.
+
 ## [0.42.81.0] - 2026-08-11
 
 **GBrain now warns you when a folder name is missing from your settings, instead of letting it quietly cost you links.**
@@ -88,7 +180,6 @@ If any of your own scripts narrow `link_resolution.entity_dirs`, they now need `
 #### Tests
 - `test/entity-dirs-undeclared-refs.test.ts`, `test/entity-dirs-guard-scan.test.ts`, `test/doctor-entity-dirs-orphaned-edges.test.ts`, and `test/config-entity-dirs-preflight.test.ts` cover each reference shape, references inside code blocks and URLs, links that are not eligible for removal, the environment override, the refusal and its `--yes` override, the row cap, and a regression for the page shape that lost links in the first place.
 - `test/link-extraction-remote-reconcile.test.ts` covers the network write path, including that it only ever adds.
-
 
 ## [0.42.80.0] - 2026-08-11
 

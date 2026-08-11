@@ -148,6 +148,44 @@ beforeEach(async () => {
 
 Why this exact shape: `beforeAll` creates a single engine per file (PGLite WASM cold-start + initSchema is ~20s); `beforeEach` truncates user data via `resetPgliteState` ("two orders of magnitude faster" than fresh-engine-per-test); `afterAll` disconnects so the engine doesn't leak across file boundaries within a shard process.
 
+#### Tier 3 snapshot opt-out (`useColdPglite`)
+
+`scripts/ci-local.sh` exports `GBRAIN_PGLITE_SNAPSHOT` for all four unit shards, so
+every PGLite file restores a pre-migrated fixture instead of replaying ~120 migrations.
+It builds that fixture with `bun run scripts/build-pglite-snapshot.ts --if-stale`, which
+rebuilds when the fixture is absent *or* when its `.version` sidecar no longer matches the
+current schema/migration/embedding-width hash, and is a no-op otherwise. An exists-only
+check is not enough: the engine degrades to a cold init on a hash mismatch, but
+`test/pglite-snapshot-file-seeding.serial.test.ts` throws `snapshot fixture stale` at
+module scope, so a cached fixture from before a schema change would fail the run until
+someone rebuilt it by hand.
+
+A file that genuinely asserts on the cold path (bootstrap behaviour, migration ledgers,
+fresh-install state) opts out with `useColdPglite()` from `test/helpers/cold-pglite.ts`,
+registered at the top of the file, above its own `beforeAll`:
+
+```ts
+import { useColdPglite } from './helpers/cold-pglite.ts';
+
+useColdPglite();   // BEFORE the beforeAll that connects the engine
+```
+
+Never opt out with a bare module-level `delete process.env.GBRAIN_PGLITE_SNAPSHOT`.
+That is an R1 violation, and `process.env` is process-global: bun loads and runs test
+files sequentially in one process per shard (POSIX CI sets no chunk limit, so that is a
+~270-file process), so the delete leaks into every file listed *after* it and silently
+forces them all cold. Which files were affected depended entirely on shard bin-packing,
+so adding any test file anywhere reshuffled it. `useColdPglite` brackets the file with
+`beforeAll`/`afterAll` instead, leaving its neighbours alone.
+
+The fixture's embedding width is baked in at build time and folded into its staleness
+hash, so it must match what the suite runs at. `test/helpers/legacy-embedding-config.ts`
+is the single definition, read by both `test/helpers/legacy-embedding-preload.ts` (the
+bunfig `[test] preload`) and `scripts/build-pglite-snapshot.ts` (the builder, which runs
+under `bun run` and therefore does *not* get the preload). Change the width in that one
+file; a fixture built at the old width stops matching the hash and falls back to a cold
+init rather than failing as `expected N dimensions, not M`.
+
 #### `withEnv` pattern (R1 fix)
 
 ```ts
@@ -249,6 +287,7 @@ Unit tests and what they cover:
 - `test/bootstrap.test.ts` — bootstrap contract: no-op on fresh install, idempotent across two `initSchema()` calls, no-op on modern brain that already has every probed column, full bootstrap path on a simulated legacy brain, fresh-install regression guard, legacy `links` shape coverage.
 - `test/schema-bootstrap-coverage.test.ts` — CI guard. `REQUIRED_BOOTSTRAP_COVERAGE` lists every forward reference in `PGLITE_SCHEMA_SQL`; the test fails loudly if `applyForwardReferenceBootstrap` skips one (extend both arrays when adding a column-with-index to the embedded schema blob). Also parses `src/core/migrate.ts` source text for every `ALTER TABLE ... ADD COLUMN` (top-level `sql:`, `sqlFor.{postgres,pglite}` overrides, AND handler-body `engine.runMigration(N, \`ALTER TABLE ...\`)`) and asserts each (table, column) pair is covered by the bootstrap OR by the schema blob's CREATE TABLE bodies — catching the column-only forward-reference class (e.g. `sources.archived`, `oauth_clients.source_id`) that a CREATE INDEX parser alone can't see. `parseBaseTableColumns` strips SQL line + block comments before identifying column names so commented-out lines don't hide adjacent columns.
 - `test/helpers/schema-diff.ts` + `test/helpers/schema-diff.test.ts` + `test/e2e/schema-drift.test.ts` — cross-engine schema parity gate. Helper exports pure `snapshotSchema(query)` / `diffSnapshots(pg, pglite, opts)` / `formatDiffForFailure(diff)` / `isCleanDiff(diff)` over a four-tuple per column (`data_type`, `udt_name`, `is_nullable`, `column_default`). E2E test spins up fresh PGLite + Postgres, runs `engine.initSchema()` on each, snapshots `information_schema.columns`, then diffs. 2-table allowlist (`files`, `file_migration_ledger`) — every other Postgres table must reach PGLite via `PGLITE_SCHEMA_SQL` or a migration's `sqlFor.pglite` branch. Sentinels for `oauth_clients`, `mcp_request_log`, `access_tokens`, `eval_candidates` give tighter blame messages. Skips without `DATABASE_URL`. Wired into `scripts/e2e-test-map.ts` so changes to `src/schema.sql`, `src/core/pglite-schema.ts`, or `src/core/migrate.ts` trigger it. The failure message names every drift with a paste-ready hint pointing at `src/core/pglite-schema.ts`.
+- `test/pglite-snapshot-embedding-width.test.ts` — Tier 3 width guard. Asserts `computeSnapshotSchemaHash` folds the embedding width (equal widths hash equal, different widths differ, and a 1-vs-15 boundary shift does not collide), and that the gateway width the suite actually runs at equals `LEGACY_EMBEDDING_CONFIG.embedding_dimensions` — so a re-hardcoded preload or builder fails here instead of as a dimension error in whichever unrelated file the shard packer scheduled after a snapshot-loading neighbour.
 - `test/setup-branching.test.ts` — setup flow.
 - `test/slug-validation.test.ts` — slug validation.
 - `test/storage.test.ts` — storage backends.
