@@ -348,6 +348,22 @@ const RETRYABLE_DB_CONNECT_PATTERNS = [
   /the database system is starting up/i,
   /Connection terminated unexpectedly/i,
   /ECONNRESET/i,
+  // A connect that ran out of time, not one that was refused. postgres.js
+  // reports its own `connect_timeout` expiry as `write CONNECT_TIMEOUT
+  // <host>:<port>`; ETIMEDOUT is the OS-level socket equivalent. Both mean the
+  // backend did not answer IN TIME, which on a loaded host is transient — the
+  // pool must open a fresh backend after POOL_IDLE_TIMEOUT_S, and that open is
+  // allowed only POOL_CONNECT_TIMEOUT_S to finish.
+  //
+  // Omitting these cost the :7483 server its boot on 2026-08-11: while the host
+  // sat at 88-99% commit, `gbrain serve --http` exited on attempt 1 of 3 with
+  // `Cannot connect to database: write CONNECT_TIMEOUT 127.0.0.1:5437`, so
+  // laptop-monitor's respawns did not stick and it re-fired for the identical
+  // reason minutes later. Postgres was up the whole time (the container had
+  // been running 25h; the monitor's own gate got an answer on attempt 2).
+  // Regression: test/db-connect-retry-timeout.test.ts.
+  /CONNECT_TIMEOUT/i,
+  /ETIMEDOUT/i,
 ];
 
 export function isRetryableDbConnectError(err: unknown): boolean {
