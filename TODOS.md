@@ -17,19 +17,20 @@
   rebuild on mismatch, so a stale fixture is refreshed rather than reported as a test
   failure. Where: `scripts/ci-local.sh` (the Tier 3 block, near the
   `GBRAIN_PGLITE_SNAPSHOT` export).
-- [ ] **P3 — four `check-test-isolation` allowlist entries may now be removable.**
-  v0.42.81.0 replaced the bare module-level `delete process.env.GBRAIN_PGLITE_SNAPSHOT`
-  in `test/bootstrap.test.ts`, `test/destructive-guard.test.ts`,
-  `test/pages-soft-delete.test.ts`, and `test/schema-bootstrap-coverage.test.ts` with
-  `useColdPglite()`, which saves and restores around a single file. Those four files no
-  longer mutate `process.env` directly, which is the R1 violation their
-  `scripts/check-test-isolation.allowlist` entries were excusing, and the allowlist header
-  says the list MUST shrink as files are fixed. They were NOT removed here because the
-  allowlist is flat, one line per file with no per-rule granularity, so an entry also
-  exempts the file from the PGLite rules (engine created outside `beforeAll`, missing
-  `afterAll{disconnect}`), which these files plausibly still trip. Removing an entry
-  therefore needs a per-file guard run, not a blind delete. Do it as its own sweep:
-  drop one entry, run `bash scripts/check-test-isolation.sh`, keep it out only if clean.
+- [ ] **P3 — four `check-test-isolation` allowlist entries need an R3/R4 refactor before
+  they can be delisted.** v0.42.81.0 replaced the bare module-level
+  `delete process.env.GBRAIN_PGLITE_SNAPSHOT` in `test/bootstrap.test.ts`,
+  `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, and
+  `test/schema-bootstrap-coverage.test.ts` with `useColdPglite()`, which removed their R1
+  (`process.env` mutation) violation. That is NOT enough to delist them, and this has
+  already been measured rather than assumed: all four were trial-delisted and the lint
+  re-run, which reported bootstrap (R3+R4), destructive-guard (R3), pages-soft-delete (R3),
+  schema-bootstrap-coverage (R3+R4). The allowlist is flat, one line per file, so an entry
+  exempts every rule at once. R3 is `new PGLiteEngine(` outside roughly 50 lines after a
+  `beforeAll`; R4 is a missing `afterAll` disconnect. Delisting therefore requires a real
+  per-file refactor (move engine creation into `beforeAll`, add `afterAll{disconnect}`),
+  not a blind delete. Do it one file at a time, re-running
+  `bash scripts/check-test-isolation.sh` after each.
 - [ ] **P3 — `scripts/check-test-isolation.sh` only scans `*.test.ts`.** Its file list is
   `find "$TARGET_DIR" -name '*.test.ts'`, so shared helpers under `test/helpers/` are never
   linted. `test/helpers/cold-pglite.ts` mutates `process.env` (correctly, with save and
