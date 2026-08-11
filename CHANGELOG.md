@@ -26,7 +26,13 @@ bun run build:pglite-snapshot
 GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test
 ```
 
-`bun run ci:local` does both steps for you.
+`bun run ci:local` does both steps for you, and rebuilds the fixture whenever it has gone out of date. You can ask for the same thing directly:
+
+```bash
+bun run scripts/build-pglite-snapshot.ts --if-stale
+```
+
+That rebuilds only when the fixture is missing or no longer matches the schema it was built from. When it is already current it costs about 4 seconds and does nothing.
 
 If you change the width the suite runs at, edit it in one place, `test/helpers/legacy-embedding-config.ts`. The builder and the suite's preload both read that file, and the freshness check folds the width in, so a fixture built at the old width stops matching and falls back to a normal cold start.
 
@@ -40,7 +46,7 @@ If you change the width the suite runs at, edit it in one place, `test/helpers/l
 
 ### Things to watch
 
-A fixture built before this release will not match the new freshness check. It is reported as stale and the engine falls back to a normal cold start, which is correct but slower. Rebuild it with `bun run build:pglite-snapshot` to get the speed-up back.
+A fixture built before this release will not match the new freshness check. It is reported as stale and the engine falls back to a normal cold start, which is correct but slower. `bun run ci:local` rebuilds it for you. If you run the suite by hand, rebuild it once with `bun run build:pglite-snapshot` to get the speed-up back.
 
 Test files that genuinely need the slow path now opt out through `useColdPglite()`, which brackets a single file instead of changing the setting for the whole process. Files that run before or after keep whatever the runner gave them.
 
@@ -70,6 +76,7 @@ the command you ran.
 - **The fixture builder pins the same embedding config the test preload pins.** `scripts/build-pglite-snapshot.ts` runs under `bun run`, which does not apply the test runner's preload, so it fell back to the production default width. It now calls `configureGateway()` with the shared config and logs the width it baked.
 - **The freshness check covers the embedding width.** `computeSnapshotSchemaHash()` in `src/core/pglite-engine.ts` takes the width as an argument and folds it into the hash. A fixture at the wrong width now fails the check and degrades to a normal cold start rather than loading and rejecting every insert.
 - **`tryLoadSnapshot()` resolves the width the same way schema setup does.** A synchronous helper reads the gateway's width and falls back to the canonical default when the gateway is not configured.
+- **The local CI run rebuilds an out-of-date fixture instead of skipping it.** `scripts/ci-local.sh` rebuilt the fixture only when the file was missing, so a fixture left over from an older schema was kept and the suite ran against it. `scripts/build-pglite-snapshot.ts` takes a new `--if-stale` flag that rebuilds when the fixture is absent, when its recorded version is absent or unreadable, or when that version no longer matches the current schema, and ci-local now calls it that way. The staleness comparison lives in the builder rather than in shell, so the hash is computed in one place.
 
 #### Added
 - **One definition of the width the unit suite runs at.** `test/helpers/legacy-embedding-config.ts` is read by both `test/helpers/legacy-embedding-preload.ts` and the fixture builder. It deliberately imports nothing from the test runner so a plain script can use it.
@@ -81,7 +88,7 @@ the command you ran.
 - **The seeded and cold schemas are compared at the correct width.** `test/pglite-snapshot-file-seeding.serial.test.ts` passes the shared width into the freshness check so a current fixture is not reported stale.
 
 #### Documentation
-- **`docs/TESTING.md`** explains how to build the fixture, how the width is shared, and when to reach for the scoped opt-out.
+- **`docs/TESTING.md`** explains how to build the fixture, how the width is shared, when to reach for the scoped opt-out, and how `--if-stale` decides whether a rebuild is needed.
 - **`docs/architecture/KEY_FILES.md`** records the widened hash signature.
 
 #### Maintenance
