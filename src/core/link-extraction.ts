@@ -290,6 +290,122 @@ export async function getExtraEntityDirs(engine: BrainEngine): Promise<string[]>
 }
 
 /**
+ * A reference whose top-level dir is NOT in the effective entity-dir set, so
+ * the dir-gated extractor passes cannot see it.
+ */
+export interface UndeclaredPrefixRef {
+  /** Full target slug, e.g. `sessions/2026-07-09-cutover`. */
+  slug: string;
+  /** Top-level dir, e.g. `sessions` — the exact string to add to entity_dirs. */
+  dir: string;
+}
+
+/**
+ * The wildcard stand-in for DIR_PATTERN. Deliberately the same shape
+ * ENTITY_DIR_RE accepts, so every dir this detector reports is a legal
+ * `entity_dirs` value — a finding whose remedy the operator cannot apply is
+ * worse than no finding.
+ */
+const ANY_DIR_PATTERN = '[a-z0-9][a-z0-9_-]*';
+
+const ANY_DIR_ENTITY_REF_RE = new RegExp(
+  `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${ANY_DIR_PATTERN}\\/[^)\\s]+?)(?:\\.md)?\\)`,
+  'g',
+);
+const ANY_DIR_WIKILINK_RE = new RegExp(
+  `\\[\\[(${ANY_DIR_PATTERN}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+  'g',
+);
+const ANY_DIR_QUALIFIED_WIKILINK_RE = new RegExp(
+  `\\[\\[([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(${ANY_DIR_PATTERN}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+  'g',
+);
+const ANY_DIR_BARE_SLUG_RE = new RegExp(
+  `\\b(${ANY_DIR_PATTERN}\\/[a-z0-9][a-z0-9/-]*[a-z0-9])\\b`,
+  'g',
+);
+
+/**
+ * Characters that, immediately before a bare-slug match, mean the match is a
+ * fragment of a URL or a longer path rather than a standalone reference.
+ */
+const URL_CONTEXT_CHAR_RE = /[/(.:\-@=?&#]/;
+
+/**
+ * The mirror image of the dir-gated passes in `extractEntityRefs`: match the
+ * same four shapes with a WILDCARD prefix, then keep only the refs whose
+ * top-level dir is absent from `DEFAULT_ENTITY_DIRS ∪ entityDirs`.
+ *
+ * WHY THIS EXISTS. `link_resolution.entity_dirs` reads as a recall knob, but it
+ * is load-bearing safety. `runAutoLink` deletes every reconcilable edge whose
+ * key is missing from the freshly-extracted desired set — the removal loop is
+ * NOT gated on that set being empty. So a prefix that stops being declared
+ * stops being extractable, and its existing `link_source='markdown'` edges are
+ * hard-deleted on the next local put_page. `links` has no tombstone column.
+ *
+ * Note this holds regardless of `link_resolution.global_basename`: with that
+ * flag on, an undeclared-prefix wikilink resolves via the basename path, which
+ * emits `linkSource:'wikilink-resolved'` and the `wikilink_basename` link type
+ * — a different reconciliation key, so the pre-existing `markdown` edge still
+ * misses the desired set and is still removed.
+ *
+ * Wildcard matching over-reports on its own (any `[label](foo/bar)` in prose).
+ * That is intentional: callers intersect these refs against real `markdown`
+ * edges, and a ref with no backing edge is discarded. Keeping the detector
+ * permissive means the intersection, not the regex, decides what is a finding.
+ *
+ * Pure — no DB, no resolver.
+ */
+export function extractUndeclaredPrefixRefs(
+  content: string,
+  entityDirs?: readonly string[],
+): UndeclaredPrefixRef[] {
+  const declared = new Set<string>(DEFAULT_ENTITY_DIRS);
+  for (const d of normalizeEntityDirs(entityDirs)) declared.add(d);
+
+  const stripped = stripCodeBlocks(content);
+  const seen = new Set<string>();
+  const out: UndeclaredPrefixRef[] = [];
+
+  const emit = (rawSlug: string, charBefore?: string): void => {
+    let slug = rawSlug.trim();
+    if (!slug) return;
+    if (slug.includes('://')) return;
+    if (slug.endsWith('.md')) slug = slug.slice(0, -3);
+    const dir = slug.split('/')[0];
+    // The regexes already constrain the dir shape; re-assert it so a future
+    // pattern edit cannot start emitting dirs entity_dirs would reject.
+    if (!ENTITY_DIR_RE.test(dir)) return;
+    if (declared.has(dir)) return;
+    // Mid-path match: in `https://example.com/sessions/cutover` the bare-slug
+    // arm can start at ANY segment, so `com/sessions/cutover` looks like a ref
+    // under a `com` dir. The production bare-slug scan gets away with checking
+    // only `/` and `(` because DIR_PATTERN already rejects `com`; a wildcard
+    // prefix does not, so reject the whole URL/path punctuation class.
+    if (charBefore !== undefined && URL_CONTEXT_CHAR_RE.test(charBefore)) return;
+    const key = `${dir} ${slug}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ slug, dir });
+  };
+
+  const scan = (re: RegExp, group: number, guardCharBefore: boolean): void => {
+    const pattern = new RegExp(re.source, re.flags);
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(stripped)) !== null) {
+      emit(m[group], guardCharBefore && m.index > 0 ? stripped[m.index - 1] : undefined);
+    }
+  };
+
+  scan(ANY_DIR_ENTITY_REF_RE, 2, false);
+  scan(ANY_DIR_QUALIFIED_WIKILINK_RE, 2, false);
+  scan(ANY_DIR_WIKILINK_RE, 1, false);
+  scan(ANY_DIR_BARE_SLUG_RE, 1, true);
+
+  return out;
+}
+
+/**
  * Strip fenced code blocks (```...```) and inline code (`...`) from markdown,
  * replacing them with whitespace of equivalent length. Preserves byte offsets
  * for any caller that cares about positions; for our extractors this is just

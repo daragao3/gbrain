@@ -2,6 +2,63 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.81.0] - 2026-08-11
+
+**Shortening one list in your settings could quietly delete links between your pages. Now GBrain stops you.**
+
+GBrain reads the `[[folder/page]]` references you write and turns them into links in your graph. It only recognizes references under folder names it knows about, and you can teach it your own folder names with a setting called `link_resolution.entity_dirs`. That setting looks like it only controls how much GBrain notices. It does more than that. If you take a folder name out of the list, GBrain stops recognizing every reference under that folder, and the next time you save one of those pages it removes the links it can no longer see. Links have no undo. Once they are gone, they are gone.
+
+Nothing about that was visible before. Removing a folder name from a list reads like turning down coverage, not like erasing data.
+
+Two things change. `gbrain doctor` now tells you when your current setting has left links stranded, names the folder to put back, and shows examples so you can check for yourself. And if you try to shorten the list in a way that would strand links, `gbrain config set` refuses and explains what would be lost instead of doing it.
+
+### How to use it
+
+Run the check on its own or as part of a normal doctor run:
+
+```bash
+gbrain doctor
+```
+
+A healthy brain reports nothing. A brain with stranded links reports the count, the affected pages, and a ready to paste command that puts the missing folder names back.
+
+Shortening the list is now gated:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'people,projects'
+```
+
+If that would strand links, the command stops and prints what would be lost. When you have read the list and still want to proceed, add `--yes`:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'people,projects' --yes
+```
+
+The same gate applies to `gbrain config unset link_resolution.entity_dirs`, which clears every folder name at once.
+
+### Things to watch
+
+The environment variable `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` takes priority over the stored setting, so a shell that exports a shorter list skips the `config set` gate. The doctor check reads whichever value is actually in effect, so it still reports the problem in that case.
+
+Turning on `link_resolution.global_basename` does not protect you here. A reference under an undeclared folder does get matched by name in that mode, but it is recorded as a different kind of link, so the original link is still removed.
+
+The check reports a folder name only when a real link depends on it. A reference you wrote to a page that was never linked is not reported, because there is nothing to lose.
+
+## To take advantage of v0.42.81.0
+
+Run `gbrain doctor` once after upgrading. If it reports stranded links, copy the command it prints and run it. That puts the missing folder names back and the links stop being at risk. If it reports nothing, your settings already cover every folder your pages reference and there is no action to take.
+
+### Itemized changes
+
+#### Added
+- **`gbrain doctor` reports links stranded by the current folder settings.** The `entity_dirs_orphaned_edges` check counts links whose reference sits under a folder name the settings no longer declare, groups them by folder, names example pages, and prints a ready to paste command that restores the full list. It runs on both the local and the remote doctor paths, and reads the effective setting so an environment override is included.
+- **`gbrain config set` and `gbrain config unset` refuse a change that would strand links.** Shortening `link_resolution.entity_dirs` now runs a check first, reports the links that would be removed, and stops. `--yes` proceeds anyway. Adding folder names, and removing ones nothing depends on, are unaffected.
+- **`src/core/entity-dirs-guard.ts`** holds the shared scan behind both surfaces. It reads existing links and page bodies with plain queries, so no schema change and no engine change were needed. It reports a link only when a reference under an undeclared folder is backed by a real link, and it says so explicitly when a scan stops early rather than reporting a partial count as a complete one.
+- **`extractUndeclaredPrefixRefs` in `src/core/link-extraction.ts`** finds references the extractor can no longer see. It mirrors the four reference shapes the extractor understands and lives beside them so the two cannot drift apart.
+
+#### Tests
+- `test/entity-dirs-undeclared-refs.test.ts`, `test/entity-dirs-guard-scan.test.ts`, `test/doctor-entity-dirs-orphaned-edges.test.ts`, and `test/config-entity-dirs-preflight.test.ts` cover each reference shape, references inside code blocks and URLs, links that are not eligible for removal, the environment override, the refusal and its `--yes` override, and a regression for the page shape that lost links in the first place.
+
 ## [0.42.75.0] - 2026-07-28
 
 **Folder safety checks now agree on what “inside this folder” means on Windows, Mac, and Linux.**
