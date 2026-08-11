@@ -14,8 +14,10 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { execFileSync } from 'child_process';
-import { resolve } from 'path';
+import { execFileSync, spawnSync } from 'child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { delimiter, join, resolve } from 'path';
+import { tmpdir } from 'os';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const SHARD_SH = resolve(REPO_ROOT, 'scripts/run-unit-shard.sh');
@@ -28,6 +30,324 @@ function dryRunList(): string[] {
   });
   return out.split('\n').map(s => s.trim()).filter(Boolean);
 }
+
+describe('run-unit-shard.sh Windows process bounds', () => {
+  it('marks a naturally completed empty shard', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-empty-'));
+    const completed = join(dir, 'completed');
+
+    try {
+      const result = spawnSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          SHARD: '2000/2000',
+          GBRAIN_TEST_SHARD_COMPLETED_FILE: completed,
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(existsSync(completed)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not expose the supervisor completion marker to nested test processes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-marker-private-'));
+    const bun = join(dir, 'bun');
+    const observed = join(dir, 'observed-marker.txt');
+    const completed = join(dir, 'completed');
+
+    try {
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then echo linux; exit 0; fi
+printf '%s' "\${GBRAIN_TEST_SHARD_COMPLETED_FILE-unset}" > "${observed.replace(/\\/g, '/')}"
+printf ' 1 pass\n 0 fail\n 0 skip\n'
+`);
+      chmodSync(bun, 0o755);
+
+      const result = spawnSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: '1/2000',
+          GBRAIN_TEST_SHARD_COMPLETED_FILE: completed,
+          GBRAIN_TEST_CHUNK_SIZE: '0',
+          GBRAIN_TEST_CHUNK_TIMEOUT: '0',
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(readFileSync(observed, 'utf-8')).toBe('unset');
+      expect(existsSync(completed)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('limits Windows Bun invocations to four files even if uname reports Linux', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-'));
+    const invocations = join(dir, 'bun-invocations.txt');
+    const timeoutInvocations = join(dir, 'timeout-invocations.txt');
+    const uname = join(dir, 'uname');
+    const bun = join(dir, 'bun');
+    const timeout = join(dir, 'timeout');
+
+    try {
+      writeFileSync(uname, '#!/usr/bin/env bash\necho Linux\n');
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then
+  echo win32
+  exit 0
+fi
+printf '%s\\n' "$*" >> "${invocations.replace(/\\/g, '/')}"
+echo " 1 pass"
+echo " 0 fail"
+echo " 0 skip"
+`);
+      writeFileSync(timeout, `#!/usr/bin/env bash
+if [ "$1" = "--preserve-status" ]; then shift; fi
+if [ "$1" = "--kill-after=5s" ]; then shift; fi
+printf '%s\\n' "$1" >> "${timeoutInvocations.replace(/\\/g, '/')}"
+shift
+"$@"
+`);
+      chmodSync(uname, 0o755);
+      chmodSync(bun, 0o755);
+      chmodSync(timeout, 0o755);
+
+      execFileSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: '1/32',
+          GBRAIN_TEST_CHUNK_SIZE: '',
+        },
+      });
+
+      const calls = readFileSync(invocations, 'utf-8').trim().split('\n');
+      const windowsDefaultChunkSize = Math.max(
+        ...calls.map(call => (call.match(/test\/[^ ]+\.test\.ts/g) ?? []).length),
+      );
+      const timeoutCalls = readFileSync(timeoutInvocations, 'utf-8').trim().split('\n');
+      const windowsDefaultChunkTimeout = Number(timeoutCalls[0]?.replace(/s$/, ''));
+      expect(calls.length).toBeGreaterThan(1);
+      expect(windowsDefaultChunkSize).toBe(4);
+      expect(windowsDefaultChunkTimeout).toBe(300);
+      for (const call of calls) {
+        expect((call.match(/test\/[^ ]+\.test\.ts/g) ?? []).length).toBeLessThanOrEqual(4);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a chunk size beyond Bash integer range', () => {
+    const result = spawnSync('bash', [SHARD_SH], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        SHARD: '1/200',
+        GBRAIN_TEST_CHUNK_SIZE: '999999999999999999999999',
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('invalid GBRAIN_TEST_CHUNK_SIZE');
+  });
+
+  it('rejects a chunk timeout beyond Bash integer range', () => {
+    const result = spawnSync('bash', [SHARD_SH], {
+      cwd: REPO_ROOT,
+      encoding: 'utf-8',
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        SHARD: '1/200',
+        GBRAIN_TEST_CHUNK_TIMEOUT: '999999999999999999999999',
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('invalid GBRAIN_TEST_CHUNK_TIMEOUT');
+  });
+
+  it('reports timeout diagnostics naming every file in a known multi-file chunk', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-single-chunk-'));
+    const bun = join(dir, 'bun');
+    const timeout = join(dir, 'timeout');
+    const allFiles = dryRunList();
+    const shardCount = Math.ceil(allFiles.length / 4);
+    const selectedFiles = allFiles.filter((_, index) => index % shardCount === 0);
+
+    expect(selectedFiles.length).toBeGreaterThan(1);
+    expect(selectedFiles.length).toBeLessThanOrEqual(4);
+
+    try {
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then
+  echo win32
+  exit 0
+fi
+exit 124
+`);
+      writeFileSync(timeout, `#!/usr/bin/env bash
+if [ "$1" = "--preserve-status" ]; then shift; fi
+if [ "$1" = "--kill-after=5s" ]; then shift; fi
+shift
+"$@"
+`);
+      chmodSync(bun, 0o755);
+      chmodSync(timeout, 0o755);
+
+      const result = spawnSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: `1/${shardCount}`,
+          GBRAIN_TEST_CHUNK_SIZE: '4',
+          GBRAIN_TEST_CHUNK_TIMEOUT: '1',
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(124);
+      expect(result.stderr).toContain('CHUNK 1 STALLED after 1s');
+      for (const file of selectedFiles) {
+        expect(result.stderr).toContain(`    ${file}`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports crash diagnostics naming every file in a known multi-file chunk', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-single-crash-'));
+    const bun = join(dir, 'bun');
+    const allFiles = dryRunList();
+    const shardCount = Math.ceil(allFiles.length / 4);
+    const selectedFiles = allFiles.filter((_, index) => index % shardCount === 0);
+
+    expect(selectedFiles.length).toBeGreaterThan(1);
+    expect(selectedFiles.length).toBeLessThanOrEqual(4);
+
+    try {
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then
+  echo win32
+  exit 0
+fi
+exit 127
+`);
+      chmodSync(bun, 0o755);
+
+      const result = spawnSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: `1/${shardCount}`,
+          GBRAIN_TEST_CHUNK_SIZE: '4',
+          GBRAIN_TEST_CHUNK_TIMEOUT: '0',
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(127);
+      expect(result.stderr).toContain('CHUNK 1 CRASHED (rc=127');
+      for (const file of selectedFiles) {
+        expect(result.stderr).toContain(`    ${file}`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('hard-kills a TERM-resistant Bun chunk after the timeout grace', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-stall-'));
+    const uname = join(dir, 'uname');
+    const bun = join(dir, 'bun');
+    const timeout = join(dir, 'timeout');
+
+    try {
+      writeFileSync(uname, '#!/usr/bin/env bash\necho Linux\n');
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then
+  echo win32
+  exit 0
+fi
+trap '' TERM
+sleep 30
+`);
+      // Hermetic substitute for timeout(1): require a bounded SIGKILL grace,
+      // then model a child that ignores SIGTERM. Only the exact owned child is
+      // signalled; the fixture never enumerates or targets unrelated processes.
+      writeFileSync(timeout, `#!/usr/bin/env bash
+preserve_status="$1"
+kill_after="$2"
+limit="$3"
+shift 3
+if [ "$preserve_status" != "--preserve-status" ] || [ "$kill_after" != "--kill-after=5s" ] || [ "$limit" != "1s" ]; then
+  echo "unexpected timeout args: $preserve_status $kill_after $limit" >&2
+  exit 98
+fi
+"$@" &
+pid=$!
+sleep 1
+kill -TERM "$pid" 2>/dev/null
+sleep 0.1
+if ! kill -0 "$pid" 2>/dev/null; then
+  echo "fixture child did not resist SIGTERM" >&2
+  exit 97
+fi
+kill -KILL "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+exit 137
+`);
+      chmodSync(uname, 0o755);
+      chmodSync(bun, 0o755);
+      chmodSync(timeout, 0o755);
+
+      const result = spawnSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: '1/2000',
+          GBRAIN_TEST_CHUNK_SIZE: '',
+          GBRAIN_TEST_CHUNK_TIMEOUT: '1',
+        },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(137);
+      expect(result.stderr).toContain('CHUNK 1 FORCE-KILLED after 1s + 5s grace');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('run-unit-shard.sh exclusion symmetry', () => {
   it('lists at least one plain *.test.ts file', () => {

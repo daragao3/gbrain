@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc  # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -211,7 +211,11 @@ jobs:
     needs: cache-check
     if: needs.cache-check.outputs.hit != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 22, not 15: under parallel PR load the PGLite WASM cold-starts stretch a
+    # shard past 15 min while every test is still passing — the timeout then
+    # cancels the job and the test-status gate reads it as a failure. 13 runs
+    # died this way on 2026-07-21/22 alone.
+    timeout-minutes: 22
     strategy:
       fail-fast: false
       matrix:

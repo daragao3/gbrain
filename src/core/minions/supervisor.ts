@@ -657,12 +657,7 @@ export class MinionSupervisor {
     }
 
     if (this.childSupervisor) {
-      this.childSupervisor.killChild('SIGTERM');
-      await this.childSupervisor.awaitChildExit(35_000);
-      // If the child is still up after the 35s drain window, escalate.
-      if (this.childSupervisor.childAlive) {
-        this.childSupervisor.killChild('SIGKILL');
-      }
+      await this.childSupervisor.shutdownChild(35_000, 5_000);
     }
 
     // Remove signal handlers so tests that spin up multiple supervisors on

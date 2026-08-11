@@ -1,5 +1,58 @@
 # TODOS
 
+## v0.42.80.0 follow-ups (auto-link removal safety net)
+
+- [ ] **P2 - decide whether `DIR_PATTERN` should stop being a hardcoded whitelist.**
+  The v0.42.80.0 data-loss defect was only reachable because
+  `src/core/link-extraction.ts`'s `DIR_PATTERN` recognizes a fixed set of top-level
+  slug directories, so a `[[<other-dir>/page]]` wikilink silently produces no link
+  candidate at all unless `link_resolution.global_basename` is on. The release stops
+  that from DELETING anything, but those wikilinks still never become links, so the
+  graph is quietly missing edges the author clearly intended. Options: widen the
+  whitelist, derive it from the source's actual top-level directories, or make
+  `global_basename` the default. Each changes edge counts brain-wide, which is why
+  it was deliberately not bundled into the data-loss fix.
+  Where: `src/core/link-extraction.ts` (`DIR_PATTERN`, `WIKILINK_RE`).
+- [ ] **P2 - frontmatter-derived edges have the same exposure and are NOT protected.**
+  `runAutoLink`'s safety net keys on `unresolvableRefs`, which only covers body
+  wikilinks. An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
+  a slug, so it cannot be matched against `to_slug` and was left out rather than
+  half-matched. A frontmatter field whose value stops resolving therefore still drops
+  its edge. Closing this needs the frontmatter resolver to report the slug it was
+  unable to confirm, not just the name it failed on.
+  Where: `src/core/link-extraction.ts` (`UnresolvedFrontmatterRef`,
+  `extractFrontmatterLinks`), `src/core/operations.ts` (`runAutoLink`).
+- [ ] **P3 - report the Bun Windows binstub shim crash upstream.**
+  `gbrain put <slug> --content <large body>` dies with an access violation
+  (`0xC0000005`, exit `3221225477`) with no output and no write. It is not gbrain
+  code: the installed `gbrain.exe` is Bun's ~15KB Windows binstub shim, and it faults
+  once the forwarded command line passes roughly 16-20KB. The same argument size runs
+  fine through `bun src/cli.ts` directly and through `bun --eval`, so the shim is the
+  faulting component. v0.42.80.0 routes around it with `put --file`; the shim bug
+  itself belongs in a Bun issue with the size threshold and the direct-invocation
+  control included.
+## v0.42.79.0 follow-ups (placeholder-truncation guard)
+
+- [ ] **P2 - nothing surfaces pages that were ALREADY truncated this way.** The
+  v0.42.79.0 guard stops new placeholder-shaped truncations at write time, but a brain
+  damaged before the upgrade carries the loss silently forever. The signature is cheap to
+  detect on stored content: a page whose compiled truth contains a standalone bracketed
+  line (`findPlaceholderLines` from `src/core/placeholder-truncation.ts`) and whose latest
+  `page_versions` row is substantially longer than the live body. That is the same two-part
+  test the write-time guard uses, evaluated against history instead of an incoming payload.
+  Wire it as a `lint` rule (sibling of `huge-page` / `scraper-junk`, which already reuse the
+  `content-sanity` assessor the same way) and surface the count in `gbrain doctor`. The
+  repair path already exists: `page_versions` holds the pre-write content.
+  Where: `src/commands/lint.ts`, `src/commands/doctor.ts`.
+- [ ] **P3 - the shrink thresholds are validated against one corpus only.**
+  `PLACEHOLDER_MIN_REMOVED_CHARS` (500) and `PLACEHOLDER_MAX_RETAINED_RATIO` (0.75) were
+  picked to clear the three observed incidents (which retained 0.24, 0.35, and 0.56) with
+  margin, and checked for false positives against a single 490-page brain where the
+  line-shape test matched 3 benign lines on 2 pages. They are exported constants, so tuning
+  them touches no call sites. If a second corpus shows the shape matching materially more
+  often, revisit before tightening anything else.
+  Where: `src/core/placeholder-truncation.ts`.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns every
@@ -66,17 +119,10 @@
 
 ## community fix-wave follow-ups (filed v0.42.60.0)
 
-- [ ] **P1 — take-writes source scoping fails open when source resolution errors (#2684 residual).**
-  `resolveTakesSourceId` (src/commands/takes.ts) swallows resolution errors and returns
-  `undefined`, which falls back to the unscoped slug-only page lookup — so an invalid
-  `GBRAIN_SOURCE` (or a broken dotfile chain) silently restores the pre-#2698 cross-source
-  write behavior on multi-source brains. Decide fail-closed semantics: error out when a
-  source was explicitly requested but doesn't resolve; keep the unscoped fallback only for
-  brains with no source configuration at all. Add a regression test for the invalid-source
-  path. Found by cross-model adversarial review during the v0.42.60.0 release ship.
-- [ ] **P2 — cherry-pick #2112's uncovered doctor.ts hunk.** Fix-wave A (#2820) superseded
+- [x] **P2 — cherry-pick #2112's uncovered doctor.ts hunk.** Fix-wave A (#2820) superseded
   most of #2112 but not its `checkSubagentCapability` fix (check explicit `models.subagent`
-  before `models.tier.subagent`). Refile or cherry-pick; the rest of that PR is covered.
+  before `models.tier.subagent`). Implemented: `checkSubagentCapability` now resolves
+  `models.subagent` before tier/default fallbacks and has regression coverage.
 
 ## v0.42.59.0 follow-ups (five-fix rollup #2735–#2739)
 
@@ -133,17 +179,20 @@ Deferred from the provider-agnostic plumbing wave (#1249/#1250/#1292/#2271/#2209
 Plan + review trail at `~/.claude/plans/system-instruction-you-are-working-keen-newell.md`.
 The eng-review + Codex outside-voice narrowed the wave to these deferrals:
 
-- [ ] **P2 — Capability-aware query expansion on OpenAI-compat providers (#2372).**
+- [x] **P2 — Capability-aware query expansion on OpenAI-compat providers (#2372).**
   Expansion only runs for recipes that declare an `expansion` touchpoint, and only the
   native providers (anthropic/openai/google) do. To make expansion work on
   litellm/openrouter/groq/together/deepseek you must ADD expansion touchpoints to those
   chat-capable recipes AND add a `generateObject`→`generateText` capability fallback for
   backends without strict structured outputs. Feature-shaped; overlaps the general
   OpenAI-compat proxy story (`docs/designs/COMMUNITY_IDEAS.md`). Community PR #2373 is a
-  starting point. Where: `src/core/ai/gateway.ts:expand`, recipe files, `types.ts` (ExpansionTouchpoint).
-- [ ] **P2 — LiteLLM as a chat/expansion backend.** `litellm-proxy` declares ONLY an
+  starting point. Implemented by #2373 plus the DeepSeek/Groq/Together recipe wave,
+  LiteLLM chat/expansion support, and the OpenRouter expansion touchpoint. Where:
+  `src/core/ai/gateway.ts:expand`, recipe files, `types.ts` (ExpansionTouchpoint).
+- [x] **P2 — LiteLLM as a chat/expansion backend.** `litellm-proxy` declares ONLY an
   embedding touchpoint, so `think`/chat on LiteLLM is dead. Add chat (and expansion) so a
-  LiteLLM proxy is a full LLM backend, not embedding-only. The general OpenAI-compat proxy story.
+  LiteLLM proxy is a full LLM backend, not embedding-only. Implemented by #2208.
+  The general OpenAI-compat proxy story.
 - [ ] **P3 — Per-model embedding dims metadata on `EmbeddingTouchpoint`.** `default_dims`
   is recipe-wide, so a recipe (ollama) can't carry different native dims per model. This
   wave added the modern ollama model NAMES + a `trust_custom_dims` passthrough (user supplies
@@ -2351,10 +2400,25 @@ at plan time and got carved out:
   via `buildPerSourceBindings`. Document workaround: register
   source-scoped OAuth clients.
 
-- [ ] **v0.41+: T20 — extends-chain merging in registry.ts.**
-  `registry.ts:167` documents the gap. Implementing full child-wins
-  merge cascades through every consumer of `manifest.page_types`. ~1
-  day CC.
+- [x] **v0.41+: T20 — extends-chain merging in registry.ts.** DONE (#1749).
+  `resolvePack` now merges parent → child (child-wins) for the six
+  ingest/query-shaping fields (`page_types`, `link_types`,
+  `frontmatter_links`, `enrichable_types`, `filing_rules`, `takes_kinds`)
+  plus `borrow_from` materialization, in `src/core/schema-pack/merge.ts`.
+  The cascade was transparent (consumers already read `resolved.manifest`),
+  not per-consumer. `phases`/`calibration_domains` deliberately excluded —
+  see the P3 follow-up below.
+
+- [ ] **P3: explicit opt-in to inherit `phases` / `calibration_domains`.**
+  T20 excludes these two from the child-wins merge because they gate real
+  cycle execution (`cycle.ts` `packDeclaresPhase`) and the manifest
+  contract says each pack declares its own participation explicitly —
+  auto-inheriting would silently make a child run cycle phases it never
+  requested. Multi-level lens packs (`gbrain-everything`) therefore still
+  re-declare them by hand. If that redeclaration becomes painful, add an
+  explicit manifest flag (e.g. `inherit_phases: true`) so a pack author
+  opts in consciously. Depends on: T20 (landed). Start in
+  `src/core/schema-pack/merge.ts` (`mergeInheritedManifest`).
 
 - [ ] **v0.41+: T21 — comment-preserving YAML emitter.**
   v0.40.7.0 emitter does NOT preserve comments. Authors who care
@@ -3301,16 +3365,11 @@ verify Voyage adapter integration in `src/core/ai/recipes/voyage.ts`).
 ## OAuth/MCP hardening (v0.26.7 follow-up)
 
 ### F11 — `auth register-client --redirect-uri` flag
-**Priority:** P3
 
-**What:** `gbrain auth register-client` always passes `[]` for redirect URIs; there is no CLI flag to set them. Operators who want to register an `authorization_code` client without DCR have to hand-edit the database.
-
-**Why:** Operator UX gap, not a trust-boundary issue. Codex C11 correctly flagged it as scope creep on the v0.26.7 hardening pass — kept out of that PR but worth doing.
-
-**Pros:** Closes the operator-experience gap. Validates `https://` or loopback per RFC 6749 §3.1.2.1 at registration time. Repeatable flag.
-**Cons:** ~30 lines of argv parsing + URL validation. Adds one more flag to the `auth register-client` surface. Low value relative to the OAuth provider hardening that already shipped.
-**Context:** Eva-brain has the implementation under `src/commands/auth.ts:registerClient`. Lift verbatim — the `localhost`/`127.0.0.1`/`::1` exact-match validation is correct; codex spot-check confirmed it does NOT match `localhost.evil.com`. v0.27 candidate.
-**Depends on:** Nothing.
+**Status:** Shipped in v0.41.3.0. `gbrain auth register-client` now accepts
+repeatable `--redirect-uri` values, validates supported callback URLs, and
+supports the token-endpoint authentication methods needed to pre-register
+browser clients while DCR remains disabled.
 
 ### F13 — `gbrain serve --http` argv positive-int validator
 **Priority:** P3

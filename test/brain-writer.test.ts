@@ -11,8 +11,10 @@ import {
 import { isPathInside } from '../src/core/path-confine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 const fence = '---';
+const FS_CAPABILITIES = getFsCapabilities();
 
 describe('autoFixFrontmatter', () => {
   test('strips null bytes', () => {
@@ -31,6 +33,43 @@ describe('autoFixFrontmatter', () => {
     const idxHeading = content.indexOf('# A heading');
     expect(idxClose).toBeGreaterThan(0);
     expect(idxClose).toBeLessThan(idxHeading);
+  });
+
+  // Regression for #3225: a `#`-prefixed line inside an already-closed
+  // frontmatter fence is a YAML comment, not a markdown heading. The old
+  // MISSING_CLOSE scan broke out on the first heading-shaped line without
+  // continuing to look for the real closer, so it inserted a spurious
+  // `---` before the comment and split valid frontmatter in two — pushing
+  // the real keys (title, pubDate, ...) into the document body.
+  test('does not corrupt closed frontmatter containing a YAML comment line', () => {
+    const input = `${fence}\n# a YAML comment inside the frontmatter block\ntitle: "Real Title"\npubDate: 2026-06-29\n${fence}\nBody...`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('does not corrupt closed frontmatter that is comment-only', () => {
+    const input = `${fence}\n# just a comment\n# another comment\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('does not corrupt closed frontmatter with an indented `#` line inside a YAML block scalar', () => {
+    const input = `${fence}\ndescription: |\n  # not a heading, just literal block-scalar text\ntitle: ok\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('YAML comment before close does not suppress an unrelated real fix (SLUG_MISMATCH)', () => {
+    const input = `${fence}\n# a YAML comment\ntitle: hi\nslug: wrong-slug\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input, { filePath: 'people/jane-doe.md' });
+    expect(fixes.some(f => f.code === 'MISSING_CLOSE')).toBe(false);
+    expect(fixes.some(f => f.code === 'SLUG_MISMATCH')).toBe(true);
+    // The frontmatter fence itself must stay intact — only the slug line
+    // is removed, the comment/title/close survive unchanged.
+    expect(content).toBe(`${fence}\n# a YAML comment\ntitle: hi\n\n${fence}\nBody`);
   });
 
   test('rewrites nested-quote title to single-quoted', () => {
@@ -277,22 +316,21 @@ describe('scanBrainSources (PGLite)', () => {
     expect(ghost.total).toBe(0);
   });
 
-  test('skips symlinks (matches sync no-symlink policy)', async () => {
-    mkdirSync(join(tmp, 'real'), { recursive: true });
-    writeFileSync(join(tmp, 'real', 'good.md'), `${fence}\ntype: x\ntitle: ok\n${fence}\n\nbody`);
-    // Create a symlink loop: tmp/real/loop -> tmp/real
-    try {
-      symlinkSync(join(tmp, 'real'), join(tmp, 'real', 'loop'));
-    } catch {
-      // Some CI environments forbid symlink creation; skip the assertion.
-      return;
-    }
-    await registerSource('with-symlink', tmp);
-    const report = await scanBrainSources(engine);
-    // The walk should complete without infinite-looping; at most one .md
-    // entry visited (via the real path, not the symlink).
-    expect(report.per_source[0]!.total).toBe(0);
-  });
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)(
+    'skips symlinks (matches sync no-symlink policy)',
+    async () => {
+      mkdirSync(join(tmp, 'real'), { recursive: true });
+      writeFileSync(join(tmp, 'real', 'good.md'), `${fence}\ntype: x\ntitle: ok\n${fence}\n\nbody`);
+      // Create a symlink loop: tmp/real/loop -> tmp/real
+      symlinkSync(join(tmp, 'real'), join(tmp, 'real', 'loop'), 'dir');
+      await registerSource('with-symlink', tmp);
+      const report = await scanBrainSources(engine);
+      // The walk should complete without infinite-looping and visit good.md
+      // exactly once through the real path, never through the symlink.
+      expect(report.per_source[0]!.files_scanned).toBe(1);
+      expect(report.per_source[0]!.total).toBe(0);
+    },
+  );
 
   test('AbortSignal before scan: every source marked skipped (v0.38.2.0 partial-state contract)', async () => {
     const src = join(tmp, 'big');

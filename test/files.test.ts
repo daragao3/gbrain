@@ -7,8 +7,10 @@ import { tmpdir } from 'os';
 import { collectFiles } from '../src/commands/files.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import * as db from '../src/core/db.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 const TMP = join(import.meta.dir, '.tmp-files-test');
+const FS_CAPABILITIES = getFsCapabilities();
 
 // These functions are not exported from files.ts, so we reimplement and test
 // the logic patterns to ensure correctness. If they ever get exported, switch
@@ -159,24 +161,28 @@ describe('collectFiles (production import)', () => {
     expect(files).toEqual(sorted);
   });
 
-  test('collectFiles skips symlinks', () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('collectFiles skips symlinks', () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-symlink-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'gbrain-symlink-outside-'));
     try {
+      const outsideFile = join(outsideDir, 'outside.txt');
+      writeFileSync(outsideFile, 'outside');
       writeFileSync(join(tmpDir, 'real.txt'), 'content');
-      symlinkSync('/etc/passwd', join(tmpDir, 'evil.txt'));
+      symlinkSync(outsideFile, join(tmpDir, 'evil.txt'), 'file');
       const files = collectFiles(tmpDir);
       expect(files.map(f => basename(f))).toContain('real.txt');
       expect(files.map(f => basename(f))).not.toContain('evil.txt');
     } finally {
       rmSync(tmpDir, { recursive: true });
+      rmSync(outsideDir, { recursive: true });
     }
   });
 
-  test('collectFiles skips broken symlinks', () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('collectFiles skips broken symlinks', () => {
     const tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-broken-'));
     try {
       writeFileSync(join(tmpDir, 'real.txt'), 'content');
-      symlinkSync('/nonexistent/path', join(tmpDir, 'broken.txt'));
+      symlinkSync(join(tmpDir, 'missing-target'), join(tmpDir, 'broken.txt'), 'file');
       const files = collectFiles(tmpDir);
       expect(files.map(f => basename(f))).toContain('real.txt');
       expect(files.map(f => basename(f))).not.toContain('broken.txt');

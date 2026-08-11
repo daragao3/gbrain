@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
 import {
   configureGateway,
   resetGateway,
+  __unconfigureGatewayForTests,
   isAvailable,
   embed,
   getEmbeddingModel,
@@ -55,6 +56,9 @@ describe('gateway.isAvailable (silent-drop regression surface)', () => {
   beforeEach(() => resetGateway());
 
   test('returns false when gateway not configured', () => {
+    // resetGateway() restores the preload's test baseline (#3554); go
+    // genuinely unconfigured for this one assertion.
+    __unconfigureGatewayForTests();
     expect(isAvailable('embedding')).toBe(false);
   });
 
@@ -109,6 +113,23 @@ describe('gateway.isAvailable (silent-drop regression surface)', () => {
       env: { ANTHROPIC_API_KEY: 'fake' },
     });
     expect(isAvailable('expansion')).toBe(true);
+  });
+
+  // #1135 — an explicit expansion_model pointed at a chat-capable
+  // OpenAI-compatible provider used to silently yield no expansion because
+  // the recipe declared no expansion touchpoint.
+  test('expansion available for chat-capable openai-compat providers (deepseek/groq/together/openrouter)', () => {
+    const cases: Array<[string, Record<string, string>]> = [
+      ['deepseek:deepseek-chat', { DEEPSEEK_API_KEY: 'fake' }],
+      ['groq:llama-3.1-8b-instant', { GROQ_API_KEY: 'fake' }],
+      ['together:meta-llama/Llama-3.3-70B-Instruct-Turbo', { TOGETHER_API_KEY: 'fake' }],
+      ['openrouter:google/gemini-3-flash-preview', { OPENROUTER_API_KEY: 'fake' }],
+    ];
+    for (const [model, env] of cases) {
+      resetGateway();
+      configureGateway({ expansion_model: model, env });
+      expect(isAvailable('expansion'), `${model} expansion should be available`).toBe(true);
+    }
   });
 });
 

@@ -49,8 +49,9 @@ export function detectTini(): string {
 /**
  * Build the (cmd, args) tuple for spawning the gbrain worker, optionally
  * wrapped in tini. When `tiniPath` is non-empty, returns
- *   { cmd: tiniPath, args: ['--', cliPath, ...args] }
- * which makes tini PID 1 of the spawned subtree. When empty, returns
+ *   { cmd: tiniPath, args: ['-g', '--', cliPath, ...args] }
+ * which makes tini forward signals to the worker process group and reap the
+ * spawned subtree. When empty, returns
  *   { cmd: cliPath, args }
  * for a direct spawn. Pure function, no side effects.
  */
@@ -60,6 +61,6 @@ export function buildSpawnInvocation(
   args: string[],
 ): { cmd: string; args: string[] } {
   return tiniPath
-    ? { cmd: tiniPath, args: ['--', cliPath, ...args] }
+    ? { cmd: tiniPath, args: ['-g', '--', cliPath, ...args] }
     : { cmd: cliPath, args };
 }

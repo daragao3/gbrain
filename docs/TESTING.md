@@ -11,7 +11,7 @@ Seven test command tiers, each with a clear scope:
 
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
-| `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
+| `bun run test` | Parallel unit-test fast loop via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Defaults to one shard on Windows and up to four elsewhere. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
 | `bun run verify` | CI's authoritative pre-test gate, fanned out by `scripts/run-verify-parallel.sh`. It runs every entry in that script's `CHECKS` array: the complete `check:*` battery plus typecheck. CI calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
@@ -47,6 +47,29 @@ loaded machine that can exhaust the process table and produce failures unrelated
 when the machine is quieter, or run the single check directly (`bash scripts/check-foo.sh`)
 to confirm.
 
+### Shell dispatch and Windows
+
+All four of `test`, `verify`, `ci:local` and `test:e2e` hand off to shell scripts
+under `scripts/`, so every `check:*` entry in `package.json` invokes its script as
+`bash scripts/<name>.sh` instead of relying on the shebang — bun on Windows cannot
+exec a `.sh` directly. Add a new shell-script check with that same prefix. The
+`scripts/*.ts` entries run under bun and take no prefix.
+
+The scripts must also be on disk with Unix line endings. A strict bash (WSL, Linux
+CI, macOS) rejects CRLF and dies on the script's first meaningful line; the Cygwin
+bash that ships with Git for Windows tolerates it, so a green local run is not by
+itself evidence that a script is CRLF-clean.
+The root `.gitattributes` pins `*.sh text eol=lf`, which overrides the
+`core.autocrlf=true` default that Git for Windows installs. Working copies cloned
+before that pin need a one-time `git rm --cached -r . -q && git reset --hard` to
+pick it up; see the Windows section of `CONTRIBUTING.md`.
+
+Wallclock figures in the table above are from a Mac dev box. Windows is
+substantially slower because each check pays full process-creation cost, and three
+tree-walking checks (`check:privacy`, `check:test-names`, `check:test-isolation`)
+plus `typecheck` can exceed the 120s per-check cap in `run-verify-parallel.sh`
+there even though they pass on Linux and macOS.
+
 ### CI vs local: intentionally divergent file sets
 
 - **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` across 10 matrix shards partitioned by weight-aware LPT bin-packing (`scripts/sharding.ts`) and INCLUDES `*.slow.test.ts` (the two outlier slow files run as dedicated jobs alongside the matrix). CI EXCLUDES `*.serial.test.ts` from the shards and runs them in a dedicated job via `bun run test:serial`, one bun process per file — keeping serial files out of the shard processes is what preserves the `mock.module` quarantine (a top-level mock in one file leaks into every other file sharing its process). `bun run verify` gets its own job too. CI is the ground truth for "did everything pass."
@@ -63,24 +86,22 @@ When `bun run test` finds any failure, the wrapper:
 3. Writes a one-line-per-shard summary to `.context/test-summary.txt` (`shard N/M: pass=X fail=Y skip=Z rc=W`).
 4. Exits non-zero. Empty failure log + non-zero exit = infrastructure problem (wedged shard, killed child); the banner says so.
 
-If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the wrapper writes `--- shard N: WEDGED after ${SHARD_TIMEOUT}s ---` to the failure log, includes the last 50 lines of the shard log, and proceeds with other shards' results.
+The outer wrapper has two independent bounds. `GBRAIN_TEST_SHARD_TIMEOUT` is the whole-shard wallclock cap: it remains 1,500 seconds on POSIX and on explicit shard-count runs. A default Windows run uses one shard and derives the cap as 30 seconds per discovered unit file, with a 1,500-second floor; an explicit environment override remains authoritative. `GBRAIN_TEST_SHARD_STALL_SECONDS` is a no-log-growth watchdog (default 600 seconds, `0` disables it). `run-unit-shard.sh` keeps its natural-completion marker path private from descendants, and the wrapper requires that attestation before accepting rc 0 with zero reported failures. Helper `STALLED`/`WEDGED` evidence remains fail-closed even if marker creation raced helper termination; rc 0 without a marker is reported as `UNATTESTED`. A genuine outer wallclock expiry is reported as `WEDGED`; a no-log expiry is reported as `STALLED`.
 
 ### Chunking a shard's file list (`GBRAIN_TEST_CHUNK_SIZE`)
 
-`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for **every file in that invocation** are lost, so a 253-file shard reports `pass=0 fail=0 rc=127` and the run cannot gate anything.
+`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for every file in that invocation are lost. The Windows defaults therefore use one shard for bounded aggregate memory, split its files into groups of four, and wrap each Bun process in a 300-second chunk cap. POSIX keeps chunking and the chunk cap disabled by default.
 
-`scripts/run-unit-shard.sh` therefore splits its file list into bounded chunks and runs one `bun test` per chunk, so a crash costs one chunk instead of the shard. A chunk that exits non-zero is reported with its file list named on stderr rather than silently under-reporting, and the shard exits with the worst chunk's code. `run-unit-parallel.sh`'s `bun_summary_count()` already sums Bun's summary block across multiple invocations per shard, so chunking needs no aggregator change.
+| Platform | `GBRAIN_TEST_CHUNK_SIZE` default | `GBRAIN_TEST_CHUNK_TIMEOUT` default |
+|---|---:|---:|
+| POSIX Bun (Linux, macOS) | `0` (off) | `0` (off) |
+| Windows Bun, including when hosted by WSL/MSYS/MINGW/CYGWIN | `4` | `300` seconds |
 
-| Platform | Default | Why |
-|---|---|---|
-| POSIX (Linux, macOS) | `0` (off) | One invocation per shard, byte-identical to prior CI behavior. |
-| MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
-
-`GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
+Both overrides accept bounded non-negative Bash integers; `0` disables that bound. Each chunk runs as a separate `bun test`, and `run-unit-parallel.sh` sums all emitted Bun summaries. The chunk cap first sends TERM and then, after a fixed five-second grace, force-kills the exact owned chunk command; this keeps TERM-resistant Bun/native work within a real wallclock bound without enumerating or targeting unrelated processes. An rc 124 chunk is reported as `CHUNK N STALLED`, an rc 137 chunk as `CHUNK N FORCE-KILLED`, and an rc 127 chunk as `CHUNK N CRASHED`; all diagnostics name every file in the affected chunk. These inner diagnoses remain distinct from the outer whole-shard `STALLED`/`WEDGED` sentinels. `GBRAIN_TEST_SHARD_COMPLETED_FILE` is the supervisor-only natural-completion marker and is touched only after a clean shard run.
 
 ### File taxonomy
 
-- `*.test.ts` → fast loop (parallel 8-shard fan-out).
+- `*.test.ts` → fast loop (one shard on Windows; up to four elsewhere).
 - `*.slow.test.ts` → run via `bun run test:slow` only (intentional cold-path tests; would dominate the fast loop's wallclock).
 - `*.serial.test.ts` → run via `bun run test:serial` after the parallel pass completes; one bun process per file (`--max-concurrency=1` within a shared process is not enough — the module registry still leaks `mock.module`). Quarantine for tests that share file-wide state and race when run alongside other files in the same `bun test` process. Several dozen files, discovered by the `*.serial.test.ts` glob — no list to maintain. Typical residents: `mock.module(...)` users (top-level mocks leak across files in a shard process, e.g. `test/embed.serial.test.ts`), env-coupled files (e.g. `test/brain-registry.serial.test.ts`), and process-lifecycle suites that assert on `process.exitCode` (e.g. `test/pglite-engine-disconnect.serial.test.ts`). **Do not put the parallelism back on a serial file unless you've fixed the contention root cause** (it just re-introduces the flake).
 - `test/e2e/*.test.ts` → real-Postgres E2E. Skipped when `DATABASE_URL` is unset.
@@ -180,6 +201,24 @@ Filesystem directory-boundary tests should exercise the shared helpers in `src/c
 
 `scripts/check-frontmatter-fence.sh` (wired into `bun run verify` and `bun run check:all`) fails the build on the two shapes that read from offset 0: an LF-only fence in a regex literal, and `.startsWith('---\n')`. It leaves alone the far more common case of *building* content — fixture bodies, page builders, markdown-HR joins — which carry neither a `^` anchor nor `startsWith`. Fix by relaxing the fence to `/^---\r?\n…/`, or by normalizing once up front (`content.replace(/\r\n/g, '\n')`), which is preferred when the parsed values flow downstream because it also strips a trailing `\r` off each one. Do not normalize when the function returns a byte offset into the original text, since that shifts every offset. A `frontmatter-fence-guard-ok` comment opts out a line that genuinely wants LF only — in tests that means asserting on gbrain's own emitted markdown, where LF is the property under test and relaxing the fence would stop the assertion catching a CRLF regression in the writer.
 
+### Budgets for CLI-spawn tests against a fresh PGLite brain
+
+A few serial files (`apply-migrations-pglite-spawn`, `admin-embed-spawn`) spawn the real CLI against a brand-new PGLite brain. That is expensive: `PGlite.create()` runs `initdb` under WASM, then the whole schema is applied, before the command under test does anything. Linux/macOS absorb it; Windows does not.
+
+Budgets live in `test/helpers/pglite-spawn-budget.ts` — never as literals in the test files — so the measurements behind each number stay next to the number:
+
+| constant | env override | default | sized against |
+|---|---|---|---|
+| `PGLITE_BOOTSTRAP_MS` | `GBRAIN_TEST_PGLITE_BOOTSTRAP_MS` | 420s | one cold bootstrap (worst observed 199s) |
+| `ORCHESTRATOR_CASCADE_MS` | `GBRAIN_TEST_CASCADE_MS` | 1500s | `apply-migrations --yes` walking all 19 orchestrators (observed 698s) |
+| `CLI_SPAWN_MS` | `GBRAIN_TEST_CLI_SPAWN_MS` | 120s | a spawn with no schema replay (`--list`, one HTTP GET) |
+
+Defaults are ~2x the worst observed value, not ~1.5x like `GBRAIN_TEST_SHARD_TIMEOUT`: two back-to-back reps of the same cold spawn measured 11.3s and 28.9s on a contended box, so tighter headroom just re-creates the flake. They are hang detectors, not latency targets — raising one never makes anything slower, and a genuinely wedged run still trips it.
+
+`GBRAIN_SKIP_SUBPROCESS_TESTS=1` skips `apply-migrations-pglite-spawn` and `doctor-cli-smoke` for a fast inner loop — the two that cost minutes. CI never sets it. `admin-embed-spawn` runs unconditionally; sharing one server across its four cases brought it to ~93s, which is cheap enough not to need an opt-out.
+
+`test/helpers/gbrain-shim.ts` creates the platform-specific shim and returns its complete `pathValue`. On Windows, `cmd.exe` resolves commands through PATHEXT and cannot see an extensionless `#!/bin/sh` shim, while PATH entries join with `path.delimiter` (`;`), not `:`. Tests must use `pathValue` rather than assembling PATH themselves; otherwise `gbrain` can silently resolve to a globally linked binary from another checkout instead of the code under test.
+
 ### Unit test inventory
 
 `bun test` runs all tests without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
@@ -245,6 +284,8 @@ Unit tests and what they cover:
 - `test/extract-db.test.ts` — `gbrain extract --source db`: typed link inference, idempotency, `--type` filter, `--dry-run` JSON output.
 - `test/extract-fs.test.ts` — `gbrain extract --source fs`: first-run inserts + second-run reports zero, dry-run dedups candidates across files, second-run perf regression guard for the N+1 dedup bug.
 - `test/link-extraction.test.ts` — canonical `extractEntityRefs` both formats, `extractPageLinks` dedup, `inferLinkType` heuristics, `parseTimelineEntries` date variants, `isAutoLinkEnabled` config.
+- `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` — the auto-link removal safety net. A no-op (`skipped`) save and a genuine rewrite both leave links untouched when the body still carries wikilinks the extractor cannot resolve; `auto_links.withheld` reports the held-back count. Two CONTRA cases pin that a wikilink actually removed from the body still reconciles its edge away (all of them, or just the one dropped), and one pins that `link_source='manual'` edges are never touched.
+- `test/put-page-file-flag.test.ts` — `gbrain put <slug> --file PATH` boundaries: the flag stays OFF `put_page.params` (so remote callers gain no file read), `parseOpArgs` carries the undeclared flag through, and the empty-content refusal routes to `--file`.
 - `test/graph-query.test.ts` — direction in/out/both, type filter, indented tree output.
 - `test/features.test.ts` — feature scanning, brain_score calculation, CLI routing, persistence.
 - `test/file-upload-security.test.ts` — symlink traversal, cwd confinement, slug + filename allowlists, remote vs local trust.
@@ -255,8 +296,10 @@ Unit tests and what they cover:
 - `test/orphans.test.ts` — orphans command: detection, pseudo filtering, text/json/count outputs, MCP op.
 - `test/postgres-engine.test.ts` — `statement_timeout` scoping: `sql.begin` + `SET LOCAL` shape, source-level grep guardrail against a reintroduced bare `SET statement_timeout`.
 - `test/sync.test.ts` — sync logic + regression guard asserting top-level `engine.transaction` is not called.
+- `test/sync-pull-failed-anchor.serial.test.ts` — #3068 regression: a failed internal `git pull` (local-path origin vs `protocol.file.allow=never`) with zero imports returns `partial`/`pull_failed` (not `up_to_date`), freezes `last_commit` + `last_sync_at`, recovers after a manual pull; fall-through import of local commits preserved. Serial: pins `GBRAIN_HOME` to a temp dir for the whole file.
 - `test/sync-concurrency.test.ts` — `autoConcurrency()` thresholds + PGLite-forces-serial + explicit-override clamping; `shouldRunParallel()` explicit-bypasses-floor contract; `parseWorkers()` validation rejecting `'0'`/`'-3'`/`'foo'`/`'1.5'`/trailing chars.
 - `test/sync-parallel.test.ts` — PGLite-routed coverage of the bookmark gate under concurrency, head-drift gate, vanished-file failure capture, PGLite-stays-serial, and the `gbrain-sync` writer-lock contract.
+- `test/sync-all-missing-path.test.ts` — `sync --all --missing-path <fail|skip>` pure helpers: `parseMissingPathMode` (default fail, explicit values, loud rejection of bad/dangling values, never swallows a following flag) and `partitionMissingPathSources` (classification driven only by the injected pathExists predicate — no fs; null `local_path` passes through runnable; order preserved).
 - `test/sync-failures.test.ts` — `classifyErrorCode` regex coverage for all 12 codes against literal production message strings from `markdown.ts` and `import-file.ts`; `summarizeFailuresByCode` sort + pre-classified-honor; `recordSyncFailures` code-field persistence; `acknowledgeSyncFailures` `AcknowledgeResult` shape + backfill on legacy entries.
 - `test/doctor.test.ts` — doctor command; assertions that `jsonb_integrity` scans the four JSONB write sites and `markdown_body_completeness` is present.
 - `test/utils.test.ts` — shared SQL utilities + `tryParseEmbedding` null-return and single-warn semantics.

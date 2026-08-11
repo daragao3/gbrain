@@ -39,10 +39,11 @@ gbrain migrate --to pglite       # Postgres → PGLite (rare)
 
 For shared / large / multi-machine deployments (a team or company brain with multiple users hitting one server over HTTP MCP with OAuth scoping per user), follow the dedicated walkthrough: **[Tutorial: set up GBrain as your company brain](tutorials/company-brain.md)**.
 
-API keys live in `~/.gbrain/config.json` (file plane) or env vars (`OPENAI_API_KEY`, `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`). Set via CLI:
+API keys live in `~/.gbrain/config.json` (file plane) or env vars (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ZEROENTROPY_API_KEY`, `VOYAGE_API_KEY`, `ANTHROPIC_API_KEY`). Set via CLI:
 
 ```bash
 gbrain config set zeroentropy_api_key sk-...
+gbrain config set openrouter_api_key sk-or-...
 gbrain config set anthropic_api_key sk-ant-...
 ```
 
@@ -90,7 +91,7 @@ Per-client setup guides live in [`docs/mcp/`](mcp/):
 - [`docs/mcp/PERPLEXITY.md`](mcp/PERPLEXITY.md)
 - [`docs/mcp/DEPLOY.md`](mcp/DEPLOY.md) — production deploy patterns
 
-The HTTP server ships with an admin SPA at `/admin`, an SSE activity feed at `/admin/events`, DCR-style client registration, scope-gated `read`/`write`/`admin` access, and rate limiting.
+The HTTP server ships with an admin SPA at `/admin`, an SSE activity feed at `/admin/events`, optional Dynamic Client Registration (disabled by default), scope-gated `read`/`write`/`admin` access, and rate limiting.
 
 ## Thin-client mode
 

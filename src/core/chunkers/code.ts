@@ -20,6 +20,7 @@
 
 import { chunkText as recursiveChunk } from './recursive.ts';
 import { buildQualifiedName } from './qualified-names.ts';
+import { CJK_SLUG_CHARS, CJK_RANGES_REGEX } from '../cjk.ts';
 
 // Embed the tree-sitter runtime + per-language grammars as files.
 // `with { type: 'file' }` returns a path (string) at runtime. Bun bundles
@@ -168,6 +169,15 @@ export interface CodeChunkOptions {
   largeChunkThresholdTokens?: number;
   fallbackChunkSizeWords?: number;
   fallbackOverlapWords?: number;
+  /**
+   * Hard upper bound (estimated tokens) on any single emitted chunk. A node
+   * the AST splitter can't break up (a giant object/array literal, a single
+   * huge assignment, a massive template literal) would otherwise be emitted
+   * whole and rejected by the embedder ("input exceeds context length").
+   * Chunks over this budget are recursively re-split. Default 2000 fits the
+   * smallest common embedder context (e.g. nomic-embed-text, 2048).
+   */
+  maxChunkTokens?: number;
 }
 
 /**
@@ -549,6 +559,7 @@ export function parseWithTimeout(
 }
 
 const DEFAULT_CHUNKER_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_CHUNK_TOKENS = 2000;
 
 function resolveChunkerTimeoutMs(): number {
   const raw = process.env.GBRAIN_CHUNKER_TIMEOUT_MS;
@@ -708,7 +719,7 @@ export async function chunkCodeTextFull(
     if (chunks.length === 0) {
       return { chunks: fallbackChunks(source, filePath, language, opts), edges: rawEdges };
     }
-    return { chunks: mergeSmallSiblings(chunks, chunkTarget), edges: rawEdges };
+    return { chunks: capOversizedChunks(mergeSmallSiblings(chunks, chunkTarget), filePath, language, opts), edges: rawEdges };
   } catch {
     return { chunks: fallbackChunks(source, filePath, language, opts), edges: [] };
   } finally {
@@ -814,6 +825,99 @@ function buildMergedChunk(group: CodeChunk[], index: number): CodeChunk {
   };
 }
 
+/**
+ * Final safety net: guarantee no emitted chunk exceeds the embedder's context
+ * budget. tree-sitter splitting (splitLargeNode) can only break up a node that
+ * exposes a `body` with >= 2 named children. A node without one — a giant
+ * object/array literal, a single huge assignment, a massive template literal —
+ * is emitted whole, producing a chunk far larger than the embedder accepts.
+ * The embedder then rejects it ("input exceeds context length") and the chunk
+ * is never embedded. Recursively re-split any over-budget chunk; fall back to a
+ * hard character split for pathological no-whitespace content (e.g. a minified
+ * one-liner) where word/line splitting can't get under budget.
+ */
+function capOversizedChunks(
+  chunks: CodeChunk[],
+  filePath: string,
+  language: SupportedCodeLanguage,
+  opts: CodeChunkOptions,
+): CodeChunk[] {
+  const cap = opts.maxChunkTokens ?? DEFAULT_MAX_CHUNK_TOKENS;
+  if (!chunks.some((c) => estimateEmbedTokens(c.text) > cap)) return chunks;
+  const out: CodeChunk[] = [];
+  for (const c of chunks) {
+    if (estimateEmbedTokens(c.text) <= cap) {
+      out.push({ ...c, index: out.length });
+      continue;
+    }
+    // Strip the structured header ("[Lang] path:N-M symbol\n\n") so the splitter
+    // works on the raw body; buildChunk re-adds a header to each piece.
+    const body = c.text.replace(/^\[[^\]]+\] [^\n]+\n\n/, '');
+    for (const piece of splitToTokenBudget(body, cap, opts)) {
+      if (!piece.trim()) continue;
+      out.push(buildChunk({
+        body: piece,
+        filePath,
+        language,
+        symbolName: c.metadata.symbolName,
+        symbolType: c.metadata.symbolType,
+        startLine: c.metadata.startLine,
+        endLine: c.metadata.endLine,
+        index: out.length,
+        parentSymbolPath: c.metadata.parentSymbolPath,
+      }));
+    }
+  }
+  return out;
+}
+
+/** Split `text` into pieces each estimated <= cap tokens. Word/line-aware
+ *  (recursiveChunk) first; a hard character split is the last resort for
+ *  content with no whitespace to break on. */
+function splitToTokenBudget(text: string, cap: number, opts: CodeChunkOptions): string[] {
+  const out: string[] = [];
+  const pieces = recursiveChunk(text, {
+    chunkSize: opts.fallbackChunkSizeWords ?? 300,
+    chunkOverlap: opts.fallbackOverlapWords ?? 50,
+  }).map((p) => p.text);
+  for (const piece of pieces) {
+    if (estimateEmbedTokens(piece) <= cap) {
+      out.push(piece);
+      continue;
+    }
+    // Hard-split slice size. Pure-ASCII pieces: ~3.5 chars/token is a
+    // conservative cl100k estimate for source text. CJK-containing pieces:
+    // the weighted estimate can reach 1 token/char, so budget 1 char/token
+    // to keep every slice under cap by construction.
+    const charBudget = Math.max(1, Math.floor(cap * (CJK_RANGES_REGEX.test(piece) ? 1 : 3.5)));
+    for (let i = 0; i < piece.length; i += charBudget) out.push(piece.slice(i, i + charBudget));
+  }
+  return out;
+}
+
+const CJK_CHARS_G = new RegExp(`[${CJK_SLUG_CHARS}]`, 'g');
+
+/**
+ * Embedding-safe token estimate for the oversize cap. estimateTokens
+ * (cl100k) matches embedding-family tokenizers closely on pure-ASCII source
+ * (measured identical on English prose and JSON vs Qwen3-Embedding), but
+ * UNDERCOUNTS mixed CJK+ASCII chunks — measured −31% on URL-dense Korean
+ * text vs the Qwen3 embedding tokenizer, which is exactly the shape that
+ * overflows strict embedding backends (#2826). For chunks containing CJK,
+ * take the max of cl100k and a per-char-class overestimate (CJK 1.0/char,
+ * other non-whitespace 0.75/char, whitespace 0.1/char). CJK-DOMINANT text
+ * is unaffected too: cl100k already counts it above the weighted form, so
+ * max() returns the same value as today. Only mixed-script chunks — the
+ * measured divergence class — estimate higher.
+ */
+export function estimateEmbedTokens(text: string): number {
+  const cjk = (text.match(CJK_CHARS_G) || []).length;
+  if (cjk === 0) return estimateTokens(text);
+  const ws = (text.match(/\s/g) || []).length;
+  const weighted = Math.ceil(cjk + (text.length - cjk - ws) * 0.75 + ws * 0.1);
+  return Math.max(estimateTokens(text), weighted);
+}
+
 // ---------- Internals ----------
 
 function fallbackChunks(
@@ -824,7 +928,7 @@ function fallbackChunks(
 ): CodeChunk[] {
   const size = opts.fallbackChunkSizeWords ?? 300;
   const overlap = opts.fallbackOverlapWords ?? 50;
-  return recursiveChunk(source, { chunkSize: size, chunkOverlap: overlap }).map((chunk, index) =>
+  const chunks = recursiveChunk(source, { chunkSize: size, chunkOverlap: overlap }).map((chunk, index) =>
     buildChunk({
       body: chunk.text, filePath, language,
       symbolName: null, symbolType: 'module',
@@ -832,6 +936,14 @@ function fallbackChunks(
       index,
     }),
   );
+  // Route every fallback emission through the oversize net. Previously only
+  // the empty-AST branch wrapped its fallback in capOversizedChunks — the
+  // no-language, parse-timeout, no-semantic-nodes (every JSON/YAML fence:
+  // their node types aren't in TOP_LEVEL_TYPES) and parse-throw branches
+  // shipped word-counted chunks unchecked, and the word pipeline undercounts
+  // exactly the dense content (JSON, minified, CJK-mixed) that overflows
+  // embedders. Hoisting the cap here covers all five paths at once.
+  return capOversizedChunks(chunks, filePath, language, opts);
 }
 
 function buildChunk(input: {
@@ -1158,7 +1270,25 @@ export function estimateTokens(text: string): number {
     tiktokenInitialized = true;
   }
   if (tiktokenEncoder) {
-    return tiktokenEncoder.encode(text).length;
+    try {
+      return tiktokenEncoder.encode(text).length;
+    } catch {
+      // Code legitimately contains tiktoken special-token strings (e.g. CLIP/GPT
+      // tokenizers embed the literal "<|endoftext|>"). The default encode() uses
+      // disallowed_special='all' and THROWS on those, crashing reindex-code on
+      // valid source files. For a token COUNT we don't need special-token
+      // semantics: re-encode treating them as ordinary text (never throws),
+      // heuristic only if even that fails.
+      try {
+        return (
+          tiktokenEncoder as unknown as {
+            encode: (s: string, allowed: string[], disallowed: string[]) => Uint32Array;
+          }
+        ).encode(text, [], []).length;
+      } catch {
+        return Math.max(1, Math.ceil(text.length / 4));
+      }
+    }
   }
   return Math.max(1, Math.ceil(text.length / 4));
 }
