@@ -1,0 +1,217 @@
+# entity_dirs safety guard — design
+
+Date: 2026-08-11
+
+> **Addendum (same day, after merging fork/master).** This design was written
+> against a tree that predated v0.42.80.0, which added a removal safety net
+> (`unresolvableRefs`): `runAutoLink` now withholds a removal when the body still
+> carries an unresolvable reference to the target. That changes the problem
+> statement below in one important way and leaves the rest standing.
+>
+> Probed against the merged extractor (`entityDirs: []`, `globalBasename: false`,
+> with a passing control):
+>
+> | reference shape | candidates | unresolvableRefs | protected? |
+> |---|---|---|---|
+> | `[[sessions/foo]]` (control) | 0 | `["sessions/foo"]` | yes |
+> | `[x](sessions/foo)` | 0 | `[]` | no |
+> | bare `sessions/foo` | 0 | `[]` | no |
+> | `[[wiki:sessions/foo]]` | 0 | `[]` | no |
+>
+> So the net covers the generic-wikilink shape only, because it is populated
+> exclusively in the `ref.needsResolution` branch and the other three shapes miss
+> the dir-gated regexes entirely and never produce a ref. Three of four shapes
+> remain exposed to the unrecoverable delete.
+>
+> What this changes: the guard is no longer the only thing standing between the
+> operator and deletion for wikilinks. What it does not change: the guard is still
+> the only signal for the other three shapes, and it is the only thing that
+> reports the systemic condition at all. A withheld edge also survives without
+> being reconciled, so it silently goes stale, which nothing else surfaces.
+> Filed as a P1 in `TODOS.md` to extend the net to the remaining shapes.
+
+## Problem
+
+`link_resolution.entity_dirs` reads as a recall/coverage knob — "which top-level
+slug dirs produce typed edges". It is also load-bearing **safety**, and nothing in
+the product says so.
+
+`runAutoLink` (`src/core/operations.ts`) is the only automatic link-deletion path.
+It reconciles a page's existing edges against the set extracted from the page body,
+then deletes every reconcilable edge (`link_source` in markdown / NULL /
+`wikilink-resolved` / own-frontmatter) whose
+`to_slug\0link_type\0link_source` key is absent from the freshly-extracted desired
+set:
+
+```ts
+for (const l of reconcilableOut) {
+  const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
+  if (!outKeys.has(key)) { await tx.removeLink(...); removed++; }
+}
+```
+
+The removal loop is **not** gated on the desired set being empty. Any individual
+edge that stops being extractable is deleted on the next local `put_page`.
+
+`extractPageLinks` gates its wikilink / markdown-link / bare-slug passes on
+`DIR_PATTERN`, built from `DEFAULT_ENTITY_DIRS` plus the operator dirs returned by
+`getExtraEntityDirs(engine)`. When a prefix is not declared, `[[sessions/foo]]`
+misses the dir-gated passes, falls through to the generic pass tagged
+`needsResolution: true`, and is dropped.
+
+So **dropping a prefix from `entity_dirs` re-arms an unrecoverable delete on every
+page whose wikilinks use that prefix.** `links` has no tombstone column. It reads
+like "we index fewer dirs"; it acts like "we delete edges we cannot restore".
+
+Verified concretely on 2026-08-11: page `systems/write-semantics` carries
+four `sessions/` + `systems/` wikilinks. Under the current config, replicating
+`runAutoLink`'s extraction returns 4 candidates / 0 unresolved in both
+`wikilinkOnly` and full mode. Remove those two prefixes and it returns 0 — which is
+exactly the state that hard-deleted that page's edges on 2026-08-10.
+
+### The hazard does not depend on `global_basename`
+
+With `link_resolution.global_basename` on, an undeclared-prefix wikilink *is*
+resolved — but by the basename path, which emits `linkSource: 'wikilink-resolved'`
+and `linkType: WIKILINK_BASENAME_LINK_TYPE`. The pre-existing edge's key is
+`…\0markdown`, so it still misses `outKeys` and is still removed. The guard must
+therefore not treat `global_basename` as a mitigation.
+
+## Goals
+
+1. Detect, from current state, existing `link_source='markdown'` edges that the
+   **currently configured** `entity_dirs` can no longer extract — report the count,
+   example slugs, and the exact prefix to re-add.
+2. Catch the change at the moment a prefix is removed, not only after the fact.
+
+## Non-goals
+
+- Flagging undeclared prefixes that have no existing edges. That is a recall
+  opportunity, not a safety finding, and `link_resolution_opportunity` already owns
+  that surface. Mixing them dilutes the signal.
+- Changing `DEFAULT_ENTITY_DIRS`. Deliberately rejected twice already; the
+  per-brain `entity_dirs` route achieves the same thing without a brain-wide
+  behavior change.
+- Adding a tombstone column to `links`. Larger change, separate decision.
+
+## Architecture
+
+Four components. Each has one purpose and is testable without the others.
+
+### 1. `extractUndeclaredPrefixRefs(content, entityDirs)` — pure detector
+
+New export in `src/core/link-extraction.ts`, beside the extractor it mirrors so the
+two cannot drift apart silently.
+
+Mirrors the dir-gated shapes (markdown link, unqualified wikilink, qualified
+wikilink, bare slug) with a **wildcard** prefix in place of `DIR_PATTERN`, and
+returns `{ slug, dir }[]` for refs whose top-level dir is outside
+`DEFAULT_ENTITY_DIRS ∪ normalizeEntityDirs(entityDirs)`.
+
+- Strips code blocks first, exactly as `extractEntityRefs` does — a slug in a
+  fenced example is not a reference in either direction.
+- The wildcard prefix uses the same `[a-z0-9][a-z0-9_-]*` shape that
+  `ENTITY_DIR_RE` accepts, so it can only ever report a dir that would be a legal
+  `entity_dirs` value. Nothing it emits is unfixable.
+- Skips `://` targets.
+- No DB, no resolver, no async. Pure function.
+
+Wildcard matching over-reports on its own (`[label](foo/bar)` in prose). That is
+intentional and safe: component 2 intersects against real edges, and a ref with no
+backing edge is discarded.
+
+### 2. `scanOrphanedMarkdownEdges(engine, opts)` — the scan
+
+New module `src/core/entity-dirs-guard.ts`. Two `executeRaw` queries:
+
+- pages that own at least one `link_source='markdown'` edge, with
+  `compiled_truth` + `timeline`;
+- those edges as `(from_slug, to_slug)` pairs.
+
+For each page, run component 1 over `compiled_truth + '\n' + timeline` and intersect
+the resulting ref slugs with that page's markdown edge targets. An edge is **at
+risk** when its `to_slug` appears in the prose under an undeclared prefix.
+
+Returns `{ atRisk, byPrefix, examples, pagesScanned, truncated }`.
+
+`opts.onlyPrefixes` narrows the result to a specific set of prefixes — this is what
+lets the preflight (component 4) report only *newly* orphaned edges rather than
+everything already orphaned.
+
+**Engine parity:** `executeRaw` only. No new engine method, no schema change, so
+`postgres-engine.ts` and `pglite-engine.ts` are untouched. The SQL is plain
+portable SQL that runs identically on both.
+
+**Progress:** the scan is bulk, so it takes a `ProgressReporter` and heartbeats to
+**stderr** via `startHeartbeat`, matching `checkLinkResolutionOpportunity`.
+
+**Bounding:** scans *all* pages that own markdown edges — that set is far smaller
+than "all pages", and a silently-sampled safety check is worse than none. A
+wall-clock backstop sets `truncated: true`, which the caller reports explicitly.
+Per CLAUDE.md's no-silent-caps rule, a bounded run says so in its message.
+
+### 3. `entity_dirs_orphaned_edges` — doctor check
+
+`src/commands/doctor.ts`, registered beside `checkLinkResolutionOpportunity`.
+Runs the scan against the currently-effective dirs (`getExtraEntityDirs`, which
+already honours the `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` env override, so the check
+measures what extraction will actually do).
+
+- No at-risk edges → `ok`.
+- Any at-risk edges → **`fail`**. Nothing is broken yet, but an armed unrecoverable
+  delete against real data is the strongest signal doctor has, and the fix is one
+  command. The message carries count, distinct page count, up to 5 example
+  `page → target` pairs, the missing prefixes, and a paste-ready remedy:
+  `gbrain config set link_resolution.entity_dirs '<current>,<missing>'`.
+- Any DB/scan error → `ok` with a "skipped" message. Doctor never blocks on it,
+  same fail-soft contract as its siblings.
+
+### 4. Removal-time preflight — `config set` / `config unset`
+
+`src/commands/config.ts`, on `link_resolution.entity_dirs` only. Mirrors the
+existing `search_embedding_column` coverage gate in the same function.
+
+Compute `removed = currentDirs \ proposedDirs` (for `unset`, `removed =
+currentDirs`). If empty, proceed silently. Otherwise run the scan with
+`onlyPrefixes: removed` and, if it finds at-risk edges, **refuse**: print the
+count, examples, and the affected prefixes to stderr and `process.exit(1)`.
+
+`--yes` overrides, printing what is being accepted. This is fail-closed, matching
+the repo's trust posture and the unrecoverable nature of the delete.
+
+**Known limit, documented rather than papered over:** the env override
+`GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` outranks the DB plane, so a shell that exports
+a narrower list bypasses the preflight entirely. Component 3 is the backstop for
+that path, because it reads the effective value.
+
+## Testing
+
+Test-first, per component.
+
+1. **Pure detector** — no DB. Declared prefix → no refs; undeclared prefix → the
+   ref with the right `dir`; each of the four shapes; code-fenced refs ignored;
+   `://` ignored; a dir that `ENTITY_DIR_RE` would reject is never emitted.
+2. **Scan** — hermetic PGLite (`PGLiteEngine` + `resetPgliteState`), seeding pages
+   and `links` rows by raw SQL. Cases: undeclared-prefix ref *with* a backing
+   markdown edge → at-risk; the same ref with **no** backing edge → not reported
+   (the false-positive filter, asserted directly); a `manual` edge under an
+   undeclared prefix → not reported (reconciliation never touches it); declared
+   prefix → clean; `onlyPrefixes` narrowing.
+3. **Doctor check** — `ok` on a clean brain, `fail` with the prefix named on a
+   dirty one, message contains the paste-ready command.
+4. **Preflight** — removing a prefix that backs edges refuses; `--yes` proceeds;
+   removing a prefix that backs nothing proceeds silently; adding a prefix never
+   refuses.
+
+The regression that matters most: a test that reproduces the 2026-08-10 shape —
+a page whose markdown edges all sit under one prefix, that prefix dropped from the
+config — and asserts the guard fires. That is the case that actually lost data.
+
+Env mutation goes through `test/helpers/with-env.ts`, never bare assignment.
+
+## Rollout
+
+No migration, no schema change, no engine change. New doctor check and a new gate
+on one config key. A brain already carrying orphaned edges will see the doctor
+check go `fail` on first run after upgrade — which is the intended behavior, and
+the message tells the operator exactly which prefix to re-add.

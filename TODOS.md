@@ -1,6 +1,6 @@
 # TODOS
 
-## v0.42.81.0 follow-ups (PGLite snapshot embedding width)
+## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 
 - [ ] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
   ABSENT, never when it is STALE.** The guard is
@@ -11,14 +11,14 @@
   `snapshot fixture stale; run bun run build:pglite-snapshot before this test` at module
   scope rather than degrading. So a machine holding a cached fixture from before any
   schema, migration, or embedding-width change fails that test on `bun run ci:local` until
-  the fixture is rebuilt by hand. v0.42.81.0 makes this more likely to fire, since folding
+  the fixture is rebuilt by hand. v0.42.82.0 makes this more likely to fire, since folding
   the width into the hash invalidates every previously built fixture. Fix: compare the
   stored `.version` against `computeSnapshotSchemaHash(...)` in the `else` branch and
   rebuild on mismatch, so a stale fixture is refreshed rather than reported as a test
   failure. Where: `scripts/ci-local.sh` (the Tier 3 block, near the
   `GBRAIN_PGLITE_SNAPSHOT` export).
 - [ ] **P3 — four `check-test-isolation` allowlist entries need an R3/R4 refactor before
-  they can be delisted.** v0.42.81.0 replaced the bare module-level
+  they can be delisted.** v0.42.82.0 replaced the bare module-level
   `delete process.env.GBRAIN_PGLITE_SNAPSHOT` in `test/bootstrap.test.ts`,
   `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, and
   `test/schema-bootstrap-coverage.test.ts` with `useColdPglite()`, which removed their R1
@@ -38,6 +38,26 @@
   mutates env WITHOUT restoring would pass silently while polluting every file that imports
   it. Consider extending the scan to `test/helpers/*.ts` with a rule set that accepts the
   bracketed save/restore shape.
+
+## v0.42.81.0 follow-ups (entity_dirs safety guard)
+
+- [ ] **P1 - the v0.42.80.0 removal safety net covers ONE of four reference shapes.**
+  `unresolvableRefs` is populated only in `extractPageLinks`'s `ref.needsResolution`
+  branch, which only the generic wikilink pass reaches. Probed against the merged
+  extractor with `entityDirs: []` and `globalBasename: false`, using a passing
+  control:
+  `[[sessions/foo]]` -> `unresolvableRefs: ["sessions/foo"]` (PROTECTED);
+  `[x](sessions/foo)`, bare `sessions/foo`, and `[[wiki:sessions/foo]]` -> all
+  `candidates=0` AND `unresolvableRefs=[]` (NOT protected, still hard-deleted).
+  Those three shapes miss the dir-gated regexes entirely, so they never become a
+  ref and never reach the net. v0.42.81.0's `entity_dirs_orphaned_edges` DETECTS
+  this, but detection is not protection. Fix candidates: emit a
+  `needsResolution` ref from the markdown-link and bare-slug passes when the
+  prefix looks like a slug dir but is undeclared, or key the net on a
+  body-substring check for `to_slug` rather than on extracted refs.
+  Where: `src/core/link-extraction.ts` (`extractEntityRefs` passes 1/2a/2c,
+  `extractPageLinks` unresolvableRefs pushes), `src/core/operations.ts`
+  (`runAutoLink` `isProtectedTarget`).
 
 ## v0.42.80.0 follow-ups (auto-link removal safety net)
 

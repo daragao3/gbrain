@@ -8,6 +8,52 @@ import {
   EmbeddingColumnNotRegisteredError,
   EmbeddingColumnConfigError,
 } from '../core/search/embedding-column.ts';
+import {
+  ENTITY_DIRS_CONFIG_KEY,
+  assessEntityDirsRemoval,
+  formatEntityDirsRemovalRefusal,
+  parseEntityDirsValue,
+} from '../core/entity-dirs-guard.ts';
+
+/**
+ * Refuse a `link_resolution.entity_dirs` change that would orphan links which
+ * exist right now.
+ *
+ * entity_dirs reads as a recall knob, but a prefix it does not declare is not
+ * extractable — so runAutoLink's removal loop hard-deletes the edges those
+ * references back, and `links` has no tombstone column. Narrowing the list is
+ * therefore a destructive operation wearing a config change's clothes, which
+ * is exactly why this is a refusal and not a warning.
+ *
+ * Mirrors the `search_embedding_column` coverage gate below: fail-closed,
+ * `--yes` to override.
+ *
+ * KNOWN LIMIT: `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` outranks the DB plane in
+ * getExtraEntityDirs, so a shell exporting a narrower list bypasses this gate
+ * entirely. The `entity_dirs_orphaned_edges` doctor check reads the EFFECTIVE
+ * value and is the backstop for that path.
+ */
+async function guardEntityDirsRemoval(
+  engine: BrainEngine,
+  proposed: readonly string[],
+  args: string[],
+): Promise<void> {
+  if (args.includes('--yes')) return;
+  let current: string[];
+  try {
+    current = parseEntityDirsValue(await engine.getConfig(ENTITY_DIRS_CONFIG_KEY));
+  } catch {
+    // Can't read the current value — nothing to compare against, so there is
+    // no removal to prove. Never block a config write on a probe failure.
+    return;
+  }
+  const { removed, scan, blocked } = await assessEntityDirsRemoval(engine, current, proposed);
+  if (!blocked || !scan) return;
+  for (const line of formatEntityDirsRemovalRefusal(removed, scan, current)) {
+    console.error(line);
+  }
+  process.exit(1);
+}
 
 function redactUrl(url: string): string {
   // Redact password in postgresql:// URLs
@@ -83,6 +129,11 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     if (!key) {
       console.error('Usage: gbrain config unset <key> | --pattern <prefix>');
       process.exit(1);
+    }
+    // Unsetting entity_dirs removes EVERY declared prefix at once, which is
+    // the widest form of the removal hazard. Same gate as `set`.
+    if (key === ENTITY_DIRS_CONFIG_KEY) {
+      await guardEntityDirsRemoval(engine, [], args);
     }
     const n = await engine.unsetConfig(key);
     if (n > 0) {
@@ -209,6 +260,12 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
         );
         process.exit(1);
       }
+    }
+
+    // Narrowing entity_dirs re-arms an unrecoverable link delete. Gate it
+    // before anything persists.
+    if (key === ENTITY_DIRS_CONFIG_KEY) {
+      await guardEntityDirsRemoval(engine, parseEntityDirsValue(value), args);
     }
 
     if (key === 'embedding_columns') {

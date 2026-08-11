@@ -16,7 +16,7 @@ import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type LinkCandidate, type UnresolvedFrontmatterRef } from './link-extraction.ts';
+import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, isRemoteReconcileEnabled, getExtraEntityDirs, parseTimelineEntries, makeResolver, type LinkCandidate, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
@@ -1142,7 +1142,7 @@ const put_page: Operation = {
     // would surface higher in search. Local CLI users (ctx.remote=false) opt
     // into this behavior; MCP/remote writes do not.
     let autoLinks:
-      | { created: number; removed: number; errors: number; withheld: number; unresolved: UnresolvedFrontmatterRef[] }
+      | { created: number; removed: number; errors: number; withheld: number; unresolved: UnresolvedFrontmatterRef[]; mode?: 'wikilink-only' }
       | { error: string }
       | { skipped: 'remote' }
       | undefined;
@@ -1156,14 +1156,23 @@ const put_page: Operation = {
     const trustedWorkspace = ctx.viaSubagent === true
       && Array.isArray(ctx.allowedSlugPrefixes)
       && ctx.allowedSlugPrefixes.length > 0;
-    if (ctx.remote !== false && !trustedWorkspace) {
+    const untrusted = ctx.remote !== false && !trustedWorkspace;
+    // `link_resolution.remote_reconcile` downgrades the untrusted path from
+    // "skip everything" to "run the subset that carries no injection risk"
+    // (see isRemoteReconcileEnabled). Read only when it can matter, so the
+    // trusted path takes no extra config round-trip.
+    const remoteReconcile = untrusted && await isRemoteReconcileEnabled(ctx.engine);
+    if (untrusted && !remoteReconcile) {
       autoLinks = { skipped: 'remote' };
       autoTimeline = { skipped: 'remote' };
     } else if (result.parsedPage) {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, ctx.sourceId ? { sourceId: ctx.sourceId } : undefined);
+          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, {
+            ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+            ...(remoteReconcile ? { wikilinkOnly: true } : {}),
+          });
         }
       } catch (e) {
         autoLinks = { error: e instanceof Error ? e.message : String(e) };
@@ -1325,7 +1334,7 @@ async function runAutoLink(
   engine: BrainEngine,
   slug: string,
   parsed: { type: PageType; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown> },
-  opts?: { sourceId?: string },
+  opts?: { sourceId?: string; wikilinkOnly?: boolean },
 ): Promise<{
   created: number;
   removed: number;
@@ -1338,6 +1347,7 @@ async function runAutoLink(
    */
   withheld: number;
   unresolved: UnresolvedFrontmatterRef[];
+  mode?: 'wikilink-only';
 }> {
   const fullContent = parsed.compiled_truth + '\n' + parsed.timeline;
   // v0.31.8 (codex OV-2): thread sourceId through every read + write inside
@@ -1364,9 +1374,20 @@ async function runAutoLink(
   const resolver = makeResolver(engine, { mode: 'live', sourceId: opts?.sourceId });
   // Issue #972: opt-in bare-wikilink basename resolution. Off by default.
   const globalBasename = await isGlobalBasenameEnabled(engine);
+  // Operator-declared extra top-level dirs. Without these, a brain whose
+  // pages live under roots gbrain doesn't ship in DIR_PATTERN gets no typed
+  // edges from its wikilinks at all — they fall to the generic pass and are
+  // dropped unless global_basename is on.
+  //
+  // Declaring a dir here and the `unresolvableRefs` safety net below are
+  // complementary, not redundant: the net keeps an undeclared prefix from
+  // DELETING edges, while declaring the dir is what lets those edges keep
+  // being CREATED and MAINTAINED. A withheld edge survives but stops being
+  // reconciled, so it silently goes stale.
+  const entityDirs = await getExtraEntityDirs(engine);
   const { candidates, unresolved, unresolvableRefs } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,
-    { globalBasename },
+    { globalBasename, entityDirs, wikilinkOnly: opts?.wikilinkOnly === true },
   );
 
   // Resolve which targets exist (skip refs to non-existent pages to avoid FK
@@ -1525,7 +1546,15 @@ async function runAutoLink(
     }
 
     // Remove stale outgoing (markdown or our-frontmatter, not in desired set).
-    for (const l of reconcilableOut) {
+    //
+    // ADD-ONLY under wikilinkOnly. The desired set here was computed from a
+    // strict subset of the extractors (wikilinks only), so every bare-slug,
+    // markdown-link and frontmatter edge on the page is legitimately absent
+    // from `outKeys` — running the removal loop would delete all of them on
+    // the first remote write. Beyond that, edge removal is authority a
+    // reduced-trust caller should not have: it could prune edges another
+    // writer authored by writing an unrelated revision of the page.
+    for (const l of opts?.wikilinkOnly ? [] : reconcilableOut) {
       const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
       if (!outKeys.has(key)) {
         // Removal safety net (see the note above `protectedLiterals`): the
@@ -1546,7 +1575,9 @@ async function runAutoLink(
     }
 
     // Remove stale incoming (our frontmatter → slug, not in desired set).
-    for (const l of existingIn) {
+    // Same add-only rule: wikilinkOnly never extracts frontmatter edges, so
+    // `incKeys` is empty and this loop would delete every one of them.
+    for (const l of opts?.wikilinkOnly ? [] : existingIn) {
       const key = `${l.from_slug}\u0000${l.link_type}`;
       if (!incKeys.has(key)) {
         try {
@@ -1561,7 +1592,11 @@ async function runAutoLink(
     return { created, removed, errors, withheld };
   });
 
-  return { ...result, unresolved };
+  return {
+    ...result,
+    unresolved,
+    ...(opts?.wikilinkOnly ? { mode: 'wikilink-only' as const } : {}),
+  };
 }
 
 const delete_page: Operation = {
