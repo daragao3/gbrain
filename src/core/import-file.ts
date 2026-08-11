@@ -4,6 +4,7 @@ import { createHash } from 'crypto';
 import { marked } from 'marked';
 import type { BrainEngine, FileSpec } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
+import { normalizeLineEndings } from './line-endings.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
@@ -315,6 +316,17 @@ export async function importFromContent(
   // silently fabricated a duplicate at (default, slug) — causing later
   // bare-slug subqueries (getTags, deleteChunks, etc.) to crash with 21000.
   const sourceId = opts.sourceId;
+
+  // Storage is LF-only. This is the single chokepoint every compiled_truth
+  // write passes through (put_page local + remote MCP, capture, sync/import),
+  // so normalizing here — BEFORE the size guard, parse, guardrails, sanity
+  // gate, hash, chunking, and DB write — is what makes the whole corpus
+  // line-ending-canonical rather than each reader separately CRLF-tolerant.
+  // Stored CRLF silently breaks search: `untracked infra\r\nscript` returns
+  // zero matches for an `\n` pattern, which reads as "already gone".
+  // See src/core/line-endings.ts for the 2026-08-10 incident.
+  content = normalizeLineEndings(content);
+
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
