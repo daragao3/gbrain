@@ -18,13 +18,21 @@ import {
 import { MIGRATIONS } from '../src/core/migrate.ts';
 import { PGLITE_SCHEMA_SQL } from '../src/core/pglite-schema.ts';
 import { repoPath } from './helpers/repo-root.ts';
+import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 
 const SNAPSHOT = repoPath('test', 'fixtures', 'pglite-snapshot.tar');
 const SNAPSHOT_VERSION = SNAPSHOT.replace(/\.tar$/, '.version');
 if (!existsSync(SNAPSHOT) || !existsSync(SNAPSHOT_VERSION)) {
   throw new Error('snapshot fixture missing; run bun run build:pglite-snapshot before this test');
 }
-const expectedSnapshotVersion = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+// The width the builder bakes in — folded into the hash, so passing the wrong
+// one here would report a perfectly current fixture as stale.
+const expectedSnapshotVersion = computeSnapshotSchemaHash(
+  MIGRATIONS,
+  PGLITE_SCHEMA_SQL,
+  crypto,
+  LEGACY_EMBEDDING_CONFIG.embedding_dimensions,
+);
 const actualSnapshotVersion = readFileSync(SNAPSHOT_VERSION, 'utf8').trim();
 if (actualSnapshotVersion !== expectedSnapshotVersion) {
   throw new Error('snapshot fixture stale; run bun run build:pglite-snapshot before this test');

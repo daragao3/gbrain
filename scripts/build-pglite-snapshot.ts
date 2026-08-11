@@ -25,9 +25,16 @@ import * as crypto from "node:crypto";
 import { PGLiteEngine, computeSnapshotSchemaHash } from "../src/core/pglite-engine.ts";
 import { MIGRATIONS } from "../src/core/migrate.ts";
 import { PGLITE_SCHEMA_SQL } from "../src/core/pglite-schema.ts";
+import { configureGateway } from "../src/core/ai/gateway.ts";
+import { LEGACY_EMBEDDING_CONFIG } from "../test/helpers/legacy-embedding-config.ts";
 
 function computeSchemaHash(): string {
-  return computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+  return computeSnapshotSchemaHash(
+    MIGRATIONS,
+    PGLITE_SCHEMA_SQL,
+    crypto,
+    LEGACY_EMBEDDING_CONFIG.embedding_dimensions,
+  );
 }
 
 async function main() {
@@ -42,6 +49,20 @@ async function main() {
 
   // Bypass the env-aware short-circuit: we WANT a real init here.
   delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+
+  // This script runs under `bun run`, which does NOT apply bunfig's
+  // `[test] preload` — so the gateway is unconfigured here and initSchema would
+  // fall back to the production default (zembed-1 @ 1280) while the suite runs
+  // at OpenAI/1536. Pin the same config the preload pins, or the fixture bakes
+  // an `embedding vector(1280)` column that rejects every test's 1536-d vector.
+  configureGateway({
+    ...LEGACY_EMBEDDING_CONFIG,
+    env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY || 'sk-test-stub' },
+  });
+  console.log(
+    `[build-pglite-snapshot] gateway pinned to ${LEGACY_EMBEDDING_CONFIG.embedding_model} ` +
+    `@ ${LEGACY_EMBEDDING_CONFIG.embedding_dimensions}d (matches bunfig test preload)`,
+  );
 
   await engine.connect({});
   console.log(`[build-pglite-snapshot] running initSchema (forward bootstrap + ${MIGRATIONS.length} migrations)...`);

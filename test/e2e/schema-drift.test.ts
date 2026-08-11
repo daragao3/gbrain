@@ -25,6 +25,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { useColdPglite } from '../helpers/cold-pglite.ts';
 import {
   type SchemaSnapshot,
   type SnapshotQueryRow,
@@ -45,7 +46,7 @@ if (skip) {
 // against fresh Postgres. If GBRAIN_PGLITE_SNAPSHOT is set (ci:local sets it
 // for unit shards), PGLite would boot post-initSchema with a snapshot — fine
 // for the comparison, but we want the canonical path here.
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+useColdPglite();
 
 /**
  * Tables that exist in src/schema.sql but are intentionally absent from

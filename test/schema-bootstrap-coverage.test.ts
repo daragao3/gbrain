@@ -32,11 +32,12 @@
 
 import { test, expect } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { useColdPglite } from './helpers/cold-pglite.ts';
 
 // Tier 3 opt-out: this file tests the bootstrap coverage contract explicitly,
 // running applyForwardReferenceBootstrap against fresh PGlite instances. A
 // snapshot-loaded engine would skip the bootstrap entirely.
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+useColdPglite();
 
 // Forward-reference targets that PGLITE_SCHEMA_SQL requires.
 // When you add a new one, extend this list AND the bootstrap.

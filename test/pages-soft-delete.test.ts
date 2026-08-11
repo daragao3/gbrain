@@ -16,8 +16,11 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { useColdPglite } from './helpers/cold-pglite.ts';
 
-delete process.env.GBRAIN_PGLITE_SNAPSHOT;
+// Tier 3 opt-out, file-scoped — a bare module-level delete would force every
+// LATER file in this shard's bun process cold too (test/helpers/cold-pglite.ts).
+useColdPglite();
 
 async function setupBrain(): Promise<PGLiteEngine> {
   const engine = new PGLiteEngine();
