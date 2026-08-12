@@ -13,10 +13,16 @@
 #
 # Env overrides:
 #   SHARDS=N                     same as --shards
-#   GBRAIN_TEST_SHARD_TIMEOUT       per-shard wallclock cap, seconds (default 1500;
-#                                   Windows single-shard default scales by file count)
-#   GBRAIN_TEST_SHARD_STALL_SECONDS kill a shard whose log stops growing (default 600;
-#                                   0 disables)
+#   GBRAIN_TEST_SHARD_TIMEOUT       per-shard wallclock cap, seconds. Default is
+#                                   1500 on POSIX and DERIVED on Windows
+#                                   (files-per-shard × GBRAIN_TEST_SECONDS_PER_FILE,
+#                                   floor 1500), for any shard count. Set to pin it.
+#   GBRAIN_TEST_SECONDS_PER_FILE    per-file budget the derived Windows cap is built
+#                                   from (default 30)
+#   GBRAIN_TEST_SHARD_STALL_SECONDS kill a shard whose log stops growing (default 600
+#                                   on POSIX; on Windows the shard runner's chunk cap
+#                                   plus 300s, so a silent-but-healthy chunk can't trip
+#                                   it. 0 disables)
 #   GBRAIN_TEST_MAX_CONCURRENCY     passed through to bun test (default 4)
 #
 # Output files (workspace-local; falls back to /tmp if .context/ unwritable):
@@ -59,11 +65,19 @@ done
 
 N="${SHARDS_OVERRIDE:-${SHARDS:-$(detect_cpus)}}"
 BUN_PLATFORM=$(bun -e 'process.stdout.write(process.platform)' 2>/dev/null || true)
-WINDOWS_DEFAULT=0
-if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ]; then
-  case "$BUN_PLATFORM:$(uname -s 2>/dev/null)" in
-    win32:*|*:MINGW*|*:MSYS*|*:CYGWIN*) N=1; WINDOWS_DEFAULT=1 ;;
-  esac
+# Detect the runtime, not just the shell: WSL bash reports Linux even when
+# `bun run` is executing bun.exe. Computed unconditionally — the per-shard cap
+# below needs "is this Windows" independently of whether the shard count was
+# defaulted or given explicitly.
+IS_WINDOWS=0
+case "$BUN_PLATFORM:$(uname -s 2>/dev/null)" in
+  win32:*|*:MINGW*|*:MSYS*|*:CYGWIN*) IS_WINDOWS=1 ;;
+esac
+# One shard by default on Windows, to bound aggregate PGLite/WASM commit
+# charge. This is about memory; the wallclock cap below is derived separately
+# so an explicit --shards N gets a correct cap too.
+if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$IS_WINDOWS" = "1" ]; then
+  N=1
 fi
 if ! printf '%s' "$N" | grep -qE '^[0-9]+$' || [ "$N" -lt 1 ]; then
   echo "ERROR: invalid shard count: $N" >&2; exit 2
@@ -81,27 +95,82 @@ if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$N" -gt 4 ]; then
 fi
 
 INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
-# POSIX keeps the established 1500s cap. The Windows default uses one shard to
-# bound aggregate PGlite/WASM commit charge, so that shard owns the full file
-# set and needs a cap that grows with it. Thirty seconds per file is the vetted
-# Windows budget; the 1500s floor preserves behavior for smaller suites.
-# Explicit shard counts retain the old cap unless GBRAIN_TEST_SHARD_TIMEOUT is
-# set, because their concurrency/wallclock trade-off is user-selected.
+# POSIX keeps the established 1500s cap (CI's calibration; do not disturb it).
+#
+# On Windows the cap is DERIVED, never a constant: files-per-shard × a per-file
+# budget. A constant encodes a snapshot of (suite size × host speed) and rots
+# whenever either moves. 1500s was calibrated on Apple Silicon at ~6s/file; a
+# Windows unit file that constructs one PGLite engine pays ~65s of cold
+# initSchema() replay alone, so 1500s is a per-file budget of 5.5s across a
+# 275-file shard and false-reports WEDGED on a perfectly healthy run.
+#
+# The derivation used to apply ONLY to the shard count Windows picks for
+# itself (N=1), on the theory that an explicit --shards N is a user-selected
+# wallclock trade-off. It is not: choosing 4 shards says nothing about how
+# fast this host runs a file, and the 4-shard Windows run is exactly the one
+# that false-reported WEDGED on all four shards. The budget is a property of
+# the host, the shard count is a property of the invocation, so derive from
+# files-per-shard and let both vary independently.
+#
+# The generous cap is a backstop, not the hang detector — STALL_SECONDS below
+# keys on forward progress (log growth) and catches a genuinely stuck shard
+# long before the cap.
+WINDOWS_SECONDS_PER_FILE="${GBRAIN_TEST_SECONDS_PER_FILE:-30}"
+SHARD_TIMEOUT_FLOOR=1500
+if ! printf '%s' "$WINDOWS_SECONDS_PER_FILE" | grep -qE '^[0-9]{1,9}$' || [ "$WINDOWS_SECONDS_PER_FILE" -lt 1 ]; then
+  echo "ERROR: invalid GBRAIN_TEST_SECONDS_PER_FILE: $WINDOWS_SECONDS_PER_FILE" >&2; exit 2
+fi
 SHARD_TIMEOUT_ORIGIN=""
 if [ -n "${GBRAIN_TEST_SHARD_TIMEOUT:-}" ]; then
   SHARD_TIMEOUT="$GBRAIN_TEST_SHARD_TIMEOUT"
-elif [ "$WINDOWS_DEFAULT" = "1" ]; then
+elif [ "$IS_WINDOWS" = "1" ]; then
+  # Ask the shard runner itself for the file set rather than duplicating its
+  # find expression here, so the e2e/.slow/.serial exclusions live in one place.
   TOTAL_UNIT_FILES=$(SHARD= bash scripts/run-unit-shard.sh --dry-run-list 2>/dev/null | wc -l | tr -d ' ')
-  SHARD_TIMEOUT=$((TOTAL_UNIT_FILES * 30))
-  [ "$SHARD_TIMEOUT" -lt 1500 ] && SHARD_TIMEOUT=1500
-  SHARD_TIMEOUT_ORIGIN=" (${TOTAL_UNIT_FILES} files/shard × 30s)"
+  TOTAL_UNIT_FILES=${TOTAL_UNIT_FILES:-0}
+  # Ceiling division: shard 1 owns the extra file when the split is uneven.
+  FILES_PER_SHARD=$(( (TOTAL_UNIT_FILES + N - 1) / N ))
+  SHARD_TIMEOUT=$((FILES_PER_SHARD * WINDOWS_SECONDS_PER_FILE))
+  [ "$SHARD_TIMEOUT" -lt "$SHARD_TIMEOUT_FLOOR" ] && SHARD_TIMEOUT="$SHARD_TIMEOUT_FLOOR"
+  SHARD_TIMEOUT_ORIGIN=" (${FILES_PER_SHARD} files/shard × ${WINDOWS_SECONDS_PER_FILE}s)"
 else
   SHARD_TIMEOUT=1500
 fi
 if ! printf '%s' "$SHARD_TIMEOUT" | grep -qE '^[0-9]{1,9}$' || [ "$SHARD_TIMEOUT" -lt 1 ]; then
   echo "ERROR: invalid GBRAIN_TEST_SHARD_TIMEOUT: $SHARD_TIMEOUT" >&2; exit 2
 fi
-STALL_SECONDS="${GBRAIN_TEST_SHARD_STALL_SECONDS:-600}"
+# Stall watchdog window. 600s on POSIX, where chunking is off and a shard is
+# one long bun process.
+#
+# On Windows it must clear the per-chunk cap, because Bun's reporter writes
+# NOTHING until its process exits unless a test fails or the code under test
+# logs: measured here, test/scripts/check-test-isolation.test.ts and
+# test/child-worker-supervisor.test.ts each sit at 28 bytes (the version
+# banner) for their entire run. A chunk of four healthy-but-slow quiet files
+# is therefore silent for longer than 600s, and the watchdog kills the whole
+# shard — the exact "one file takes the shard down" symptom it exists to
+# report. Sized off the shard runner's OWN effective cap (asked for, not
+# duplicated) so raising GBRAIN_TEST_CHUNK_SIZE can't reintroduce the overlap.
+#
+# The bounds then divide cleanly: the chunk cap bounds a hung bun process, and
+# a shard silent for longer than one whole chunk is a wedged shell.
+#
+# Only derived when the operator has NOT pinned the window: asking costs a
+# process spawn, and a pinned value makes the answer irrelevant. The platform
+# is handed down so the child doesn't re-pay `bun -e` startup to rediscover
+# what this shell already knows.
+if [ -n "${GBRAIN_TEST_SHARD_STALL_SECONDS:-}" ]; then
+  STALL_SECONDS="$GBRAIN_TEST_SHARD_STALL_SECONDS"
+else
+  STALL_SECONDS=600
+  if [ "$IS_WINDOWS" = "1" ]; then
+    CHUNK_CAP=$(GBRAIN_TEST_BUN_PLATFORM="$BUN_PLATFORM" \
+      bash scripts/run-unit-shard.sh --print-chunk-cap 2>/dev/null | tr -d ' ')
+    if printf '%s' "$CHUNK_CAP" | grep -qE '^[0-9]{1,9}$' && [ "$CHUNK_CAP" -gt 600 ]; then
+      STALL_SECONDS=$((CHUNK_CAP + 300))
+    fi
+  fi
+fi
 STALL_POLL_SECONDS="${GBRAIN_TEST_SHARD_STALL_POLL_SECONDS:-10}"
 if ! printf '%s' "$STALL_SECONDS" | grep -qE '^[0-9]{1,9}$'; then
   echo "ERROR: invalid GBRAIN_TEST_SHARD_STALL_SECONDS: $STALL_SECONDS" >&2; exit 2

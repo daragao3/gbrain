@@ -23,8 +23,21 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-function test(name: string, fn: () => void | Promise<unknown>): void {
-  testRaw(name, fn, 30000);
+// 30s covers a refusal case: the guard fires before connectEngine, so the
+// child only pays `bun run src/cli.ts` startup (~11s on Windows).
+const REFUSAL_BUDGET_MS = 30_000;
+
+// A test that seeds a LOCAL PGLite config is a different animal. The child
+// reaches connectEngine and replays the whole migration chain against a fresh
+// PGLite store — ~65s through the WASM build on Windows, and the child is
+// spawned, so bun's per-test timeout abandons it rather than stopping it
+// ("killed 1 dangling process" at file teardown, with the orphan burning CPU
+// against every other file in the shard until then). Budget for the replay
+// instead of racing it.
+const LOCAL_ENGINE_BUDGET_MS = 240_000;
+
+function test(name: string, fn: () => void | Promise<unknown>, timeoutMs = REFUSAL_BUDGET_MS): void {
+  testRaw(name, fn, timeoutMs);
 }
 
 const CLI = join(__dirname, '..', 'src', 'cli.ts');
@@ -165,14 +178,14 @@ describe('regression — local config still passes through normally', () => {
     const r = await run(['sync', '--dry-run']);
     expect(r.stderr).not.toContain('thin client');
     expect(r.stderr).not.toContain('requires a local engine');
-  });
+  }, LOCAL_ENGINE_BUDGET_MS);
 
   test('local PGLite config does NOT trigger guard for `doctor`', async () => {
     seedLocalPGLiteConfig();
     const r = await run(['doctor', '--fast', '--json']);
     // Local doctor's output has different fingerprint — no `mode: thin-client`.
     expect(r.stdout).not.toContain('"mode":"thin-client"');
-  });
+  }, LOCAL_ENGINE_BUDGET_MS);
 });
 
 describe('thin-client scratch-DB guard — jobs partial dispatch + config refusal', () => {
