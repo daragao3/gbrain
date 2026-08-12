@@ -897,6 +897,11 @@ const putPageAllowEmptyParam: ParamDef = {
 // Placeholder-truncation guard (2026-08-10 KB incident). Shared by put_page and
 // put_page_conditional: the guard is a content-sanity refusal independent of any
 // write precondition, so a conditional write must be able to opt out the same way.
+const putPageAllowEmptyParam: ParamDef = {
+  type: 'boolean',
+  required: false,
+  description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.',
+};
 const putPageAllowTruncationParam: ParamDef = {
   type: 'boolean',
   required: false,
@@ -938,15 +943,19 @@ async function executePutPage(
   if (ctx.dryRun) return { dry_run: true, action: operationName, slug: p.slug };
 
   // Empty-overwrite guard: empty/whitespace-only content over an existing
-  // non-empty page is almost always an input-plumbing failure (e.g. a caller
-  // that meant file input but omitted --file, so the missing --content fell
-  // back to reading an empty non-interactive stdin), not an intentional write.
-  // Refuse loudly unless the caller opts in with allow_empty. The read is
-  // scoped to the exact (source_id, slug) row the write below targets. New-slug
-  // creates and soft-deleted-page overwrites stay allowed — nothing
-  // recoverable is lost there.
-  if ((p.content as string).trim() === '' && p.allow_empty !== true) {
-    const existing = await ctx.engine.getPage(slug, { sourceId: ctx.sourceId ?? 'default' });
+  // non-empty page is almost always an input-plumbing failure (e.g. a
+  // caller that meant file input but did not reach for `put --file`, so the
+  // missing --content fell back to reading an empty non-interactive stdin), not an
+  // intentional write. Refuse loudly unless the caller opts in with
+  // allow_empty. The read is scoped to the exact (source_id, slug) row the
+  // write below targets. New-slug creates and soft-deleted-page overwrites
+  // stay allowed — nothing recoverable is lost there.
+  // Legacy-only: put_page_conditional carries no allow_empty param, so
+  // applying this to conditional writes would refuse a write the caller has
+  // no documented way to permit. Extending it there is a product decision,
+  // not a merge decision.
+  if (mode.kind === 'legacy' && (p.content as string).trim() === '' && p.allow_empty !== true) {
+    const existing = await ctx.engine.getPage(slug, { sourceId: writeSourceId });
     const existingBody = existing
       ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
       : '';

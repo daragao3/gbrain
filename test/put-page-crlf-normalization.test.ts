@@ -3,7 +3,7 @@
  *
  * Bug: `gbrain capture --file <path>` on Windows read a PowerShell-written
  * file (PowerShell's Out-File / Set-Content emit CRLF) and stored the body
- * byte-for-byte. A single session's put_page of `projects/agent-fork` landed a
+ * byte-for-byte. A single session's put_page of `projects/acme-example` landed a
  * compiled truth carrying 549 CRLF pairs where every prior revision of that
  * page had been pure LF. `projects/jobflow` took 154 the same night. Both
  * are preserved in page_versions (ids 592 and 565).
@@ -112,7 +112,7 @@ describe('importFromContent normalizes line endings into compiled_truth', () => 
   test('the incident false negative: an LF pattern finds text that spanned a CRLF break', async () => {
     // The literal shape that returned zero matches on 2026-08-10.
     const content =
-      `${F}\r\ntitle: Agent Fork\r\ntype: project\r\n${F}\r\n\r\n` +
+      `${F}\r\ntitle: Acme Example\r\ntype: project\r\n${F}\r\n\r\n` +
       `The remaining untracked infra\r\nscript is still pending.\r\n`;
 
     const page = await put('projects/crlf-false-negative', content);

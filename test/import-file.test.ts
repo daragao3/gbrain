@@ -257,6 +257,8 @@ Content.
     const linkPath = join(TMP, 'symlink-file.md');
     try { rmSync(linkPath); } catch { /* may not exist */ }
     try {
+      // The explicit 'file' type is required on Windows; without the symlink
+      // privilege the call still throws EPERM, which skips the test there.
       symlinkSync(realFile, linkPath, 'file');
     } catch (error: any) {
       if (error?.code === 'EPERM') return;
@@ -591,21 +593,46 @@ exact body
       updated_at: new Date('2026-01-01T00:00:00Z'),
       deleted_at: null,
     };
-    // The created row has to become readable: the post-write read-back guard
-    // (#2869) re-reads the page it just wrote and fails loudly on a null or a
-    // stale hash. A mock that always answers null for the exact slug would
-    // report that legitimate write as a silent desync.
-    let createdPage: Record<string, unknown> | null = null;
+    // importFromContent read-back-verifies every successful write, so the mock
+    // has to make the created page readable afterwards or verifyPageReadable
+    // throws the silent-desync error. It compares content_hash too, so the
+    // read-back has to carry the hash importFromContent actually computed —
+    // derived here the same way the sibling conditional test derives it.
+    const { createHash } = await import('crypto');
+    const { parseMarkdown } = await import('../src/core/markdown.ts');
+    const parsedExact = parseMarkdown(content, 'notes/exact.md');
+    const exactHash = createHash('sha256')
+      .update(JSON.stringify({
+        title: parsedExact.title,
+        type: parsedExact.type,
+        compiled_truth: parsedExact.compiled_truth,
+        timeline: parsedExact.timeline,
+        frontmatter: parsedExact.frontmatter,
+        tags: parsedExact.tags.sort(),
+      }))
+      .digest('hex');
+
+    let createdExact: Record<string, unknown> | null = null;
     const engine = mockEngine({
       findDuplicatePage: async () => ({ slug: 'notes/other', id: 1 }),
       getPage: async (candidateSlug: string) => {
         if (candidateSlug === 'notes/other') return otherPage;
-        return createdPage?.slug === candidateSlug ? createdPage : null;
+        // Absent before the create, readable after it — which is exactly the
+        // property the create_only precondition and the read-back each need.
+        if (candidateSlug === 'notes/exact') return createdExact;
+        return null;
       },
-      createPageOnly: async (createdSlug: string, input: Record<string, unknown>) => {
-        // Spread `input` so the stored row carries the hash the write computed.
-        createdPage = { ...otherPage, ...input, id: 2, slug: createdSlug, title: 'Exact', revision: 1 };
-        return { status: 'created', page: createdPage };
+      createPageOnly: async (createdSlug: string) => {
+        createdExact = {
+          ...otherPage,
+          id: 2,
+          slug: createdSlug,
+          title: 'Exact',
+          compiled_truth: parsedExact.compiled_truth,
+          content_hash: exactHash,
+          revision: 1,
+        };
+        return { status: 'created', page: createdExact };
       },
     });
 
@@ -616,6 +643,11 @@ exact body
 
     expect(result.slug).toBe('notes/exact');
     expect(result.status).toBe('created');
+    // The point of the test: the duplicate external id must NOT redirect the
+    // write onto notes/other.
+    const createCalls = (engine as any)._calls.filter((c: any) => c.method === 'createPageOnly');
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].args[0]).toBe('notes/exact');
   });
 });
 
