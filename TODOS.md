@@ -1,5 +1,25 @@
 # TODOS
 
+## v0.42.85.0 follow-ups (Tier 3 fixture staleness)
+
+- [x] **P3 — `scripts/run-serial-tests.sh` silently ignored a file path passed on argv.**
+  Fixed independently in v0.42.84.0 (`26502f77`, "let run-serial-tests.sh run the files you
+  name"), which landed while this release was in flight. The script now accepts positional
+  file arguments, strips a leading `./` so the per-file snapshot special case still matches,
+  accepts them before or after `--dry-run-list`, and exits 2 naming the path on a file that
+  does not exist, is not a `*.serial.test.ts`, or is an unknown flag. Before that, the list
+  was a hardcoded `find` and the only recognized argument was `--dry-run-list`, so a named
+  path was discarded and all 95 files ran, one bun process each. That read as a hang: the
+  intended single file takes about 2 minutes, the full sweep roughly an hour on a loaded
+  machine, and the only tell was the script's own `running 95 file(s)` banner.
+- [x] **P3 — exercise the full 95-file serial suite against the `--if-stale` change.** Done
+  by CI. The `serial-tests` job in `.github/workflows/test.yml` runs `bun run test:serial`
+  (`bash scripts/run-serial-tests.sh`, the whole 95-file sweep) on ubuntu-latest with a
+  15-minute budget, and it passed on this change. Locally the sweep is impractical: it
+  costs roughly an hour on a loaded Windows machine, and the argv gap above makes a scoped
+  run impossible without editing the script, so `test/pglite-snapshot-file-seeding.serial.test.ts`
+  was verified directly instead (1 pass / 0 fail, 115.44s). Linux CI is the gate for the
+  full sweep.
 ## v0.42.84.0 follow-ups (four-shape removal protection)
 
 - [ ] **P2 - undeclared-prefix protection over-reports, so an edge can now go

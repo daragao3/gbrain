@@ -83,8 +83,16 @@ for f in "${files[@]}"; do
   test_timeout=60000
   if [ "$f" = "test/pglite-snapshot-file-seeding.serial.test.ts" ]; then
     test_timeout=900000
-    echo "[serial-tests] building PGLite snapshot fixture for $f"
-    if ! bun run build:pglite-snapshot; then
+    echo "[serial-tests] ensuring PGLite snapshot fixture is current for $f"
+    # --if-stale, not an unconditional build. The test THROWS `snapshot fixture
+    # stale` at module scope, so the fixture genuinely has to be current before
+    # it runs — but the unconditional form paid a full PGLite boot plus ~120
+    # migrations (15-95s, 44MB tar) on every run, including the common case where
+    # the fixture on disk already matches. --if-stale keeps the guarantee (it
+    # rebuilds when the tar is absent, when the .version sidecar is absent or
+    # unreadable, or when the recorded hash no longer matches) and makes the
+    # already-current case a seconds-long no-op.
+    if ! bun run scripts/build-pglite-snapshot.ts --if-stale; then
       fail_count=$((fail_count + 1))
       failed_files+=("$f (fixture build)")
       continue
