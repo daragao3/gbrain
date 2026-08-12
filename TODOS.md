@@ -1128,8 +1128,21 @@ watermark). Both surfaced by the Codex review (P1-D, P1-C) and deliberately
 scoped OUT — neither is a #1696 regression. See plan + GSTACK REVIEW REPORT at
 `~/.claude/plans/system-instruction-you-are-working-squishy-crayon.md`.
 
-- [ ] **P2 — Repo-wide: `DROP INDEX CONCURRENTLY` inside a `DO $$` block is
-  Postgres-invalid.** `CONCURRENTLY` cannot run inside a transaction, and a `DO`
+- [x] **P2 — Repo-wide: `DROP INDEX CONCURRENTLY` inside a `DO $$` block is
+  Postgres-invalid.** Done in v0.42.92.0 (#1178 sweep). All ten remaining inline
+  sites now call the shared `dropInvalidConcurrentIndex()` helper, joining v66
+  which was converted when the issue was first reported: v14, v34, v41, v72, v91,
+  v96, v97, v103, v104, v112. Swept together as this entry required, not v112
+  alone. Guarded by `test/migrate.test.ts` "#1178: invalid-remnant cleanup is
+  delegated to the shared helper everywhere" — a per-migration case for each of
+  the eleven, a class-level backstop against the idiom reappearing anywhere in
+  the file, and a coverage case comparing the set of CONCURRENTLY-built indexes
+  against the set of helper calls so a new migration added without a pre-drop
+  fails. One correction to the diagnosis below: the error Postgres raises is
+  `DROP INDEX CONCURRENTLY cannot be executed from a function`, not
+  `cannot run inside a transaction block` — the rejection is of the
+  function/`EXECUTE` context specifically.
+  Original entry: `CONCURRENTLY` cannot run inside a transaction, and a `DO`
   block IS a transaction — so the invalid-index pre-drop guard throws
   `cannot run inside a transaction block` IF the branch ever fires (only on a
   retry after a prior failed concurrent build). Migration v112
