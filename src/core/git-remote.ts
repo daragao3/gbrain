@@ -454,6 +454,114 @@ export function detectDefaultBranch(repoPath: string): string {
   return 'main';
 }
 
+// ── Push-remote resolution (never assume `origin`) ──────────────────────────
+
+/**
+ * Trunk branches consulted, in order, when the target branch itself carries no
+ * remote configuration. Matches the reference implementation in
+ * ~/.hermes/agent-src (hermes_cli/web_git.py `_resolve_push_remote`).
+ */
+const TRUNK_BRANCHES = ['main', 'master', 'trunk'] as const;
+
+export type PushRemoteResolution =
+  | {
+      ok: true;
+      remote: string;
+      via: 'branch.pushRemote' | 'remote.pushDefault' | 'branch.remote' | 'trunk.remote' | 'sole-remote';
+    }
+  | { ok: false; reason: string };
+
+function gitConfigGet(repoPath: string, key: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', repoPath, 'config', '--get', key], {
+      stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
+    }).toString().trim();
+    return out || null;
+  } catch { return null; }
+}
+
+/** Configured remote NAMES (`git remote`). The only values a push may target. */
+export function listRemotes(repoPath: string): string[] {
+  try {
+    return execFileSync('git', ['-C', repoPath, 'remote'], {
+      stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
+    }).toString().split('\n').map(s => s.trim()).filter(Boolean);
+  } catch { return []; }
+}
+
+/**
+ * Resolve WHERE a push in `repoPath` should go. Never assumes `origin`.
+ *
+ * Fork-shaped checkouts — `origin` = the upstream project, the operator's own
+ * fork under a differently-named remote — are common (this very repo is one:
+ * origin=garrytan/gbrain, fork=daragao3/gbrain). Hardcoding `origin` on a push
+ * path there aims the operator's commits at a repo they do not own. gbrain
+ * reaches such repos through two doors that provision nothing:
+ *   - `gbrain sources harden <id|--all>` hardens ANY source row with a
+ *     local_path, including `--path`-registered trees gbrain never cloned;
+ *   - `gbrain skillpack endorse --repo <dir>` (default: CWD).
+ *
+ * Resolution order (first hit wins):
+ *   branch.<b>.pushRemote → remote.pushDefault → branch.<b>.remote
+ *   → each trunk branch's .remote → a lone remote → refuse.
+ *
+ * Two properties are load-bearing:
+ *  1. There is NO fallback to `origin`. Falling back IS the defect — refusing
+ *     leaves a commit local (recoverable) instead of published to a stranger.
+ *  2. Every configured value is validated against `git remote`. Git happily
+ *     accepts a URL where a remote name is expected, so an unvalidated config
+ *     read turns `remote.pushDefault=https://attacker/x.git` into an arbitrary
+ *     push destination. A key that IS set but does not name a known remote is
+ *     a hard refusal, not a fall-through — the operator asked for something
+ *     specific and we must not silently substitute.
+ */
+export function resolvePushRemote(repoPath: string, branch?: string): PushRemoteResolution {
+  const remotes = listRemotes(repoPath);
+  if (remotes.length === 0) return { ok: false, reason: `no git remotes configured in ${repoPath}` };
+  const known = new Set(remotes);
+
+  const b = branch || (() => {
+    try {
+      const cur = execFileSync('git', ['-C', repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+        stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
+      }).toString().trim();
+      return cur && cur !== 'HEAD' ? cur : '';
+    } catch { return ''; }
+  })();
+
+  const explicit: Array<{ key: string; via: 'branch.pushRemote' | 'remote.pushDefault' | 'branch.remote' }> = [
+    ...(b ? [{ key: `branch.${b}.pushRemote`, via: 'branch.pushRemote' as const }] : []),
+    { key: 'remote.pushDefault', via: 'remote.pushDefault' as const },
+    ...(b ? [{ key: `branch.${b}.remote`, via: 'branch.remote' as const }] : []),
+  ];
+  for (const { key, via } of explicit) {
+    const val = gitConfigGet(repoPath, key);
+    if (!val) continue;
+    if (!known.has(val)) {
+      return {
+        ok: false,
+        reason: `${key}="${val}" is not a configured remote (have: ${remotes.join(', ')}) — refusing to push to an unvalidated destination`,
+      };
+    }
+    return { ok: true, remote: val, via };
+  }
+
+  for (const trunk of TRUNK_BRANCHES) {
+    const val = gitConfigGet(repoPath, `branch.${trunk}.remote`);
+    if (val && known.has(val)) return { ok: true, remote: val, via: 'trunk.remote' };
+  }
+
+  if (remotes.length === 1) return { ok: true, remote: remotes[0]!, via: 'sole-remote' };
+
+  return {
+    ok: false,
+    reason:
+      `cannot resolve a push remote for ${b ? `branch "${b}"` : 'HEAD'} in ${repoPath}: ` +
+      `${remotes.length} remotes (${remotes.join(', ')}) and no branch.<b>.pushRemote / remote.pushDefault / branch.<b>.remote. ` +
+      `Set one, e.g. \`git -C ${repoPath} config branch.${b || '<branch>'}.pushRemote <remote>\``,
+  };
+}
+
 /** True if a rebase is mid-flight (rebase-merge or rebase-apply state dir exists). */
 function rebaseInProgress(repoPath: string): boolean {
   for (const name of ['rebase-merge', 'rebase-apply']) {
@@ -532,13 +640,16 @@ export function divergenceSafePull(
 }
 
 export type PushProbeResult =
-  | { ok: true }
-  | { ok: false; reason: 'auth' | 'protected' | 'unreachable' | 'other'; detail: string };
+  | { ok: true; remote: string }
+  | { ok: false; reason: 'auth' | 'protected' | 'unreachable' | 'no-remote' | 'other'; detail: string };
 
 /**
- * Authenticated `git push --dry-run` against origin/<branch>. Proves push auth
- * works AND surfaces read-only PATs / branch protection BEFORE harden declares
- * "hardened" — with zero history pollution (no commit). Auth-capable env.
+ * Authenticated `git push --dry-run` against <resolved-remote>/<branch>. Proves
+ * push auth works AND surfaces read-only PATs / branch protection BEFORE harden
+ * declares "hardened" — with zero history pollution (no commit). Auth-capable env.
+ *
+ * The remote comes from `resolvePushRemote` (or `opts.remote`, when the caller
+ * already resolved it once for a whole flow) — never a hardcoded `origin`.
  *
  * `redactDetail` (e.g. shell-redact's value scrubber bound to the PAT) is
  * applied to the captured stderr so a token echoed by git never reaches a log.
@@ -546,16 +657,22 @@ export type PushProbeResult =
 export function pushProbe(
   repoPath: string,
   branch: string,
-  opts: { timeoutMs?: number; redactDetail?: (s: string) => string } = {},
+  opts: { timeoutMs?: number; redactDetail?: (s: string) => string; remote?: string } = {},
 ): PushProbeResult {
   const redact = opts.redactDetail ?? ((s: string) => s);
+  let remote = opts.remote;
+  if (!remote) {
+    const res = resolvePushRemote(repoPath, branch);
+    if (!res.ok) return { ok: false, reason: 'no-remote', detail: redact(res.reason) };
+    remote = res.remote;
+  }
   try {
     execFileSync(
       'git',
-      ['-C', repoPath, ...durableSsrfFlags(), 'push', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--dry-run', 'origin', `HEAD:${branch}`],
+      ['-C', repoPath, ...durableSsrfFlags(), 'push', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--dry-run', remote, `HEAD:${branch}`],
       { stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeoutMs ?? 60_000, env: { ...process.env, ...GIT_ENV_AUTH } },
     );
-    return { ok: true };
+    return { ok: true, remote };
   } catch (e) {
     const raw = redact((e as Error).message || '');
     const low = raw.toLowerCase();

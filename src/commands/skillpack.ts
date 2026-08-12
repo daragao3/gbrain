@@ -1361,7 +1361,7 @@ async function cmdEndorse(args: string[]): Promise<void> {
         : `(unset) -> ${result.new_tier}`;
       console.log(`${verb}: ${result.pack_name} ${fromTo}`);
       if (result.commit_sha) console.log(`commit: ${result.commit_sha}`);
-      if (result.pushed) console.log(`pushed to origin`);
+      if (result.pushed) console.log(`pushed to ${result.push_remote ?? '(remote)'}`);
       if (dryRun) console.log(`\n(no writes; re-run without --dry-run to commit)`);
     }
     process.exit(0);
