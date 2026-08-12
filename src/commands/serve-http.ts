@@ -48,12 +48,52 @@ import {
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 
 /**
- * /health endpoint timeout. 3s rather than 5s: Fly.io's default
- * health-check timeout is 5s, so returning 503 right at the orchestrator
- * deadline races with the orchestrator recording the request as a timeout.
- * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
+ * /health RESPONSE deadline — how long the endpoint may take to ANSWER. It is
+ * deliberately NOT how long the database is given to prove itself; conflating
+ * those two is what broke this endpoint (see probeLiveness below).
+ *
+ * 3s rather than 5s: Fly.io's default health-check timeout is 5s, so answering
+ * right at the orchestrator deadline races with the orchestrator recording the
+ * request as a timeout. 3s leaves 2s of headroom for TCP, response framing, and
+ * clock skew. Keeping this at 3s is what keeps the orchestrator case sane —
+ * every /health request still returns well inside Fly's budget.
+ *
+ * Exceeding it is not a verdict: the probe keeps running in the background and
+ * /health answers `degraded` (HTTP 200).
  */
-export const HEALTH_TIMEOUT_MS = 3000;
+export const HEALTH_RESPONSE_TIMEOUT_MS = 3000;
+
+/**
+ * Retained name for the response deadline. Kept as an alias because external
+ * callers and older tests import it; the two-deadline split is the substance.
+ */
+export const HEALTH_TIMEOUT_MS = HEALTH_RESPONSE_TIMEOUT_MS;
+
+/** Slack between the pool's connect budget and the ceiling that judges it. */
+export const HEALTH_CEILING_MARGIN_MS = 2000;
+
+/**
+ * How long a background liveness probe may run before it is judged an actual
+ * failure. DERIVED from the pool's own connect budget rather than picked
+ * independently, so the invariant
+ *
+ *     HEALTH_HARD_CEILING_MS > POOL_CONNECT_TIMEOUT_S * 1000
+ *
+ * holds by construction and cannot silently regress when the pool config
+ * changes. test/serve-http-health.test.ts pins both the inequality and the
+ * derivation.
+ *
+ * The invariant is the entire bug. postgres.js may take up to `connect_timeout`
+ * (10s) to open a backend, and `idle_timeout` (20s) guarantees it will have to
+ * open one after any quiet period — so a verdict deadline below 10s cannot be
+ * met by a perfectly healthy brain. Until 2026-08-11 /health raced `SELECT 1`
+ * against 3s and returned 503 on expiry, which meant a cold pool reported as a
+ * dead backend. Observed that day: 30+ minutes of /health 503s while
+ * tools/list, get_page and a 55KB put_page_conditional CAS write all succeeded
+ * on the same pool, because POST /mcp carries no such server-side deadline.
+ */
+export const HEALTH_HARD_CEILING_MS =
+  db.POOL_CONNECT_TIMEOUT_S * 1000 + HEALTH_CEILING_MARGIN_MS;
 
 /**
  * v0.36.1.x #1024: bootstrap token resolution.
@@ -131,9 +171,23 @@ export function resolveOAuthTokenRateLimit(env: NodeJS.ProcessEnv = process.env)
   };
 }
 
+/**
+ * Three states, not two. The old shape collapsed "slow" and "dead" into one
+ * 503, which is why a /health 503 could not tell a cold pool from a database
+ * that was entirely gone (both were reported on this host: a cold pool on
+ * 2026-08-11, a dead backend on 2026-07-17, same 503, same text).
+ *
+ *   ok          — the probe answered promptly. Body shape is frozen at exactly
+ *                 {status, version, engine}; the e2e suite asserts that triple.
+ *   degraded    — the probe has not answered yet and nothing has actually
+ *                 failed. HTTP 200: liveness is not disproven, so orchestrators
+ *                 must not restart on it.
+ *   unavailable — the probe REJECTED, or ran past HEALTH_HARD_CEILING_MS.
+ *                 HTTP 503, carrying the underlying error.
+ */
 export type ProbeHealthResult =
-  | { ok: true; status: 200; body: { status: 'ok'; version: string; engine: string; [k: string]: unknown } }
-  | { ok: false; status: 503; body: { error: 'service_unavailable'; error_description: string } };
+  | { ok: true; status: 200; body: { status: 'ok' | 'degraded'; version: string; engine: string; [k: string]: unknown } }
+  | { ok: false; status: 503; body: { error: 'service_unavailable'; status: 'unavailable'; error_description: string } };
 
 /**
  * Pure async health probe. Races `engine.getStats()` against a timeout,
@@ -171,9 +225,16 @@ export async function probeHealth(
       status: 503,
       body: {
         error: 'service_unavailable',
+        status: 'unavailable',
+        // Report the OBSERVATION and decline to name a cause. The previous text
+        // ("database pool may be saturated") was a guess that proved wrong in
+        // both directions on this host: it fired on a cold pool with nothing
+        // saturated, and again on 2026-07-17 when the database was entirely
+        // dead — also nothing saturated. A stats query is heavy enough that a
+        // timeout here genuinely is ambiguous, so say so instead of guessing.
         error_description: msg === 'health_timeout'
-          ? 'Health check timed out (database pool may be saturated)'
-          : 'Database connection failed',
+          ? `Stats query did not complete within ${timeoutMs}ms (cause not determined: cold pool, contention, or an unreachable backend are all consistent with this)`
+          : `Database stats query failed: ${msg}`,
       },
     };
   } finally {
@@ -183,49 +244,180 @@ export async function probeHealth(
   }
 }
 
+/** Outcome of one completed background liveness probe. */
+export type LivenessOutcome =
+  | { ok: true; at: number; ms: number }
+  | { ok: false; at: number; ms: number; reason: string };
+
 /**
- * Lightweight liveness probe. Races `SELECT 1` against the same timeout
- * `probeHealth` uses, returns the same tagged-union result type, but the
- * 200 body is intentionally bare: `{status, version, engine}` — no engine
- * stats. Stats moved to `/admin/api/full-stats` (admin auth) in v0.28.10
- * because `getStats()`'s six count(*) queries exceeded HEALTH_TIMEOUT_MS
- * on production brains through PgBouncer, producing false 503s that
- * triggered orchestrator restart cascades and advisory-lock pile-ups.
+ * Cross-request probe state. The server creates one and hands it to every
+ * /health call, which is what lets a slow probe be reported as `degraded`
+ * (nothing has failed yet) rather than as a failure, and what lets a PROVEN
+ * failure from an earlier probe still surface as 503 while a later probe hangs.
+ */
+export interface LivenessProbeState {
+  inFlight: Promise<LivenessOutcome> | null;
+  last: LivenessOutcome | null;
+}
+
+export function createLivenessProbeState(): LivenessProbeState {
+  return { inFlight: null, last: null };
+}
+
+export interface ProbeLivenessOptions {
+  /** How long /health may take to answer. Default HEALTH_RESPONSE_TIMEOUT_MS. */
+  responseTimeoutMs?: number;
+  /** How long the probe may run before it is judged failed. Default HEALTH_HARD_CEILING_MS. */
+  hardCeilingMs?: number;
+  /** Cross-request state. Omitted → single-shot semantics (no memory). */
+  state?: LivenessProbeState;
+  /** Injectable clock for tests. */
+  now?: () => number;
+}
+
+/**
+ * Lightweight liveness probe. The 200 body is intentionally bare —
+ * `{status, version, engine}`, no engine stats. Stats moved to
+ * `/admin/api/full-stats` (admin auth) in v0.28.10 because `getStats()`'s six
+ * count(*) queries exceeded the deadline on production brains through
+ * PgBouncer, producing false 503s that triggered orchestrator restart cascades
+ * and advisory-lock pile-ups.
+ *
+ * 2026-08-11: that same class of false 503 came back through a different door.
+ * The probe raced `SELECT 1` against a 3s deadline and returned 503 on expiry —
+ * but the pool it probes is allowed `connect_timeout` (10s) to open a backend,
+ * and `idle_timeout` (20s) guarantees it must open one after any quiet period.
+ * The deadline was shorter than the budget, so a healthy idle brain could not
+ * pass. Readers were reduced to ignoring the endpoint entirely.
+ *
+ * The fix separates two deadlines that were previously one:
+ *
+ *   - The RESPONSE deadline (3s) bounds how long the endpoint takes to answer.
+ *     Orchestrators still get a verdict inside Fly.io's 5s budget.
+ *   - The FAILURE ceiling (derived, > connect_timeout) bounds how long the
+ *     database gets to prove itself. Only crossing THIS is a failure.
+ *
+ * On response-deadline expiry the probe is NOT cancelled — it keeps running in
+ * the background and records its outcome. /health answers from what is actually
+ * known:
+ *
+ *   - probe answered in time                  -> 200 ok
+ *   - probe still running, nothing has failed -> 200 degraded
+ *   - probe rejected, or crossed the ceiling  -> 503 unavailable + the real error
+ *
+ * A single in-flight probe is shared by concurrent callers, so a burst of
+ * health checks costs one pool checkout rather than one each.
  */
 export async function probeLiveness(
   sql: SqlQuery,
   engineName: string,
   version: string,
-  timeoutMs: number = HEALTH_TIMEOUT_MS,
+  opts: number | ProbeLivenessOptions = {},
 ): Promise<ProbeHealthResult> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  const o: ProbeLivenessOptions = typeof opts === 'number' ? { responseTimeoutMs: opts } : opts;
+  const responseTimeoutMs = o.responseTimeoutMs ?? HEALTH_RESPONSE_TIMEOUT_MS;
+  // Never let the ceiling fall at or below the response deadline: that would
+  // reinstate the original bug in miniature (a probe judged failed the instant
+  // it is reported slow). A caller-supplied response deadline longer than the
+  // default ceiling wins, and the ceiling moves out of its way.
+  const hardCeilingMs = o.hardCeilingMs ?? Math.max(HEALTH_HARD_CEILING_MS, responseTimeoutMs + 1);
+  const state = o.state ?? createLivenessProbeState();
+  const now = o.now ?? Date.now;
+
+  if (!state.inFlight) {
+    const started = now();
+    const run = async (): Promise<LivenessOutcome> => {
+      let ceilingTimer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          sql`SELECT 1`,
+          new Promise<never>((_, reject) => {
+            ceilingTimer = setTimeout(() => reject(new Error('health_ceiling')), hardCeilingMs);
+          }),
+        ]);
+        return { ok: true, at: now(), ms: now() - started };
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'unknown';
+        return {
+          ok: false,
+          at: now(),
+          ms: now() - started,
+          reason: msg === 'health_ceiling'
+            ? `no response within ${hardCeilingMs}ms, which exceeds the pool connect budget of ${db.POOL_CONNECT_TIMEOUT_S}s — the backend is unreachable, not merely cold`
+            : msg,
+        };
+      } finally {
+        // Clear the ceiling timer whichever way the race went, so a fast probe
+        // does not leave a pending multi-second timer in the event loop.
+        if (ceilingTimer !== null) clearTimeout(ceilingTimer);
+      }
+    };
+    // `run()` swallows its own rejections, so this promise never rejects and
+    // can be awaited by many callers (or by none) without an unhandled warning.
+    const pending: Promise<LivenessOutcome> = run().then(outcome => {
+      state.last = outcome;
+      if (state.inFlight === pending) state.inFlight = null;
+      return outcome;
+    });
+    state.inFlight = pending;
+  }
+
+  const inFlight = state.inFlight;
+  const RESPONSE_DEADLINE = Symbol.for('gbrain.health.response_deadline');
+  let respTimer: ReturnType<typeof setTimeout> | null = null;
+  let raced: LivenessOutcome | typeof RESPONSE_DEADLINE;
   try {
-    await Promise.race([
-      sql`SELECT 1`,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('health_timeout')), timeoutMs);
+    raced = await Promise.race([
+      inFlight,
+      new Promise<typeof RESPONSE_DEADLINE>(resolve => {
+        respTimer = setTimeout(() => resolve(RESPONSE_DEADLINE), responseTimeoutMs);
       }),
     ]);
-    return {
-      ok: true,
-      status: 200,
-      body: { status: 'ok', version, engine: engineName },
-    };
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'unknown';
-    return {
-      ok: false,
-      status: 503,
-      body: {
-        error: 'service_unavailable',
-        error_description: msg === 'health_timeout'
-          ? 'Health check timed out (database pool may be saturated)'
-          : 'Database connection failed',
-      },
-    };
   } finally {
-    if (timer !== null) clearTimeout(timer);
+    if (respTimer !== null) clearTimeout(respTimer);
   }
+
+  const unavailable = (reason: string): ProbeHealthResult => ({
+    ok: false,
+    status: 503,
+    body: {
+      error: 'service_unavailable',
+      status: 'unavailable',
+      error_description: `Database liveness probe failed: ${reason}`,
+    },
+  });
+
+  if (raced !== RESPONSE_DEADLINE) {
+    if (raced.ok) {
+      // Frozen three-key shape. Do not add fields here — the e2e suite asserts
+      // Object.keys() exactly, and that assertion is the guard keeping the
+      // heavy getStats() spread from creeping back onto the public route.
+      return { ok: true, status: 200, body: { status: 'ok', version, engine: engineName } };
+    }
+    return unavailable(raced.reason);
+  }
+
+  // The response deadline expired with the probe still running. That is not
+  // evidence of anything by itself — report the last PROVEN outcome instead.
+  const last = state.last;
+  if (last && !last.ok) return unavailable(last.reason);
+
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      status: 'degraded',
+      version,
+      engine: engineName,
+      detail:
+        `Database probe still in flight after ${responseTimeoutMs}ms. The pool is allowed up to ` +
+        `${db.POOL_CONNECT_TIMEOUT_S}s to open a backend (connect_timeout) and closes idle backends after ` +
+        `${db.POOL_IDLE_TIMEOUT_S}s (idle_timeout), so a slow first query after a quiet period is expected ` +
+        `and is NOT evidence of a fault. Liveness is reported degraded rather than failed until the probe ` +
+        `actually fails or exceeds ${hardCeilingMs}ms.`,
+      last_success_ms_ago: last?.ok ? now() - last.at : null,
+    },
+  };
 }
 
 /**
@@ -256,6 +448,66 @@ export function resolveTrustProxy(env: string | undefined): string | number | bo
   if (env === '1' || env === 'true') return 1;
   if (/^\d+$/.test(env)) return parseInt(env, 10);
   return env;
+}
+
+/** Minimal shape of the per-request MCP scope this module has to dispose. */
+export interface McpDisposable { close(): void | Promise<void> }
+/** Minimal shape of the response object `disposeMcpScopeOnResponseClose` listens on. */
+export interface McpCloseEmitter { on(event: 'close', listener: () => void): unknown }
+
+/**
+ * Tear down the throwaway `Server` + `StreamableHTTPServerTransport` that
+ * POST /mcp builds per request (stateless mode), once the response is done.
+ *
+ * Pre-fix nothing closed either object. `server.connect(transport)` makes the
+ * two mutually reachable, so every single request retained a Server (its
+ * request/notification handler maps) plus a transport (stream bookkeeping) for
+ * the lifetime of the process. On the shared long-lived `gbrain serve --http`
+ * deployment that grows monotonically until the operator's leak guard kills the
+ * process — and a process killed mid-request silently drops in-flight SSE
+ * responses. Because the SSE headers are flushed BEFORE the tool handler runs,
+ * the client sees HTTP 200 with a zero-length body even though the write it
+ * requested already committed. Large `put_page` calls are the ones that get
+ * caught, purely because they stay in flight the longest.
+ *
+ * `close` (not `finish`) is the right signal: it fires for completed responses
+ * AND for client aborts, so an abandoned request is disposed too. Disposal is
+ * latched so a second `close` can't double-close, and each close is isolated so
+ * a throwing transport can't skip the server (or vice versa).
+ *
+ * Returns the dispose function so callers/tests can invoke it directly.
+ */
+export function disposeMcpScopeOnResponseClose(
+  res: McpCloseEmitter,
+  server: McpDisposable,
+  transport: McpDisposable,
+  onError: (e: unknown) => void = e =>
+    console.error('MCP scope dispose error:', e instanceof Error ? e.message : e),
+): () => void {
+  // Both SDK close() methods are async (Protocol.close / transport.close), so a
+  // bare try/catch would let a rejection escape as an unhandled rejection —
+  // which under Bun can take the whole server down, i.e. cause the very
+  // mid-request death this function exists to prevent. Swallow both shapes.
+  const closeQuietly = (c: McpDisposable) => {
+    try {
+      const maybePromise = c.close();
+      if (maybePromise && typeof (maybePromise as Promise<void>).then === 'function') {
+        (maybePromise as Promise<void>).then(undefined, onError);
+      }
+    } catch (e) {
+      onError(e);
+    }
+  };
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    // Transport first, then server — the SDK's documented stateless teardown.
+    closeQuietly(transport);
+    closeQuietly(server);
+  };
+  res.on('close', dispose);
+  return dispose;
 }
 
 /**
@@ -978,8 +1230,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Health check — liveness only. Full engine stats live at
   // /admin/api/full-stats (requireAdmin). See probeLiveness above for the why.
   // ---------------------------------------------------------------------------
+  // One state object for the process lifetime. Cross-request memory is what
+  // lets a slow probe read as `degraded` while a probe that actually FAILED
+  // still reads as 503 — see probeLiveness.
+  const livenessState = createLivenessProbeState();
   app.get('/health', async (_req, res) => {
-    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION);
+    const result = await probeLiveness(sql, config.engine || 'pglite', VERSION, {
+      state: livenessState,
+    });
     res.status(result.status).json(result.body);
   });
 
@@ -1244,8 +1502,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Full engine stats. v0.28.10 moved this off /health (which is now liveness
   // only — see probeLiveness) so dashboards needing page_count / chunk_count
   // / etc. authenticate as admin and call this endpoint. probeHealth races
-  // engine.getStats() against HEALTH_TIMEOUT_MS so a saturated pool returns
-  // 503 rather than hanging.
+  // engine.getStats() against HEALTH_RESPONSE_TIMEOUT_MS so a slow stats query
+  // returns 503 rather than hanging. Unlike probeLiveness this one keeps a
+  // single deadline on purpose: six count(*) queries are real work, so a
+  // timeout here is genuinely ambiguous and the 503 says so rather than
+  // blaming pool saturation.
   app.get('/admin/api/full-stats', requireAdmin, async (_req: Request, res: Response) => {
     const result = await probeHealth(engine, config.engine || 'pglite', VERSION);
     res.status(result.status).json(result.body);
@@ -1991,6 +2252,17 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     // gets parseable JSON back.
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined as any });
+      // Every POST /mcp builds a throwaway Server + transport (stateless mode).
+      // Nothing used to close either one, so each request leaked the pair — the
+      // Server's request/notification handler maps, the transport's stream
+      // bookkeeping, and the `server.connect(transport)` cross-references that
+      // keep both reachable from each other. Under a long-lived shared server
+      // that grows without bound until the host's leak guard kills the process,
+      // and a process killed mid-request drops in-flight SSE responses whose
+      // headers were already flushed — the client reads HTTP 200 with a
+      // zero-length body while the DB write it asked for has already committed.
+      // Disposing on response close is the SDK's documented stateless pattern.
+      disposeMcpScopeOnResponseClose(res, server, transport);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (e) {

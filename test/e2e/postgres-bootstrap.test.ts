@@ -84,6 +84,37 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     expect(srcCheck).toHaveLength(1);
   });
 
+  test('brain stamped at v125 installs page revision state idempotently', async () => {
+    const conn = (engine as any).sql;
+    await engine.initSchema();
+    try {
+      await conn.unsafe(`
+        DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages;
+        DROP FUNCTION IF EXISTS bump_page_revision_fn;
+        ALTER TABLE pages DROP COLUMN IF EXISTS revision;
+      `);
+      await engine.setConfig('version', '125');
+
+      await engine.initSchema();
+      await engine.initSchema();
+
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const page = await engine.putPage('test/upgraded-revision', {
+        type: 'concept', title: 'v1', compiled_truth: '', timeline: '',
+      });
+      expect(page.revision).toBe(1);
+      const updated = await engine.putPage('test/upgraded-revision', {
+        type: 'concept', title: 'v2', compiled_truth: '', timeline: '',
+      });
+      expect(updated.revision).toBe(2);
+    } finally {
+      // Restore the latest schema even if an assertion fails so later E2E files
+      // do not inherit the down-mutated pages table.
+      await engine.setConfig('version', '125');
+      await engine.initSchema();
+    }
+  });
+
   test('PostgresEngine.initSchema is idempotent on a brain already at LATEST', async () => {
     // Fresh-LATEST brain. Calling initSchema again must not error and must
     // not regress the version.

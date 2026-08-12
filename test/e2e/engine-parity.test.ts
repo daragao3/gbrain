@@ -15,7 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import type { ChunkInput, SearchResult } from '../../src/core/types.ts';
+import type { ChunkInput, SearchResult, ConditionalPageWriteResult } from '../../src/core/types.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
 
@@ -105,6 +105,30 @@ const QUERIES = [
   'fat code production',
 ];
 
+async function conditionalSequence(eng: BrainEngine) {
+  const created = await eng.createPageOnly('test/conditional-parity', {
+    type: 'note', title: 'v1', compiled_truth: 'v1', timeline: '', frontmatter: {},
+  }, { sourceId: 'default' });
+  const conflict = await eng.createPageOnly('test/conditional-parity', {
+    type: 'note', title: 'other', compiled_truth: 'other', timeline: '', frontmatter: {},
+  }, { sourceId: 'default' });
+  if (created.status !== 'created') throw new Error('expected created');
+  const updated = await eng.compareAndSwapPage('test/conditional-parity', {
+    type: 'note', title: 'v2', compiled_truth: 'v2', timeline: '', frontmatter: {},
+  }, created.page.revision, { sourceId: 'default' });
+  const stale = await eng.compareAndSwapPage('test/conditional-parity', {
+    type: 'note', title: 'stale', compiled_truth: 'stale', timeline: '', frontmatter: {},
+  }, created.page.revision, { sourceId: 'default' });
+  return { created, conflict, updated, stale };
+}
+
+function conditionalShape(result: ConditionalPageWriteResult) {
+  if (result.status === 'created' || result.status === 'updated') {
+    return { status: result.status, slug: result.page.slug, revision: result.page.revision };
+  }
+  return result;
+}
+
 describeBoth('Engine parity — Postgres vs PGLite', () => {
   let pgEngine: BrainEngine;
   let pgliteEngine: PGLiteEngine;
@@ -140,6 +164,13 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
       expect(new Set(pgSlugs)).toEqual(new Set(pgliteSlugs));
     });
   }
+
+  test('conditional page-write results and revisions match between engines', async () => {
+    const pg = await conditionalSequence(pgEngine);
+    const pglite = await conditionalSequence(pgliteEngine);
+    expect(Object.fromEntries(Object.entries(pg).map(([key, value]) => [key, conditionalShape(value)])))
+      .toEqual(Object.fromEntries(Object.entries(pglite).map(([key, value]) => [key, conditionalShape(value)])));
+  });
 
   test('searchVector: top result matches between engines', async () => {
     const queryVec = basisEmbedding(7); // article direction

@@ -19,10 +19,11 @@
  * rather than this one, and is pinned in `gbrain-home-isolation.test.ts`.
  */
 
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve, sep } from 'path';
+import { withEnv } from './helpers/with-env.ts';
 import { unsafeConfigFlipReason } from '../src/commands/migrate-engine.ts';
 import { auditUnsafeConfigWrite, type GBrainConfig } from '../src/core/config.ts';
 
@@ -71,39 +72,41 @@ describe('unsafeConfigFlipReason — a config home that moved mid-run is refused
 });
 
 describe('a drift refusal is recorded in the same audit trail', () => {
-  let auditDir: string | null = null;
-  const prevAudit = process.env.GBRAIN_AUDIT_DIR;
-
-  afterEach(() => {
-    if (prevAudit !== undefined) process.env.GBRAIN_AUDIT_DIR = prevAudit;
-    else delete process.env.GBRAIN_AUDIT_DIR;
-    if (auditDir) rmSync(auditDir, { recursive: true, force: true });
-    auditDir = null;
-  });
-
-  test('writes a config-repoint-refused row discriminated by kind', () => {
+  test('writes a config-repoint-refused row discriminated by kind', async () => {
     // Drift is the case where "which process did this?" is HARDEST to answer:
     // the run's launcher has already exited, so the in-process stack is the
     // only thing that names the offender. It must reach the same JSONL trail
     // the temp-target refusal writes, not a second private one.
-    auditDir = mkdtempSync(join(tmpdir(), 'gbrain-flip-audit-'));
-    process.env.GBRAIN_AUDIT_DIR = auditDir;
+    //
+    // GBRAIN_AUDIT_DIR goes through `withEnv` rather than a hand-rolled
+    // save/restore: `process.env` is process-global and the shard runner loads
+    // many files into one bun process, so a raw mutation here leaks into every
+    // later file (and trips `scripts/check-test-isolation.sh` rule R1). Pinning
+    // the dir explicitly is still required — the shared bootstrap
+    // (test/helpers/audit-dir-preload.ts) sets it process-globally, so asserting
+    // the default location would be reading another test's scratch dir.
+    const auditDir = mkdtempSync(join(tmpdir(), 'gbrain-flip-audit-'));
+    try {
+      await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, () => {
+        const cfg: GBrainConfig = { engine: 'pglite', database_path: join(tmpdir(), 'x', 'brain.pglite') };
+        const reason = unsafeConfigFlipReason(SCOPED_CONFIG, GLOBAL_CONFIG)!;
+        auditUnsafeConfigWrite(cfg, reason, 'config_path_drift');
 
-    const cfg: GBrainConfig = { engine: 'pglite', database_path: join(tmpdir(), 'x', 'brain.pglite') };
-    const reason = unsafeConfigFlipReason(SCOPED_CONFIG, GLOBAL_CONFIG)!;
-    auditUnsafeConfigWrite(cfg, reason, 'config_path_drift');
+        const rowsPath = join(auditDir, 'config-repoint-refused.jsonl');
+        expect(existsSync(rowsPath)).toBe(true);
+        const lines = readFileSync(rowsPath, 'utf8').trim().split('\n').filter(Boolean);
+        expect(lines.length).toBe(1);
 
-    const rowsPath = join(auditDir, 'config-repoint-refused.jsonl');
-    expect(existsSync(rowsPath)).toBe(true);
-    const lines = readFileSync(rowsPath, 'utf8').trim().split('\n').filter(Boolean);
-    expect(lines.length).toBe(1);
-
-    const row = JSON.parse(lines[0]!);
-    expect(row.event).toBe('refused_global_config_repoint');
-    expect(row.kind).toBe('config_path_drift');
-    expect(row.pid).toBe(process.pid);
-    expect(row.reason).toContain('changed mid-migration');
-    expect(typeof row.stack).toBe('string');
-    expect(Number.isNaN(Date.parse(row.ts))).toBe(false);
+        const row = JSON.parse(lines[0]!);
+        expect(row.event).toBe('refused_global_config_repoint');
+        expect(row.kind).toBe('config_path_drift');
+        expect(row.pid).toBe(process.pid);
+        expect(row.reason).toContain('changed mid-migration');
+        expect(typeof row.stack).toBe('string');
+        expect(Number.isNaN(Date.parse(row.ts))).toBe(false);
+      });
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
   });
 });

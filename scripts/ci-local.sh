@@ -9,6 +9,7 @@
 #   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4-way sharded)
 #   bash scripts/ci-local.sh --no-pull    # skip docker compose pull (offline / debug)
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
+#   bash scripts/ci-local.sh --keep-volumes  # retain named volumes (canonical checkout only)
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
 #
 # 4-way E2E sharding: 4 pgvector services on host ports 5434-5437. The 36 E2E
@@ -23,10 +24,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="docker-compose.ci.yml"
+source scripts/ci-volume-lifecycle.sh
 
 DIFF=0
 NO_PULL=0
 CLEAN=0
+KEEP_VOLUMES=0
 NO_SHARD=0
 
 for arg in "$@"; do
@@ -34,20 +37,17 @@ for arg in "$@"; do
     --diff) DIFF=1 ;;
     --no-pull) NO_PULL=1 ;;
     --clean) CLEAN=1 ;;
+    --keep-volumes) KEEP_VOLUMES=1 ;;
     --no-shard) NO_SHARD=1 ;;
     *)
-      echo "Usage: $0 [--diff] [--no-pull] [--clean] [--no-shard]" >&2
+      echo "Usage: $0 [--diff] [--no-pull] [--clean] [--keep-volumes] [--no-shard]" >&2
       exit 1
       ;;
   esac
 done
 
-cleanup() {
-  echo ""
-  echo "[ci-local] Tearing down postgres..."
-  docker compose -f "$COMPOSE_FILE" down --remove-orphans 2>&1 | tail -5 || true
-}
-trap cleanup EXIT
+gbrain_ci_validate_keep_volumes "$KEEP_VOLUMES" "$COMPOSE_FILE"
+trap 'gbrain_ci_cleanup "$?" "$COMPOSE_FILE" "$KEEP_VOLUMES"' EXIT
 
 if [ "$CLEAN" = "1" ]; then
   echo "[ci-local] --clean: removing named volumes..."
