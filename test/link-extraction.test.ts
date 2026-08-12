@@ -853,6 +853,106 @@ More prose here.
   });
 });
 
+// ─── parseTimelineEntries — CJK 年/月/日 rows ────────────────────
+//
+// The Chinese date arm (TIMELINE_LINE_RE_CN) was the one hand-authored
+// behavioral edit in the merge that brought remote reconciliation onto
+// master, and it shipped with no test at all.
+//
+// Its load-bearing property is NOT merely "CJK dates parse". It is that the
+// entry scan AND the detail-collection terminator recognize the same set of
+// shapes. A row shape that only the scan knows about is not reported as a
+// miss — it is silently swallowed into the PREVIOUS entry's detail, which
+// produces a corrupted double-length row rather than an obvious failure.
+// The last two tests pin that, and both fail if the CJK arm is removed.
+describe('parseTimelineEntries — CJK 年/月/日 rows', () => {
+  test('parses a bulleted CJK row and zero-pads single-digit month/day', () => {
+    const entries = parseTimelineEntries('- 2026年1月5日 | Met the founder');
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toEqual({ date: '2026-01-05', summary: 'Met the founder', detail: '' });
+  });
+
+  test('keeps two-digit month and day intact', () => {
+    const entries = parseTimelineEntries('- 2026年11月30日 | Quarter close');
+    expect(entries.length).toBe(1);
+    expect(entries[0].date).toBe('2026-11-30');
+  });
+
+  test('accepts the bold CJK form', () => {
+    const entries = parseTimelineEntries('- **2026年1月5日** | Bold CJK row');
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toEqual({ date: '2026-01-05', summary: 'Bold CJK row', detail: '' });
+  });
+
+  test('accepts an omitted trailing 日', () => {
+    const entries = parseTimelineEntries('- 2026年1月5 | No trailing day marker');
+    expect(entries.length).toBe(1);
+    expect(entries[0].date).toBe('2026-01-05');
+  });
+
+  test('accepts a CJK row with no list bullet', () => {
+    const entries = parseTimelineEntries('2026年1月5日 | Standalone CJK row');
+    expect(entries.length).toBe(1);
+    expect(entries[0].date).toBe('2026-01-05');
+  });
+
+  for (const [name, line] of [
+    ['pipe', '- 2026年1月5日 | Pipe separator'],
+    ['hyphen', '- 2026年1月5日 - Hyphen separator'],
+    ['en dash', '- 2026年1月5日 – En dash separator'],
+    ['em dash', '- 2026年1月5日 — Em dash separator'],
+  ] as const) {
+    test(`accepts ${name} as the CJK separator`, () => {
+      const entries = parseTimelineEntries(line);
+      expect(entries.length).toBe(1);
+      expect(entries[0].date).toBe('2026-01-05');
+    });
+  }
+
+  test('skips an out-of-range CJK date (2026年13月45日)', () => {
+    expect(parseTimelineEntries('- 2026年13月45日 | Bad date')).toEqual([]);
+  });
+
+  test('skips a CJK calendar date that does not exist (2026年2月30日)', () => {
+    expect(parseTimelineEntries('- 2026年2月30日 | Feb 30 does not exist')).toEqual([]);
+  });
+
+  test('does not treat separator-less CJK prose as an entry', () => {
+    expect(parseTimelineEntries('- 2026年1月5日的会议记录')).toEqual([]);
+  });
+
+  test('collects indented detail under a CJK entry', () => {
+    const content = ['- 2026年3月10日 | CJK row', '  supporting detail'].join('\n');
+    const entries = parseTimelineEntries(content);
+    expect(entries.length).toBe(1);
+    expect(entries[0].detail).toBe('supporting detail');
+  });
+
+  test('three mixed-shape rows stay three rows (bold + plain + CJK)', () => {
+    const content = [
+      '## Timeline',
+      '- **2026-01-15** | Bold row',
+      '- 2026-02-20 — Plain row',
+      '- 2026年3月10日 | CJK row',
+    ].join('\n');
+    const entries = parseTimelineEntries(content);
+    expect(entries.map(e => e.date)).toEqual(['2026-01-15', '2026-02-20', '2026-03-10']);
+    // Every row stands alone: nothing was absorbed as a neighbour's detail.
+    expect(entries.map(e => e.detail)).toEqual(['', '', '']);
+  });
+
+  test('an unbulleted CJK row is NOT absorbed into the previous entry detail', () => {
+    // The regression guard with teeth. Drop the CJK arm and the detail loop —
+    // which stops only at a RECOGNIZED entry — swallows this line into the
+    // bold row above, yielding one entry with a corrupted detail.
+    const content = ['- **2026-01-15** | Bold row', '2026年3月10日 | CJK row'].join('\n');
+    const entries = parseTimelineEntries(content);
+    expect(entries.length).toBe(2);
+    expect(entries[0].detail).toBe('');
+    expect(entries[1]).toEqual({ date: '2026-03-10', summary: 'CJK row', detail: '' });
+  });
+});
+
 // ─── deriveTimelineAnchor ──────────────────────────────────────
 
 describe('deriveTimelineAnchor', () => {
