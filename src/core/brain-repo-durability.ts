@@ -34,6 +34,7 @@ import { join, dirname, relative, isAbsolute } from 'path';
 import { execFileSync, execSync } from 'child_process';
 import {
   GIT_ENV, GIT_ENV_AUTH, divergenceSafePull, detectDefaultBranch, pushProbe,
+  noPushRemoteMessage, resolvePushRemote,
   type PullOutcome, type PushProbeResult,
 } from './git-remote.ts';
 import { findResolverFile, RESOLVER_FILENAMES } from './resolver-filenames.ts';
@@ -128,26 +129,52 @@ function pushLogPath(): string {
 // Rendered into BOTH the (committed) helper and the (local, untracked) hook so
 // there is one source of truth without the hook executing repo-controlled code.
 const PUSH_RETRY = `# --- gbrain durability push-retry (generated; one source of truth) ---
+# NEVER hardcode "origin": a brain repo is the user's OWN working tree, which may
+# be fork-shaped (origin = an upstream project they do not own). Resolve the
+# remote the way git resolves a push, and refuse rather than guess.
+brain_remote() {
+  _rb="$1"
+  _remotes="$(git remote 2>/dev/null || true)"
+  [ -n "$_remotes" ] || return 1
+  for _k in "branch.$_rb.pushRemote" remote.pushDefault "branch.$_rb.remote" \\
+            branch.main.remote branch.master.remote; do
+    _v="$(git config --get "$_k" 2>/dev/null || true)"
+    # A config value may be a URL rather than a remote name; only names are usable.
+    if [ -n "$_v" ] && printf '%s\\n' "$_remotes" | grep -qxF -- "$_v"; then
+      printf '%s' "$_v"; return 0
+    fi
+  done
+  if [ "$(printf '%s\\n' "$_remotes" | grep -c .)" = "1" ]; then
+    printf '%s' "$_remotes"; return 0
+  fi
+  printf '%s\\n' "$_remotes" | grep -qxF -- origin || return 1
+  printf '%s' origin
+}
 brain_push() {
   _branch="$1"
   _log="\${GBRAIN_HOME:-$HOME/.gbrain}/brain-push.log"
   mkdir -p "$(dirname "$_log")" 2>/dev/null || true
   _gd="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+  _remote="$(brain_remote "$_branch" || true)"
+  if [ -z "$_remote" ]; then
+    echo "$(date -u +%FT%TZ) [push] NO PUSH REMOTE for $_branch — refusing to guess. Set branch.$_branch.pushRemote or remote.pushDefault." >>"$_log"
+    return 1
+  fi
   # Serialize concurrent pushes (commit bursts) so they coalesce instead of a
   # rebase-retry herd. No-op if flock is unavailable.
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$_gd/gbrain-push.lock"
     flock -w 30 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch" >>"$_log"; return 0; }
   fi
-  if git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  if git push "$_remote" "HEAD:$_branch" >>"$_log" 2>&1; then
+    echo "$(date -u +%FT%TZ) [push] ok $_branch -> $_remote $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
   fi
-  echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch" >>"$_log"
-  if git pull --rebase origin "$_branch" >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch from $_remote" >>"$_log"
+  if git pull --rebase "$_remote" "$_branch" >>"$_log" 2>&1 && git push "$_remote" "HEAD:$_branch" >>"$_log" 2>&1; then
+    echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch -> $_remote $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
   fi
   git rebase --abort >/dev/null 2>&1 || true
-  echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) could not reach origin. Run: gbrain sources pull <id> && git push" >>"$_log"
+  echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) could not reach $_remote. Run: gbrain sources pull <id> && git push" >>"$_log"
   return 1
 }`;
 
@@ -702,16 +729,24 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
   // 7. verify (push-probe) + commit scaffolding if push works
   let clean = false;
   if (verify && !dryRun) {
-    const probe: PushProbeResult = pushProbe(repoPath, branch, { redactDetail: redact });
-    if (!probe.ok) {
-      push('verify', { status: 'needs_attention', detail: `push-probe failed (${probe.reason}): ${probe.detail}` });
+    // Resolve ONCE and reuse: probe, scaffolding push and the cleanliness check
+    // must all agree on the remote, and it is never assumed to be `origin`
+    // (repoPath is the user's own tree and may be fork-shaped).
+    const remote = resolvePushRemote(repoPath, branch);
+    const probe: PushProbeResult = remote
+      ? pushProbe(repoPath, branch, { redactDetail: redact, remote })
+      : { ok: false, reason: 'no_remote' as const, detail: noPushRemoteMessage(branch) };
+    if (!remote || !probe.ok) {
+      const detail = probe.ok ? noPushRemoteMessage(branch) : probe.detail;
+      const reason = probe.ok ? 'no_remote' : probe.reason;
+      push('verify', { status: 'needs_attention', detail: `push-probe failed (${reason}): ${detail}` });
     } else {
-      push('verify', { status: 'ok', detail: 'push-probe ok — push auth confirmed' });
+      push('verify', { status: 'ok', detail: `push-probe ok — push auth confirmed against ${remote}` });
       // Commit the durability scaffolding (helper + rules) — real content, the
       // genuine end-to-end proof (no synthetic heartbeat). No-op when unchanged.
-      const committed = commitScaffolding(repoPath, branch, redact);
+      const committed = commitScaffolding(repoPath, branch, redact, remote);
       if (committed) push('commit', committed);
-      clean = headMatchesOrigin(repoPath, branch);
+      clean = headMatchesRemote(repoPath, remote, branch);
     }
   } else if (dryRun) {
     push('verify', { status: 'skipped', detail: 'dry-run' });
@@ -725,7 +760,7 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
   return { source_id: sourceId, repo_path: repoPath, branch, steps, missing, fixed, needs_attention, clean_against_origin: clean };
 }
 
-function commitScaffolding(repoPath: string, branch: string, redact: (s: string) => string): { status: StepStatus; detail: string } | null {
+function commitScaffolding(repoPath: string, branch: string, redact: (s: string) => string, remote: string): { status: StepStatus; detail: string } | null {
   // Stage only the durability artifacts we manage — never a blind add.
   const paths: string[] = [HELPER_REL];
   const resolver = findResolverFile(repoPath);
@@ -743,19 +778,19 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
     ], {
       stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
     });
-    execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', 'origin', `HEAD:${branch}`], {
+    execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', remote, `HEAD:${branch}`], {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, env: { ...process.env, ...GIT_ENV_AUTH },
     });
-    return { status: 'fixed', detail: 'committed + pushed durability scaffolding' };
+    return { status: 'fixed', detail: `committed + pushed durability scaffolding to ${remote}` };
   } catch (e) {
     return { status: 'needs_attention', detail: redact(`scaffolding commit/push failed: ${(e as Error).message.slice(0, 140)}`) };
   }
 }
 
-function headMatchesOrigin(repoPath: string, branch: string): boolean {
+function headMatchesRemote(repoPath: string, remoteName: string, branch: string): boolean {
   try {
     const local = headSha(repoPath);
-    const remote = execFileSync('git', ['-C', repoPath, 'rev-parse', `origin/${branch}`], {
+    const remote = execFileSync('git', ['-C', repoPath, 'rev-parse', `${remoteName}/${branch}`], {
       stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
     }).toString().trim();
     return !!local && local === remote;

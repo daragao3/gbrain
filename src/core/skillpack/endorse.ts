@@ -18,6 +18,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
+import { noPushRemoteMessage, resolvePushRemote } from '../git-remote.ts';
 import {
   ENDORSEMENTS_SCHEMA_VERSION,
   REGISTRY_SCHEMA_VERSION,
@@ -51,6 +52,8 @@ export interface EndorseResult {
   endorsements_path: string;
   commit_sha: string | null;
   pushed: boolean;
+  /** Remote the push targeted — resolved from config, never assumed `origin`. */
+  push_remote: string | null;
   dry_run: boolean;
 }
 
@@ -168,6 +171,7 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
       endorsements_path: endPath,
       commit_sha: null,
       pushed: false,
+      push_remote: null,
       dry_run: true,
     };
   }
@@ -199,12 +203,31 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
   }
 
   let pushed = false;
+  let pushRemote: string | null = null;
   if (opts.push) {
+    // NEVER hardcode `origin`: registryRepoRoot is caller-supplied (defaults to
+    // the CWD) and a registry contributor's clone is fork-shaped — `origin` is
+    // the upstream registry they cannot and must not push to.
+    let branch: string | null = null;
     try {
-      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', 'origin', 'HEAD'], {
+      branch = execFileSync('git', ['-C', opts.registryRepoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+        encoding: 'utf-8',
+      }).trim() || null;
+    } catch { /* detached or no commits — resolve without a branch */ }
+    if (branch === 'HEAD') branch = null;
+    const remote = resolvePushRemote(opts.registryRepoRoot, branch);
+    if (!remote) {
+      throw new EndorseError(
+        `git push failed: ${noPushRemoteMessage(branch)}`,
+        'git_push_failed',
+      );
+    }
+    try {
+      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', remote, 'HEAD'], {
         encoding: 'utf-8',
       });
       pushed = true;
+      pushRemote = remote;
     } catch (err) {
       throw new EndorseError(
         `git push failed: ${(err as Error).message}`,
@@ -221,6 +244,7 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
     endorsements_path: endPath,
     commit_sha: commitSha,
     pushed,
+    push_remote: pushRemote,
     dry_run: false,
   };
 }

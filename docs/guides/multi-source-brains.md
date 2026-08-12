@@ -235,13 +235,21 @@ What hardening guarantees:
   commits and pushes atomically and refuses to report success without a
   confirmed push. The post-commit hook is a best-effort background fallback;
   the helper is the guarantee.
+- **Push goes where the repo belongs.** The remote is resolved from git
+  config — `branch.<b>.pushRemote`, `remote.pushDefault`, the branch's
+  remote, the trunk's remote, a sole remote, then `origin` only when the
+  repo has one. A brain repo is your own working tree and may be a checkout
+  copied from another project, where `origin` is that other project. When
+  nothing resolves, hardening reports `no_remote` rather than guessing.
 - **No silent staleness.** A 30-minute background pull keeps an idle session
   current. It runs DB-free, so it never contends with a live brain for the
   PGLite single-writer lock.
 
 Flags: `--no-cron` skips the scheduled pull, `--no-verify` skips the push
 probe, `--dry-run` reports what would change, `--json` emits a machine
-report, `--all` hardens every source with a remote (same-account only).
+report, `--all` hardens every source that has a local git repo, including
+ones registered with `--path` that gbrain did not clone (one PAT is refused
+across multiple hosts).
 `--no-harden` on `sources add` opts out of auto-harden.
 
 Security: the push automation is installed locally per machine (never
