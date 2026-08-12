@@ -2,6 +2,65 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.92.0] - 2026-08-12
+
+**Ten database upgrade steps could not recover from a half-built index, and they failed at exactly the moment they were written to help.**
+
+When GBrain adds a database index to a large brain, it builds it in the background so your writes keep working while the build runs. If that build is interrupted, the database leaves behind a half-finished index under the same name. Nothing uses it, but its name is taken, so the next attempt to build the real one cannot proceed. Every upgrade step that builds an index this way was written to clear the leftover first.
+
+The clearing step was written in a form the database refuses. Postgres will not remove a background-built index from inside a stored block of code, and the cleanup was wrapped in one. The wrapper only ran when a leftover was actually found, so the failure landed on precisely the brains that needed the cleanup, and stayed invisible on every brain that did not. Upgrading such a brain stopped with an error about removing an index from a function, which does not read like a leftover index at all.
+
+Eleven upgrade steps build an index this way. One was reported and fixed earlier; the other ten carried the same broken form until now. Only brains on Postgres that have had an index build interrupted were ever affected, which is why this went unnoticed for so long. The embedded database GBrain uses by default has no such thing as a half-built index and was never affected.
+
+All eleven now share a single cleanup routine: it checks whether the leftover exists as a plain query, and removes it as its own statement rather than from inside a wrapper.
+
+### How to use it
+
+Nothing to run. Upgrade and the next `gbrain migrate` clears any leftover and finishes the step it was blocking.
+
+If an upgrade previously stopped on one of these steps, re-run it:
+
+```bash
+gbrain migrate
+```
+
+To confirm a brain has no half-built indexes left:
+
+```bash
+gbrain doctor
+```
+
+### Things to watch
+
+Steps that already completed are untouched. The cleanup only removes an index the database itself marks as invalid, so a healthy index is never dropped and rebuilt.
+
+The routine runs only on Postgres brains. The embedded default engine takes the plain build path exactly as before.
+
+### Itemized changes
+
+#### Fixed
+- **Ten upgrade steps in `src/core/migrate.ts` now call the shared `dropInvalidConcurrentIndex()` helper** instead of inlining a `DO $$ ... EXECUTE 'DROP INDEX CONCURRENTLY ...' ... END $$;` block: v14 `pages_updated_at_index`, v34 `destructive_guard_columns`, v41 `pages_recency_columns`, v72 `takes_resolved_at_trend_idx_v0_36`, v91 `pages_generation_trigger_and_bookmark`, v96 `facts_extract_conversation_session_index`, v97 `pages_dedup_partial_index`, v103 `migration_impact_log_and_priority_recent_idx`, v104 `pages_atom_source_hash_idx` and v112 `pages_links_extracted_at`. Postgres rejects `CONCURRENTLY` from any function or `EXECUTE` context, so the inline form threw exactly when its guard condition fired. The helper probes `pg_index.indisvalid` as an ordinary application-level query and issues the drop as its own top-level statement. Behavior is otherwise identical: the same index names, the same version arguments, the same ordering ahead of each `CREATE INDEX CONCURRENTLY IF NOT EXISTS`, and the untouched plain-build branch for the embedded engine.
+
+#### Tests
+- **`test/migrate.test.ts` gains "#1178: invalid-remnant cleanup is delegated to the shared helper everywhere"**: one case per index-building step asserting the helper call, the absence of the rejected form, and that cleanup still precedes the build. A class-level case asserts no step anywhere issues the drop from an `EXECUTE`, and a coverage case compares the set of background-built indexes against the set of cleanup calls, so a new step added without one fails rather than shipping the bug again.
+- **The v14 source assertion was updated** to the delegated shape, matching the pair that already guarded v66.
+
+## To take advantage of v0.42.92.0
+
+Nothing to run for a healthy brain. The fix applies on upgrade.
+
+If an upgrade previously stopped with an error about removing an index from a function, re-run it. It now clears the leftover and finishes:
+
+```bash
+gbrain migrate
+```
+
+If you are unsure whether a brain is carrying a half-built index, ask it:
+
+```bash
+gbrain doctor
+```
+
 ## [0.42.91.0] - 2026-08-12
 
 **GBrain now works out which repository your work belongs to before it pushes, instead of always pushing to the one named "origin".**
