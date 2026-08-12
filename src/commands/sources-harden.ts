@@ -112,7 +112,9 @@ function renderReport(r: DurabilityReport): void {
     console.log(`  NEEDS ATTENTION:`);
     for (const n of r.needs_attention) console.log(`    - ${n}`);
   }
-  console.log(`  clean against origin: ${r.clean_against_origin ? 'yes' : 'no'}`);
+  // Field name is historical; the comparison is against the RESOLVED push
+  // remote, which is `origin` only when config actually names it.
+  console.log(`  clean against push remote: ${r.clean_against_origin ? 'yes' : 'no'}`);
 }
 
 // ── pull (DB-free when --path is given) ─────────────────────────────────────
