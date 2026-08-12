@@ -29,7 +29,7 @@ import { formatVolunteeredPage } from './core/context/volunteer.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict } from './core/cli-force-exit.ts';
 import { serializeMarkdown } from './core/markdown.ts';
-import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
+import { parseGlobalFlags, setCliOptions, getCliOptions, resolveReadOnlyTimeoutMs } from './core/cli-options.ts';
 import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-client.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
@@ -263,39 +263,13 @@ async function main() {
     markShortLivedCliProcess();
   }
 
-  // T5 — `gbrain search modes|stats|tune` is the read-only config dashboard,
-  // NOT a free-text search for the literal word "modes". Free-text
-  // `gbrain search "<query>"` falls through to the cheap-hybrid `search` op
-  // below (T4). Preserves the v0.41.6.0 read-only connect+dispatch timeout.
+  // Search dashboards must route before shared-operation argument parsing, or
+  // `modes` / `stats` / `tune` are interpreted as free-text queries. They use
+  // the same timeout resolver and executor as ordinary read-only search below.
   if (command === 'search' && ['modes', 'stats', 'tune', 'diagnose'].includes(subArgs[0] ?? '')) {
-    const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
-    const isDiagnose = subArgs[0] === 'diagnose';
-    const label = 'gbrain search';
-    // diagnose runs real retrieval (keyword + vector + hybrid) so it gets a
-    // longer deadline than the read-only dashboard.
-    const timeoutMs = isDiagnose ? 60_000 : 10_000;
-    let engine: BrainEngine;
-    try {
-      engine = await withTimeout(connectEngine(), timeoutMs, `${label}: connect`);
-    } catch (e) {
-      if (e instanceof OperationTimeoutError) { console.error(`${e.label} timed out.`); process.exit(124); }
-      throw e;
-    }
-    try {
-      if (isDiagnose) {
-        const { runSearchDiagnose } = await import('./commands/search-diagnose.ts');
-        await withTimeout(runSearchDiagnose(engine, subArgs), timeoutMs, label);
-      } else {
-        const { runSearch } = await import('./commands/search.ts');
-        await withTimeout(runSearch(engine, subArgs), timeoutMs, label);
-      }
-    } finally {
-      // #2084: `search diagnose` runs real hybrid retrieval (arms search-cache
-      // writes) — route through the shared bounded teardown like every other
-      // one-shot path. The connect-timeout process.exit(124) above is reviewed
-      // and intentionally unchanged: no engine exists at that point.
-      await finishCliTeardown({ engine });
-    }
+    const userTimeoutMs = getCliOptions().timeoutMs;
+    const timeoutMs = resolveReadOnlyTimeoutMs(command, subArgs, userTimeoutMs)!;
+    await executeReadOnlyWithTimeout(command, subArgs, timeoutMs, userTimeoutMs);
     return;
   }
 
@@ -1746,44 +1720,15 @@ async function handleCliOnly(command: string, args: string[]) {
   // covers connectEngine (so a hung schema probe / PgBouncer freeze actually
   // surfaces a timeout) AND the dispatch body (so a wedged runSearch /
   // runList honors the same deadline).
-  // Per-command default: search 30s, sources list 10s. User --timeout=Ns wins.
-  // Other commands (import, embed, doctor, etc.) keep their existing
-  // unbounded connect — destructive / long-running commands shouldn't get
-  // a default kill switch.
-  const readOnlyDefaultTimeoutMs =
-    command === 'search' ? 30_000 :
-    command === 'sources' && (args[0] === 'list' || args[0] === undefined) ? 10_000 :
-    null;
-  const cliOptsResolved = getCliOptions();
-  const userTimeoutMs = cliOptsResolved.timeoutMs;
-  const readOnlyTimeoutMs = userTimeoutMs ?? readOnlyDefaultTimeoutMs;
+  // Per-command defaults: search 30s (diagnose 60s), sources list 10s.
+  // User --timeout=Ns wins. Other commands keep their existing unbounded
+  // connect — destructive / long-running commands should not get a default
+  // kill switch.
+  const userTimeoutMs = getCliOptions().timeoutMs;
+  const readOnlyTimeoutMs = resolveReadOnlyTimeoutMs(command, args, userTimeoutMs);
 
   if (readOnlyTimeoutMs !== null) {
-    const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
-    const label = `gbrain ${command}`;
-    let engine: BrainEngine;
-    try {
-      engine = await withTimeout(connectEngine(), readOnlyTimeoutMs, `${label}: connect`);
-    } catch (e) {
-      if (e instanceof OperationTimeoutError) {
-        const hint = userTimeoutMs ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
-        console.error(`${e.label} timed out${hint}.`);
-        process.exit(124);
-      }
-      throw e;
-    }
-    try {
-      await withTimeout(dispatchReadOnlyCommand(engine, command, args), readOnlyTimeoutMs, label);
-    } catch (e) {
-      if (e instanceof OperationTimeoutError) {
-        const hint = userTimeoutMs ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
-        console.error(`${e.label} timed out${hint}.`);
-        process.exit(124);
-      }
-      throw e;
-    } finally {
-      await finishCliTeardown({ engine });
-    }
+    await executeReadOnlyWithTimeout(command, args, readOnlyTimeoutMs, userTimeoutMs);
     return;
   }
 
@@ -2348,6 +2293,45 @@ async function handleCliOnly(command: string, args: string[]) {
 }
 
 /**
+ * Run one read-only command under a connect + dispatch wall-clock budget.
+ * Search dashboards and ordinary search share this executor so timeout
+ * precedence, messaging, and teardown cannot drift apart.
+ */
+async function executeReadOnlyWithTimeout(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  userTimeoutMs: number | null,
+): Promise<void> {
+  const { withTimeout, OperationTimeoutError } = await import('./core/timeout.ts');
+  const label = `gbrain ${command}`;
+  const reportTimeout = (e: InstanceType<typeof OperationTimeoutError>) => {
+    const hint = userTimeoutMs !== null ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
+    console.error(`${e.label} timed out${hint}.`);
+    process.exit(124);
+  };
+
+  let engine: BrainEngine;
+  try {
+    engine = await withTimeout(connectEngine(), timeoutMs, `${label}: connect`);
+  } catch (e) {
+    if (e instanceof OperationTimeoutError) reportTimeout(e);
+    throw e;
+  }
+  try {
+    await withTimeout(dispatchReadOnlyCommand(engine, command, args), timeoutMs, label);
+  } catch (e) {
+    if (e instanceof OperationTimeoutError) reportTimeout(e);
+    throw e;
+  } finally {
+    // #2084: `search diagnose` runs real hybrid retrieval (arms search-cache
+    // writes) — route through the shared bounded teardown like every other
+    // one-shot path.
+    await finishCliTeardown({ engine });
+  }
+}
+
+/**
  * v0.41.6.0 D3: dispatch helper for the read-only commands that take a
  * default wallclock timeout (`gbrain search`, `gbrain sources list`).
  * Keeps the timeout-wrap site in main() small and the per-command
@@ -2357,8 +2341,13 @@ async function handleCliOnly(command: string, args: string[]) {
 async function dispatchReadOnlyCommand(engine: BrainEngine, command: string, args: string[]): Promise<void> {
   switch (command) {
     case 'search': {
-      const { runSearch } = await import('./commands/search.ts');
-      await runSearch(engine, args);
+      if (args[0] === 'diagnose') {
+        const { runSearchDiagnose } = await import('./commands/search-diagnose.ts');
+        await runSearchDiagnose(engine, args);
+      } else {
+        const { runSearch } = await import('./commands/search.ts');
+        await runSearch(engine, args);
+      }
       return;
     }
     case 'sources': {

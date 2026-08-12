@@ -138,6 +138,22 @@ export function parseTimeout(s: string): number | null {
   return Math.floor(ms);
 }
 
+/**
+ * Resolve the wall-clock budget for read-only CLI paths. Dashboard search
+ * commands share ordinary search's default; diagnose gets a larger retrieval
+ * budget. A user-supplied --timeout always wins.
+ */
+export function resolveReadOnlyTimeoutMs(
+  command: string,
+  args: string[],
+  userTimeoutMs: number | null,
+): number | null {
+  if (userTimeoutMs !== null) return userTimeoutMs;
+  if (command === 'search') return args[0] === 'diagnose' ? 60_000 : 30_000;
+  if (command === 'sources' && (args[0] === 'list' || args[0] === undefined)) return 10_000;
+  return null;
+}
+
 function parseInterval(s: string): number | null {
   const n = Number(s);
   if (!Number.isFinite(n) || n < 0) return null;

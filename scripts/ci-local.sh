@@ -24,6 +24,41 @@ cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="docker-compose.ci.yml"
 
+# Keep all four logical shards, but bound how many Bun/PGLite workers retain
+# WASM commitment at once. Process exit between unit chunks is the reclamation
+# boundary; this concurrency cap only bounds aggregate peak commitment.
+GBRAIN_CI_PARALLELISM="${GBRAIN_CI_PARALLELISM:-2}"
+if ! printf '%s' "$GBRAIN_CI_PARALLELISM" | grep -qE '^[1-4]$'; then
+  echo "[ci-local] ERROR: GBRAIN_CI_PARALLELISM must be an integer between 1 and 4 (got '$GBRAIN_CI_PARALLELISM')." >&2
+  exit 1
+fi
+
+# Forwarded to the runner as GBRAIN_TEST_CHUNK_SIZE; scripts/run-unit-shard.sh
+# splits each shard's file list into groups of this size.
+GBRAIN_CI_UNIT_CHUNK_SIZE="${GBRAIN_CI_UNIT_CHUNK_SIZE:-25}"
+if ! printf '%s' "$GBRAIN_CI_UNIT_CHUNK_SIZE" | grep -qE '^[1-9][0-9]*$'; then
+  echo "[ci-local] ERROR: GBRAIN_CI_UNIT_CHUNK_SIZE must be a positive integer (got '$GBRAIN_CI_UNIT_CHUNK_SIZE')." >&2
+  exit 1
+fi
+
+# bunfig's test preload pins legacy fixtures to 1536 dimensions. The PGLite
+# snapshot must carry the same shape, and its cache identity includes this value.
+# Reserved + validated here; build-pglite-snapshot.ts currently single-sources
+# both from LEGACY_EMBEDDING_CONFIG and exposes no override flag, so setting
+# these does not yet change the fixture that gets built.
+GBRAIN_CI_PGLITE_SNAPSHOT_DIMENSIONS="${GBRAIN_CI_PGLITE_SNAPSHOT_DIMENSIONS:-1536}"
+if ! printf '%s' "$GBRAIN_CI_PGLITE_SNAPSHOT_DIMENSIONS" | grep -qE '^[1-9][0-9]*$'; then
+  echo "[ci-local] ERROR: GBRAIN_CI_PGLITE_SNAPSHOT_DIMENSIONS must be a positive integer (got '$GBRAIN_CI_PGLITE_SNAPSHOT_DIMENSIONS')." >&2
+  exit 1
+fi
+# `-` (not `:-`) so the default applies only when UNSET. An explicitly empty
+# value must reach the guard below rather than being silently defaulted away.
+GBRAIN_CI_PGLITE_SNAPSHOT_MODEL="${GBRAIN_CI_PGLITE_SNAPSHOT_MODEL-openai:text-embedding-3-large}"
+if [ -z "$GBRAIN_CI_PGLITE_SNAPSHOT_MODEL" ]; then
+  echo "[ci-local] ERROR: GBRAIN_CI_PGLITE_SNAPSHOT_MODEL must not be empty." >&2
+  exit 1
+fi
+
 DIFF=0
 NO_PULL=0
 CLEAN=0
@@ -124,10 +159,11 @@ fi
 gitleaks dir . --redact --no-banner
 gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
 
-# Step 1: pull. Refreshes pgvector + oven/bun:1 (both are `image:` not `build:`).
+# Step 1: pull. Refreshes pgvector + oven/bun:1. --ignore-buildable keeps the
+# pull a no-op for any service that grows a `build:` stanza later.
 if [ "$NO_PULL" = "0" ]; then
   echo "[ci-local] Pulling base images (use --no-pull to skip)..."
-  docker compose -f "$COMPOSE_FILE" pull 2>&1 | tail -5
+  docker compose -f "$COMPOSE_FILE" pull --ignore-buildable 2>&1 | tail -5
 fi
 
 # Step 2: 4 postgres shards up + wait for healthy.
@@ -218,7 +254,8 @@ bash scripts/run-e2e.sh'
   fi
 else
   # Tier 1 sharded path. Each shard runs unit+E2E sequentially against its
-  # own postgres-N. Shards run in parallel via xargs -P4.
+  # own postgres-N. All four logical shards run with bounded concurrency
+  # (GBRAIN_CI_PARALLELISM, default 2).
   if [ "$DIFF" = "1" ]; then
     DIFF_E2E_PREP='SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -248,9 +285,9 @@ export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
 mkdir -p /tmp/shard-logs
-echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
+echo \"[runner] Tier 1: 4 logical unit + E2E shards (parallelism=$GBRAIN_CI_PARALLELISM, unit chunk size=$GBRAIN_CI_UNIT_CHUNK_SIZE)\"
 set +e
-printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
+printf '%s\\n' 1 2 3 4 | xargs -P\"$GBRAIN_CI_PARALLELISM\" -I{} sh -c '
   shard=\$1
   log=/tmp/shard-logs/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log
@@ -352,7 +389,9 @@ if [ -f .git ]; then
 fi
 
 echo "[ci-local] Running checks inside runner container..."
-docker compose -f "$COMPOSE_FILE" run --rm "${EXTRA_MOUNTS[@]}" runner bash -c "$INNER_CMD"
+docker compose -f "$COMPOSE_FILE" run --rm \
+  -e "GBRAIN_TEST_CHUNK_SIZE=$GBRAIN_CI_UNIT_CHUNK_SIZE" \
+  "${EXTRA_MOUNTS[@]}" runner bash -c "$INNER_CMD"
 
 echo ""
 echo "[ci-local] All checks passed."

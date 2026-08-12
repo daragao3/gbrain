@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { parseGlobalFlags, cliOptsToProgressOptions, DEFAULT_CLI_OPTIONS, setCliOptions, getCliOptions, _resetCliOptionsForTest } from '../src/core/cli-options.ts';
+import { parseGlobalFlags, cliOptsToProgressOptions, DEFAULT_CLI_OPTIONS, setCliOptions, getCliOptions, _resetCliOptionsForTest, resolveReadOnlyTimeoutMs } from '../src/core/cli-options.ts';
 
 describe('parseGlobalFlags', () => {
   test('empty argv → defaults, empty rest', () => {
@@ -179,6 +179,31 @@ describe('cliOptsToProgressOptions', () => {
 });
 
 // v0.31.1: --timeout flag tests
+describe('read-only timeout policy', () => {
+  test('search dashboard commands share the 30s search default', () => {
+    expect(resolveReadOnlyTimeoutMs('search', ['modes'], null)).toBe(30_000);
+    expect(resolveReadOnlyTimeoutMs('search', ['stats'], null)).toBe(30_000);
+    expect(resolveReadOnlyTimeoutMs('search', ['tune'], null)).toBe(30_000);
+    expect(resolveReadOnlyTimeoutMs('search', ['anything'], null)).toBe(30_000);
+  });
+
+  test('search diagnose retains its 60s retrieval default', () => {
+    expect(resolveReadOnlyTimeoutMs('search', ['diagnose'], null)).toBe(60_000);
+  });
+
+  test('an explicit user timeout wins for every search path', () => {
+    expect(resolveReadOnlyTimeoutMs('search', ['modes'], 12_345)).toBe(12_345);
+    expect(resolveReadOnlyTimeoutMs('search', ['diagnose'], 12_345)).toBe(12_345);
+  });
+
+  test('sources list retains 10s while unrelated commands stay unbounded', () => {
+    expect(resolveReadOnlyTimeoutMs('sources', ['list'], null)).toBe(10_000);
+    expect(resolveReadOnlyTimeoutMs('sources', [], null)).toBe(10_000);
+    expect(resolveReadOnlyTimeoutMs('sources', ['pull'], null)).toBeNull();
+    expect(resolveReadOnlyTimeoutMs('doctor', [], null)).toBeNull();
+  });
+});
+
 describe('--timeout flag', () => {
   test('--timeout=30s → 30000ms', () => {
     const r = parseGlobalFlags(['--timeout=30s', 'search', 'X']);

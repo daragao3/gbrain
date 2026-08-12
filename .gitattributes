@@ -14,3 +14,6 @@
 # through bash. `eol=lf` pins the checkout regardless of the user's
 # core.autocrlf setting.
 *.sh text eol=lf
+
+# The parser accepts CRLF, but keep the repository-owned baseline canonical.
+scripts/check-test-isolation.allowlist text eol=lf
