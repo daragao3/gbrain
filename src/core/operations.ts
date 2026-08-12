@@ -897,11 +897,6 @@ const putPageAllowEmptyParam: ParamDef = {
 // Placeholder-truncation guard (2026-08-10 KB incident). Shared by put_page and
 // put_page_conditional: the guard is a content-sanity refusal independent of any
 // write precondition, so a conditional write must be able to opt out the same way.
-const putPageAllowEmptyParam: ParamDef = {
-  type: 'boolean',
-  required: false,
-  description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.',
-};
 const putPageAllowTruncationParam: ParamDef = {
   type: 'boolean',
   required: false,
