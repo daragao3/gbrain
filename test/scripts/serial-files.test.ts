@@ -61,12 +61,18 @@ describe('run-serial-tests.sh contract', () => {
     expect(src).toMatch(/bun test\s+--max-concurrency=1/);
   });
 
-  it('builds the gitignored snapshot fixture and extends only its timeout', () => {
+  it('builds the gitignored snapshot fixture when stale and extends only its timeout', () => {
     const src = readFileSync(SERIAL_SH, 'utf-8');
     expect(src).toMatch(/test_timeout=60000/);
+    // The build must stay conditional (--if-stale), not unconditional. The test
+    // throws `snapshot fixture stale` at module scope and cannot degrade to a
+    // cold init, so the rebuild has to remain guaranteed — but rebuilding an
+    // already-current fixture costs a full PGLite boot plus ~120 migrations on
+    // every run. --if-stale keeps the guarantee and makes the common case a no-op.
     expect(src).toMatch(
-      /test\/pglite-snapshot-file-seeding\.serial\.test\.ts[\s\S]*test_timeout=900000[\s\S]*bun run build:pglite-snapshot/,
+      /test\/pglite-snapshot-file-seeding\.serial\.test\.ts[\s\S]*test_timeout=900000[\s\S]*bun run scripts\/build-pglite-snapshot\.ts --if-stale/,
     );
+    expect(src).not.toMatch(/bun run build:pglite-snapshot\b/);
     expect(src).toMatch(/--timeout="\$test_timeout"/);
   });
 

@@ -14,12 +14,14 @@
   invoked with no args, and reject unknown flags rather than treating them as paths.
   Where: `scripts/run-serial-tests.sh` (the file-list block and the arg parse near
   `--dry-run-list`).
-- [ ] **P3 — the full 95-file serial suite is unexercised on this change.** v0.42.84.0
-  switched the runner's fixture step to `--if-stale` and verified
-  `test/pglite-snapshot-file-seeding.serial.test.ts` directly (1 pass / 0 fail, 115.44s),
-  but the whole serial sweep was not run end to end, because it costs about an hour on a
-  loaded Windows machine and the argv gap above makes a scoped run impossible without
-  editing the script. Worth one full sweep on a quiet machine, or after the argv fix lands.
+- [x] **P3 — exercise the full 95-file serial suite against the `--if-stale` change.** Done
+  by CI. The `serial-tests` job in `.github/workflows/test.yml` runs `bun run test:serial`
+  (`bash scripts/run-serial-tests.sh`, the whole 95-file sweep) on ubuntu-latest with a
+  15-minute budget, and it passed on this change. Locally the sweep is impractical: it
+  costs roughly an hour on a loaded Windows machine, and the argv gap above makes a scoped
+  run impossible without editing the script, so `test/pglite-snapshot-file-seeding.serial.test.ts`
+  was verified directly instead (1 pass / 0 fail, 115.44s). Linux CI is the gate for the
+  full sweep.
 ## v0.42.83.0 follow-ups (machine-global config repoint guard)
 
 - [ ] **P2 — Identify the caller the audit log names, then fix it at the source.** The
