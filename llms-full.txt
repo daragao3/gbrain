@@ -318,6 +318,18 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   that already exist and NEVER create an edge from one. Also guarded by the
   `entity_dirs_orphaned_edges` doctor check and the `gbrain config set/unset` preflight;
   detail in `docs/architecture/KEY_FILES.md`.
+- **Never hardcode `origin` as a push remote.** Every push site takes a CALLER-SUPPLIED repo —
+  `sources.local_path` (`sources add --path` fills it with the user's OWN unowned tree;
+  `harden --all` sweeps them) and the skillpack registry root (defaults to CWD) — and those are
+  routinely fork-shaped, where `origin` is an upstream the user must not write to. Go through
+  `resolvePushRemote` (`src/core/git-remote.ts`): `branch.<b>.pushRemote` → `remote.pushDefault`
+  → `branch.<b>.remote` → `branch.{main,master}.remote` → sole remote → `origin` only if it
+  exists, each value filtered against `git remote` (a value may be a URL); null → refuse.
+  Paired READS move with the push or the fix defeats itself: a rebase-retry's `pull --rebase`,
+  any `<remote>/<branch>` comparison. Generated shell mirrors the chain (`brain_remote`). Pinned
+  by `test/git-push-remote.serial.test.ts` (real bare upstream+fork repos, so a regression is
+  commits in the wrong repo, not an argv assertion). Standalone fetch paths still say `origin`
+  (`TODOS` v0.42.91.0).
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by

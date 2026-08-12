@@ -1,5 +1,22 @@
 # TODOS
 
+## v0.42.91.0 follow-ups (push remote resolved from config)
+
+- [ ] **P2 — fetch paths still name `origin`, so a fork-shaped brain repo pulls the
+  wrong lineage.** Follow-up from v0.42.91.0. `divergenceSafePull` and `fetchRemote`
+  in `src/core/git-remote.ts` fetch and `pull --rebase` against the literal `origin`,
+  as does the `--path` cron form behind `gbrain sources pull`. v0.42.91.0 moved every
+  push (and the reads paired directly with a push: the rebase-retry inside the
+  generated `brain_push`, and the `<remote>/<branch>` cleanliness comparison) onto
+  `resolvePushRemote`, but deliberately left the standalone fetch paths alone — they
+  do not send commits anywhere, so they are a different risk profile and were out of
+  that change's scope. The gap only bites once a brain repo's fork and upstream
+  diverge: the durability cron would then rebase the user's work onto the upstream's
+  lineage every 30 minutes while pushes correctly go to the fork. Wants its own pass
+  deciding whether fetch should follow the same resolver or a separate
+  `resolveConfiguredRemote(..., {push: false})` reading, plus a regression test with
+  the two bare repos genuinely diverged (equal trunks cannot discriminate).
+
 ## v0.42.85.0 follow-ups (Tier 3 fixture staleness)
 
 - [x] **P3 — `scripts/run-serial-tests.sh` silently ignored a file path passed on argv.**
