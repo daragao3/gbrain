@@ -189,6 +189,16 @@ bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
+echo "[runner] Tier 3: PGLite snapshot fixture (cached across reruns, rebuilt when stale)"
+# Same fixture the sharded arm builds. It is an optimization, not a correctness
+# gate: the engine falls back to a cold init when the fixture is absent or its
+# hash no longer matches. Two reasons it belongs here anyway. This arm runs the
+# whole unit set in ONE process, so it is where replaying ~120 migrations per
+# PGLite file costs the most. And a debug arm that runs cold cannot reproduce a
+# snapshot-seeded failure from the sharded arm, which is the case you are most
+# likely to have reached for --no-shard to investigate.
+bun run scripts/build-pglite-snapshot.ts --if-stale
+export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
 echo "[runner] e2e (unsharded, --diff selected)"
@@ -208,6 +218,10 @@ bash scripts/check-progress-to-stdout.sh
 bash scripts/check-trailing-newline.sh
 bash scripts/check-wasm-embedded.sh
 bun run typecheck
+echo "[runner] Tier 3: PGLite snapshot fixture (cached across reruns, rebuilt when stale)"
+# See the --diff variant above for why the debug arm builds this too.
+bun run scripts/build-pglite-snapshot.ts --if-stale
+export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
 echo "[runner] e2e (unsharded)"

@@ -2,6 +2,65 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.85.0] - 2026-08-11
+
+**The test suite stops rebuilding its database speed-up fixture when the one on disk is already fine, so the slow serial tests start about half a minute sooner every run.**
+
+GBrain's test suite can restore a prebuilt database instead of setting the schema up from scratch for every test file. Building that prebuilt file is slow, because it replays the whole schema plus 120 migrations.
+
+Two places got this wrong in opposite directions. The serial test runner rebuilt the file every single time it ran, even when the copy on disk already matched, so contributors paid the full build over and over for nothing. The `--no-shard` debug mode of the local CI script never built it at all, and never pointed the tests at it, so that mode ran every database test the slow way.
+
+Both now ask for the same thing: build this only if it is out of date. When it is already current the check costs about 5 seconds and does nothing. When it is missing or no longer matches the schema, it rebuilds, so the guarantee the serial test needs is unchanged.
+
+This affects contributors running the test suite. Nothing changes for normal CLI use or for stored brain data.
+
+### How to use it
+
+Nothing to do. The scripts call it for you:
+
+```bash
+bash scripts/run-serial-tests.sh
+```
+
+```bash
+bun run ci:local --no-shard
+```
+
+You can ask for the same check directly:
+
+```bash
+bun run scripts/build-pglite-snapshot.ts --if-stale
+```
+
+### The numbers that matter
+
+Measured on one Windows machine under normal load, from a missing fixture:
+
+| Case | Before | After |
+|---|---|---|
+| Fixture missing or out of date | 40s build | 40s build |
+| Fixture already current | 40s build | 5s check |
+
+The fixture itself is 44 MB and covers 120 migrations. The saving repeats on every run of the serial suite, not just the first.
+
+### Things to watch
+
+`--no-shard` now builds the fixture before it runs, so the first `--no-shard` run after a schema change pays that build once. That is the same cost the sharded path already paid, and it is what makes a `--no-shard` debug run reproduce a failure seen in the sharded run instead of quietly testing a different setup.
+
+### Itemized changes
+
+- `scripts/run-serial-tests.sh`: the fixture step before `test/pglite-snapshot-file-seeding.serial.test.ts` now calls `bun run scripts/build-pglite-snapshot.ts --if-stale` instead of the unconditional `bun run build:pglite-snapshot`. The surrounding failure handling, the failure counter, and the skipped-file list are unchanged. That test throws at load time when the fixture is stale and cannot fall back to a slow start, so the rebuild has to stay guaranteed, and `--if-stale` keeps it.
+- `scripts/ci-local.sh`: both `--no-shard` variants now run the same `--if-stale` build and export `GBRAIN_PGLITE_SNAPSHOT` after `bun run typecheck`, matching what the sharded path already did. The sharded path is unchanged.
+- `docs/TESTING.md`: the Tier 3 section now records that the `--no-shard` arm builds the fixture too, and that `scripts/run-serial-tests.sh` uses the same builder, where it is a correctness requirement rather than a speed-up.
+
+## To take advantage of v0.42.85.0
+
+No action needed. If you have an old fixture lying around from before a schema change, the next run notices and rebuilds it on its own. To force a full rebuild anyway:
+
+```bash
+rm -f test/fixtures/pglite-snapshot.tar test/fixtures/pglite-snapshot.version
+```
+
 ## [0.42.84.0] - 2026-08-11
 
 **The last three ways of writing a reference are now protected from losing their links when you save a page.**
