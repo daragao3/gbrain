@@ -112,7 +112,7 @@ function renderReport(r: DurabilityReport): void {
     console.log(`  NEEDS ATTENTION:`);
     for (const n of r.needs_attention) console.log(`    - ${n}`);
   }
-  console.log(`  clean against origin: ${r.clean_against_origin ? 'yes' : 'no'}`);
+  console.log(`  clean against push remote: ${r.clean_against_origin ? 'yes' : 'no'}`);
 }
 
 // ── pull (DB-free when --path is given) ─────────────────────────────────────

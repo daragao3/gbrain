@@ -22,6 +22,14 @@
  *    repo-controlled script.
  *  - Credential is repo-scoped (local git config), token redacted everywhere
  *    via shell-redact's exact-value scrubber, store file 0600.
+ *  - NO push ever assumes `origin`. `sources harden` accepts any source row
+ *    with a local_path — including `--path` trees gbrain never cloned — so the
+ *    repo can be fork-shaped (origin = an upstream project, the operator's own
+ *    fork under another remote name). In-process pushes resolve via
+ *    `resolvePushRemote`; the generated bash resolves the same order at RUN
+ *    time (the helper is COMMITTED and executes in every clone, each with its
+ *    own remote names). Both REFUSE rather than guess: a local-only commit is
+ *    recoverable, a commit published to a stranger's repo is not.
  *
  * CLI-only by design (writes executables + an OS cron + a credential helper on
  * the host): never exposed over MCP.
