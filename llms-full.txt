@@ -187,7 +187,7 @@ mount, CEO-class with multiple team brains) and
 
 ## Architecture
 
-Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`). CLI and MCP
+Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`; v0.42.87.0 adds `put_page_conditional` — conditional page writes, see the invariant below). CLI and MCP
 server are both generated from this single source. Engine factory (`src/core/engine-factory.ts`)
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
@@ -245,12 +245,28 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   `saveConfig`), not at any individual caller — the writer behind the observed incidents was
   never findable by repo-wide search. It refuses exactly one shape: no `GBRAIN_HOME` plus a
   `database_path` inside `tmpdir()` (containment via `isPathInside`, per the bullet above —
-  never `startsWith`). Sandboxed writes, durable PGLite brains and postgres configs are
-  untouched, so a deliberate migration is never reverted. A refusal appends pid/argv/cwd/stack
-  to `<audit>/config-repoint-refused.jsonl` so the offender names itself from inside its own
-  process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B lever that reproduces
-  pre-fix behavior. New code that writes config goes THROUGH `saveConfig` — never
-  `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
+  never `startsWith`), OR a path carrying the `gbrain-migrate-target-` mkdtemp prefix (the
+  name net, which survives a redirected `TMPDIR` that containment alone would miss). Both
+  sides of the containment test go through `canonicalizeNative` (`path-confine.ts`,
+  `realpathSync.native` — plain `realpathSync` does NOT collapse 8.3 short names), because
+  `isPathInside` is `path.relative()` math and a caller holding `…\GBRAIN~1\…` is otherwise
+  lexically OUTSIDE the long-name `tmpdir()`; that is an identity transform on POSIX and so
+  invisible to ubuntu-only CI. Sandboxed writes, durable PGLite brains and postgres configs
+  are untouched, so a deliberate migration is never reverted. A refusal appends
+  pid/argv/cwd/stack to `<audit>/config-repoint-refused.jsonl` so the offender names itself
+  from inside its own process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B
+  lever that reproduces pre-fix behavior. New code that writes config goes THROUGH
+  `saveConfig` — never `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
+  **Disposition is split on purpose.** `saveConfig` THROWS (`UnsafeConfigWriteError`) because
+  a primitive must fail closed — a silent no-op would let `gbrain init` believe it wrote a
+  config it didn't. `migrate-engine.ts` catches that one error type and converts it into a
+  WITHHELD flip (warning + `setCliExitVerdict(1)`), so a page copy that already finished
+  isn't thrown away. The one shape `saveConfig` structurally cannot see is config-path DRIFT
+  — `GBRAIN_HOME` moving underneath an in-flight run — since it has no concept of run-start;
+  `runMigrateEngine` pins `configPath()` at entry and `unsafeConfigFlipReason` compares, then
+  writes the same audit row via the exported `auditUnsafeConfigWrite` (`kind:
+  'config_path_drift'`). Do NOT re-add a temp-target check in the migrate caller: it would be
+  a second, weaker copy with one caller, no escape hatch and no audit row.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows
@@ -314,6 +330,18 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   Postgres; plain `CREATE INDEX` on PGLite via `sqlFor.pglite`).
 - **Multi-source.** Slug uniqueness is `(source_id, slug)`, not slug. Key batch ops and
   reverse-writes on the composite key; `validateSourceId` before any `source_id` path join.
+- **Page writes are last-writer-wins unless they opt out.** `put_page` overwrites, which is
+  correct for a sole writer and lossy for concurrent ones — there is no trash can for the
+  content and links it removes. A caller that can race uses `put_page_conditional`
+  (`create_only`, or `compare_and_swap` at an `expected_revision`); conflicts come back as
+  typed results (`already_exists`, `revision_mismatch`) carrying the revision actually found
+  and never overwrite. `pages.revision` is maintained by the `bump_page_revision_trg` trigger,
+  NOT by application code, and it counts unconditional writers too — that is precisely what
+  lets a conditional write detect a plain `put_page` that landed underneath it. Never derive
+  the next revision in TypeScript. Migration v126 `page_revision_cas` adds the column
+  (`DEFAULT 1`) and the trigger; `src/schema.sql` carries both for fresh installs, so the two
+  must move together like any other engine-parity change. The op is agent-facing: it carries
+  no `cliHints`, so it appears in `gbrain --tools-json` and over MCP but has no subcommand.
 - **One canonical chat-pricing table.** All paid-cloud chat/completion prices live ONCE in
   `src/core/model-pricing.ts` (`CANONICAL_PRICING` + `canonicalLookup`). Every other table
   (`anthropic-pricing.ts`'s `ANTHROPIC_PRICING`, `takes-quality-eval/pricing.ts`'s

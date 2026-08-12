@@ -8,7 +8,18 @@
  */
 
 import { createEngine } from '../core/engine-factory.ts';
-import { loadConfig, saveConfig, toEngineConfig, gbrainPath, effectiveEnvDatabaseUrl, type GBrainConfig } from '../core/config.ts';
+import {
+  loadConfig,
+  saveConfig,
+  toEngineConfig,
+  gbrainPath,
+  configPath,
+  auditUnsafeConfigWrite,
+  UnsafeConfigWriteError,
+  effectiveEnvDatabaseUrl,
+  type GBrainConfig,
+} from '../core/config.ts';
+import { canonicalizeNative } from '../core/path-confine.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import type { EngineConfig, Page } from '../core/types.ts';
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
@@ -90,6 +101,46 @@ function saveManifest(manifest: MigrateManifest): void {
 function clearManifest(): void {
   const path = getManifestPath();
   if (existsSync(path)) unlinkSync(path);
+}
+
+/**
+ * Reason string when flipping the active config would land on a DIFFERENT
+ * config home than the one this migration started against, or `null` when the
+ * path held still.
+ *
+ * WHY THIS LIVES HERE AND NOT IN `saveConfig`. `saveConfig()` re-resolves
+ * `GBRAIN_HOME` on every call and has no concept of "run start", so it cannot
+ * see this shape at all — by the time it runs, the moved home IS the truth as
+ * far as it can tell. Only the caller can pin the path it started against.
+ * The pin therefore stays in `runMigrateEngine`; only the comparison lives in
+ * this function.
+ *
+ * THE SHAPE. A test sets `GBRAIN_HOME`, launches a migration, then hits its
+ * timeout. Its cleanup deletes `GBRAIN_HOME` while the orphaned migration
+ * promise keeps running — and that promise lands its `saveConfig` on the
+ * machine-global `~/.gbrain/config.json`, repointing the real brain at the
+ * test's throwaway target. Every later `gbrain` read then returns
+ * `page_not_found` against an empty brain, with no error: a silent false
+ * negative indistinguishable from a genuinely deleted page.
+ *
+ * The temp-target half of this guard deliberately does NOT live here — that is
+ * `unsafeGlobalConfigWrite` in `config.ts`, which covers EVERY `saveConfig`
+ * caller, carries the `GBRAIN_ALLOW_TEMP_BRAIN` escape hatch, and writes the
+ * forensic audit row. Duplicating it here would give one caller a second,
+ * weaker copy.
+ *
+ * Paths are compared canonicalized so a Windows 8.3 short-name spelling of the
+ * same directory doesn't read as drift.
+ */
+export function unsafeConfigFlipReason(
+  configPathAtStart: string,
+  configPathNow: string,
+): string | null {
+  if (canonicalizeNative(configPathAtStart) === canonicalizeNative(configPathNow)) return null;
+  return (
+    `the active config path changed mid-migration (started against ${configPathAtStart}, `
+    + `would now write ${configPathNow}). GBRAIN_HOME moved underneath this run`
+  );
 }
 
 interface MigratedSourceRow {
@@ -239,6 +290,15 @@ export interface MigratePageFailure {
 
 export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]): Promise<void> {
   const opts = parseArgs(args);
+  // Pin the config path we started against. `saveConfig()` re-resolves
+  // GBRAIN_HOME at call time, so a run that outlives the env that launched it
+  // (an orphaned promise after a test timeout, say) would otherwise land its
+  // config flip on whatever home is in effect at the end — see
+  // `unsafeConfigFlipReason`.
+  const configPathAtStart = configPath();
+  // Set when the config flip is withheld, so the closing summary doesn't
+  // claim a switch that never happened.
+  let configFlipRefused: string | null = null;
   const config = loadConfig();
   if (!config) {
     console.error('No brain configured. Run: gbrain init');
@@ -463,7 +523,37 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
         ? { database_url: targetConfig.database_url, database_path: undefined }
         : { database_path: targetConfig.database_path, database_url: undefined }),
     };
-    saveConfig(newConfig);
+    // DISPOSITION. `saveConfig` THROWS on an unsafe write — the right call for a
+    // primitive that must fail closed (a silent no-op would let `gbrain init`
+    // believe it wrote a config it didn't). But throwing out of HERE would abort
+    // a migration whose page copy already finished. So the refusal is converted
+    // at this one caller into a withheld flip: the migrated data stands, the
+    // active config is untouched, and the run exits non-zero so it can never
+    // pass for a clean switch.
+    const drifted = unsafeConfigFlipReason(configPathAtStart, configPath());
+    if (drifted) {
+      // `saveConfig` cannot see this shape, so the audit row is written here —
+      // and drift is exactly the case where "which process did this?" is
+      // hardest to answer, the run's launcher having already exited.
+      auditUnsafeConfigWrite(newConfig, drifted, 'config_path_drift');
+      configFlipRefused = drifted;
+    } else {
+      try {
+        saveConfig(newConfig);
+      } catch (err) {
+        // The temp-target refusal from `unsafeGlobalConfigWrite`, which has
+        // already written its own audit row. Anything else is a real failure.
+        if (!(err instanceof UnsafeConfigWriteError)) throw err;
+        configFlipRefused = err.reason;
+      }
+    }
+    if (configFlipRefused) {
+      console.warn(`\nWARNING: config NOT switched to ${opts.targetEngine} — ${configFlipRefused}`);
+      console.warn(`  The migrated data is intact at the target; the active brain is unchanged.`);
+      console.warn(`  If this was deliberate, point the target at a permanent path and re-run,`);
+      console.warn(`  or edit ${configPathAtStart} by hand.`);
+      setCliExitVerdict(1);
+    }
     // Clean up the resume manifest — only safe once nothing is left pending.
     clearManifest();
   }
@@ -473,7 +563,11 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     console.log(`Config NOT switched — still using engine: ${config.engine}. Re-run \`gbrain migrate --to ${opts.targetEngine}\` to retry; already-copied pages resume via the manifest.`);
   } else {
     console.log(`\nMigration complete. ${migrated} pages transferred.`);
-    console.log(`Config updated to engine: ${opts.targetEngine}`);
+    if (configFlipRefused) {
+      console.log(`Config NOT switched — still using engine: ${config.engine} (${configFlipRefused}).`);
+    } else {
+      console.log(`Config updated to engine: ${opts.targetEngine}`);
+    }
   }
   if (failures.length === 0 && config.engine === 'pglite' && config.database_path) {
     console.log(`Original PGLite brain preserved at ${config.database_path} (backup).`);

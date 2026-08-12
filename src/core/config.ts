@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, chmodSync, existsSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import { homedir, tmpdir } from 'os';
-import { isPathInside } from './path-confine.ts';
+import { isPathInside, canonicalizeNative } from './path-confine.ts';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 
 /**
@@ -1124,6 +1124,15 @@ export function isConfigTruthy(raw: unknown): boolean {
 }
 
 /**
+ * The `mkdtemp` prefix `gbrain migrate` and its tests use for a throwaway
+ * target. Matched by NAME as a second net under the `tmpdir()` containment
+ * test, which a redirected `TMPDIR` alone would slip past.
+ */
+const MIGRATE_TARGET_DIR_PREFIX = 'gbrain-migrate-target-';
+/** Anchored at a path separator (or the start) so it can't match mid-segment. */
+const MIGRATE_TARGET_DIR_PREFIX_RE = new RegExp(`(^|[\\\\/])${MIGRATE_TARGET_DIR_PREFIX}`, 'i');
+
+/**
  * Reason string when `config` would repoint the MACHINE-GLOBAL brain at a
  * throwaway directory, or `null` when the write is safe.
  *
@@ -1150,6 +1159,23 @@ export function isConfigTruthy(raw: unknown): boolean {
  *     legitimate configuration and is left alone;
  *   - only "machine-global config + brain inside the OS temp dir" is refused.
  *
+ * TWO WAYS A NAIVE `tmpdir()` CONTAINMENT TEST IS DEFEATED, both closed here:
+ *
+ *   1. **Windows 8.3 short names.** `isPathInside` is pure `path.relative()`
+ *      math, so a caller holding `C:\Users\DIEGO~1\AppData\Local\Temp\...`
+ *      is lexically OUTSIDE the `C:\Users\diego\...` spelling `tmpdir()`
+ *      returns, and the fence reads `false`. Both sides go through
+ *      `canonicalizeNative` (`realpathSync.native`; plain `realpathSync` does
+ *      NOT collapse short names) so the two spellings compare equal. This is
+ *      an identity transform on POSIX, hence invisible to ubuntu-only CI —
+ *      and the short form is live on exactly the machine where the observed
+ *      incidents happened.
+ *
+ *   2. **A redirected `TMPDIR`/`TEMP`.** If the migration ran under one temp
+ *      root and `saveConfig` resolves `tmpdir()` to another, containment finds
+ *      nothing. The mkdtemp prefix (`gbrain-migrate-target-`) is therefore
+ *      matched by NAME as well: no durable brain is ever named that.
+ *
  * `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out for the rare deliberate case.
  */
 export function unsafeGlobalConfigWrite(config: GBrainConfig): string | null {
@@ -1162,13 +1188,19 @@ export function unsafeGlobalConfigWrite(config: GBrainConfig): string | null {
   const dbPath = config.database_path;
   if (!dbPath) return null;
 
-  // Lexical containment via the shared helper. NEVER hand-roll this as
+  // Lexical containment via the shared helper, over canonicalized (short-name-
+  // collapsed) paths. NEVER hand-roll this as
   // `dbPath.startsWith(tmpdir() + '/')` — see `path-confine.ts` for why that
   // spelling is invisible to POSIX-only CI and dead on Windows.
-  if (!isPathInside(dbPath, tmpdir())) return null;
+  const insideTemp = isPathInside(canonicalizeNative(dbPath), canonicalizeNative(tmpdir()));
+  const namedMigrateTarget = MIGRATE_TARGET_DIR_PREFIX_RE.test(dbPath);
+  if (!insideTemp && !namedMigrateTarget) return null;
 
+  const why = insideTemp
+    ? `a temporary directory`
+    : `a throwaway '${MIGRATE_TARGET_DIR_PREFIX}' migration target`;
   return (
-    `refusing to repoint the machine-global brain at a temporary directory.\n` +
+    `refusing to repoint the machine-global brain at ${why}.\n` +
     `  config: ${configPath()}\n` +
     `  target: ${dbPath}\n` +
     `  temp:   ${tmpdir()}\n` +
@@ -1179,18 +1211,41 @@ export function unsafeGlobalConfigWrite(config: GBrainConfig): string | null {
   );
 }
 
+/** Thrown by `saveConfig` when `unsafeGlobalConfigWrite` refuses the write. */
+export class UnsafeConfigWriteError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`[gbrain] ${reason}`);
+    this.name = 'UnsafeConfigWriteError';
+    this.reason = reason;
+  }
+}
+
 /**
  * Append one JSONL row naming the process that attempted an unsafe write, so
  * the offender is identified even if it swallows the thrown error. Best-effort:
  * never throws, never blocks the refusal.
+ *
+ * Exported because `saveConfig` is not the only place a config repoint gets
+ * refused: `migrate-engine.ts` withholds the flip when the config path DRIFTED
+ * mid-run (see `unsafeConfigFlipReason` there), a shape `saveConfig` cannot see
+ * because it has no concept of run-start. Drift is precisely the case where
+ * "which process did this?" is hardest to answer — the run that started it is
+ * an orphan of a caller that already exited — so it writes the same
+ * `<audit>/config-repoint-refused.jsonl` row, discriminated by `kind`.
  */
-function auditUnsafeConfigWrite(config: GBrainConfig, reason: string): void {
+export function auditUnsafeConfigWrite(
+  config: GBrainConfig,
+  reason: string,
+  kind: 'temp_target' | 'config_path_drift' = 'temp_target',
+): void {
   try {
     const dir = process.env.GBRAIN_AUDIT_DIR || join(configDir(), 'audit');
     mkdirSync(dir, { recursive: true });
     const row = {
       ts: new Date().toISOString(),
       event: 'refused_global_config_repoint',
+      kind,
       pid: process.pid,
       ppid: typeof process.ppid === 'number' ? process.ppid : null,
       argv: process.argv,
@@ -1212,7 +1267,7 @@ export function saveConfig(config: GBrainConfig): void {
   const unsafe = unsafeGlobalConfigWrite(config);
   if (unsafe) {
     auditUnsafeConfigWrite(config, unsafe);
-    throw new Error(`[gbrain] ${unsafe}`);
+    throw new UnsafeConfigWriteError(unsafe);
   }
   mkdirSync(getConfigDir(), { recursive: true });
   writeFileSync(getConfigPath(), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });

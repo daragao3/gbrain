@@ -16,12 +16,14 @@ import {
   symlinkSync, unlinkSync, chmodSync, lstatSync, readdirSync, type Stats,
 } from 'fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'os';
 import {
   isTrustedDotfile, isPathContained, realpathOrResolve, isWriteTargetContained,
+  canonicalizeNative, isPathInside,
 } from '../src/core/path-confine.ts';
+import { shortPathOrNull } from './helpers/short-path.ts';
 import { validateSlug } from '../src/core/utils.ts';
 import { resolveSourceId } from '../src/core/source-resolver.ts';
 import { resolveBrainId } from '../src/core/brain-resolver.ts';
@@ -355,6 +357,64 @@ describe('isWriteTargetContained', () => {
     mkdirSync(join(root, 'real'));
     symlinkSync(join(root, 'real'), join(root, 'link'), 'dir');
     expect(isWriteTargetContained(join(root, 'link', 'page.md'), root)).toBe(true);
+  });
+});
+
+// ── canonicalizeNative (short-name-collapsing canonicalization) ──────────
+
+describe('canonicalizeNative', () => {
+  test('an existing directory canonicalizes to an absolute path that still names it', () => {
+    const root = scratch();
+    const out = canonicalizeNative(root);
+    expect(isAbsolute(out)).toBe(true);
+    expect(isPathInside(out, canonicalizeNative(root))).toBe(true);
+  });
+
+  test('a not-yet-created leaf keeps its tail and stays inside its existing ancestor', () => {
+    // `realpathSync.native` requires the path to exist; a migration target's
+    // leaf typically does not yet, while its mkdtemp parent does. The tail must
+    // survive the walk-up, or containment would be judged on the parent alone.
+    const root = scratch();
+    const out = canonicalizeNative(join(root, 'nope', 'brain.pglite'));
+    expect(out.endsWith(join('nope', 'brain.pglite'))).toBe(true);
+    expect(isPathInside(out, canonicalizeNative(root))).toBe(true);
+  });
+
+  test('a wholly nonexistent path degrades to a lexical resolve rather than throwing', () => {
+    const p = join(scratch(), '..', 'no-such-root-xyz', 'a', 'b');
+    expect(() => canonicalizeNative(p)).not.toThrow();
+    expect(isAbsolute(canonicalizeNative(p))).toBe(true);
+  });
+
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)('a symlinked ancestor is resolved through', () => {
+    const root = scratch();
+    const outside = scratch('cn-outside-');
+    symlinkSync(outside, join(root, 'link'), 'dir');
+    // The whole point: the canonical form names the real directory, so a
+    // containment test can't be fooled by the symlinked spelling.
+    expect(isPathInside(canonicalizeNative(join(root, 'link', 'x')), canonicalizeNative(outside))).toBe(true);
+    expect(isPathInside(canonicalizeNative(join(root, 'link', 'x')), canonicalizeNative(root))).toBe(false);
+  });
+
+  test.skipIf(process.platform !== 'win32')('collapses a Windows 8.3 short name to the long form', () => {
+    // The gap this helper exists to close: `...\GBRAIN~1\...` and
+    // `...\gbrain-canon-longname-abc\...` name the same directory, but
+    // `path.relative()` — and plain `realpathSync` — treat them as unrelated.
+    // POSIX has no 8.3 names, so ubuntu-only CI can never catch a regression
+    // here.
+    const root = scratch('gbrain-canon-longname-');
+    const short = shortPathOrNull(root);
+    if (!short) return; // 8.3 disabled on this volume, or no distinct alias
+    const target = join(short, 'brain.pglite');
+
+    // CONTROL: the lexical test — the one every fence in this file is built on
+    // — genuinely fails here. Without this the assertion below could pass for
+    // the wrong reason and the test would prove nothing.
+    expect(isPathInside(target, root)).toBe(false);
+
+    expect(canonicalizeNative(short).toLowerCase()).toBe(canonicalizeNative(root).toLowerCase());
+    // And the containment fence built on it now holds either spelling.
+    expect(isPathInside(canonicalizeNative(target), canonicalizeNative(root))).toBe(true);
   });
 });
 
