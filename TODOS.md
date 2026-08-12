@@ -20,6 +20,26 @@
   but the whole serial sweep was not run end to end, because it costs about an hour on a
   loaded Windows machine and the argv gap above makes a scoped run impossible without
   editing the script. Worth one full sweep on a quiet machine, or after the argv fix lands.
+## v0.42.83.0 follow-ups (machine-global config repoint guard)
+
+- [ ] **P2 — Identify the caller the audit log names, then fix it at the source.** The
+  guard in `src/core/config.ts` is a tripwire, not a cure: it stops the damage but leaves
+  the offending writer in place, still trying. The writer behind the observed incidents
+  was never identifiable by filesystem search, which is why `auditUnsafeConfigWrite`
+  records argv/cwd/stack to `<config-dir>/audit/config-repoint-refused.jsonl` from inside
+  the offending process. Once a row appears, read the stack, fix that caller to set
+  `GBRAIN_HOME`, and note whether it is in-repo at all. Until a row exists there is
+  nothing actionable, so this stays open pending evidence rather than being investigated
+  speculatively.
+- [ ] **P3 — The guard covers `tmpdir()` only; other silent-repoint shapes are not
+  covered.** A machine-global repoint at a durable-looking path that is nonetheless wrong
+  (a deleted checkout, a mount that will not exist next boot, a per-run directory outside
+  `tmpdir()`) produces the identical silent `page_not_found` failure with no refusal. The
+  narrow shape was chosen deliberately so a legitimate migration is never reverted, and
+  widening it needs a way to tell "durable but wrong" from "durable and intended" that
+  does not guess. Candidate direction: warn-and-confirm on any machine-global
+  `database_path` change to a path that does not already contain a brain, rather than
+  broadening the hard refusal. Files: `src/core/config.ts`.
 
 ## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 

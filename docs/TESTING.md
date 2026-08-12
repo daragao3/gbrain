@@ -212,6 +212,8 @@ await withEnv({ A: '1', B: '2', C: undefined }, fn);
 
 `withEnv` saves the prior value of every key it touches and restores via try/finally — including when the callback throws. **It is cross-test safe but NOT intra-file concurrent-safe.** `process.env` is process-global; two `test.concurrent()` calls in the same file both touching the same key will race. Files using `withEnv` stay outside the `test.concurrent()` codemod's eligibility filter.
 
+**Unsetting `GBRAIN_HOME` makes a `saveConfig` call machine-global.** `configDir()` re-reads the var at call time and falls back to `homedir()`, so a test that clears it is writing the developer's real `~/.gbrain/config.json`, not a sandbox. `saveConfig` fails closed on the one shape that silently destroys a brain — no `GBRAIN_HOME` plus a `database_path` inside `tmpdir()` — and throws instead of writing. Keep `GBRAIN_HOME` pointed at a temp dir for anything that saves config; clear it only to assert the fallback itself, and redirect `USERPROFILE`/`HOME` to a temp dir when you do, so a regression cannot reach the real config. `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out where a test genuinely needs the pre-guard behavior.
+
 #### When to quarantine instead of fix
 
 Rename to `*.serial.test.ts` when:
