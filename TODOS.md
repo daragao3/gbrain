@@ -52,7 +52,7 @@
   the v0.42.84.0 change so a data-loss fix stays reviewable on its own.
   Where: `src/core/link-extraction.ts` (`extractUndeclaredPrefixRefs`, the
   `seen` key).
-## v0.42.88.0 follow-ups (config repoint guard, Windows gaps + flip drift)
+## v0.42.89.0 follow-ups (config repoint guard, Windows gaps + flip drift)
 
 - [ ] **P2 — `buildRetrievalReflexCheck` swallows the real error, so a CI failure names
   nothing.** The whole body sits in one `try`, and the `catch` returns
@@ -108,7 +108,7 @@
   nothing actionable, so this stays open pending evidence rather than being investigated
   speculatively.
 - [ ] **P3 — The guard covers throwaway targets only; other silent-repoint shapes are not
-  covered.** (Narrowed in v0.42.88.0: the check is no longer `tmpdir()` containment alone.
+  covered.** (Narrowed in v0.42.89.0: the check is no longer `tmpdir()` containment alone.
   It canonicalizes both sides with `canonicalizeNative` so a Windows 8.3 short name cannot
   slip past, and separately matches the `gbrain-migrate-target-` mkdtemp prefix by name so
   a redirected `TMPDIR` cannot either. The gap below is unchanged.)

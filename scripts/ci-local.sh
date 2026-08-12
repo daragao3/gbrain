@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="docker-compose.ci.yml"
 source scripts/ci-volume-lifecycle.sh
+source scripts/ci-worktree-mounts.sh
 
 DIFF=0
 NO_PULL=0
@@ -343,30 +344,19 @@ EOF
 )
 INNER_CMD="${INNER_CMD/__RUN_PHASES__/$RUN_PHASES_CMD}"
 
-# Conductor / git-worktree support: when `.git` is a file (not a directory),
-# it points at a host gitdir outside the bind-mount. Without remounting that
-# path, scripts/check-trailing-newline.sh and any other in-container `git`
-# call exits 128 ("not a git repository"). Resolve the host gitdir + the
-# shared common gitdir and bind-mount them at the same absolute paths.
-EXTRA_MOUNTS=()
-if [ -f .git ]; then
-  WORKTREE_GITDIR=$(awk '{print $2}' .git)
-  if [ -d "$WORKTREE_GITDIR" ]; then
-    COMMONDIR_FILE="$WORKTREE_GITDIR/commondir"
-    if [ -f "$COMMONDIR_FILE" ]; then
-      COMMON_REL=$(cat "$COMMONDIR_FILE")
-      COMMON_GITDIR=$(cd "$WORKTREE_GITDIR" && cd "$COMMON_REL" && pwd)
-    else
-      COMMON_GITDIR="$WORKTREE_GITDIR"
-    fi
-    # Mount the higher-level common gitdir; covers worktrees/<name> automatically.
-    EXTRA_MOUNTS+=( -v "${COMMON_GITDIR}:${COMMON_GITDIR}:ro" )
-    echo "[ci-local] Worktree detected; mounting shared gitdir: $COMMON_GITDIR"
-  fi
-fi
+# Conductor / git-worktree support. The mount math is Windows-sensitive and
+# lives in its own sourced helper (scripts/ci-worktree-mounts.sh) so it can be
+# unit-tested per platform; read the header there before touching it.
+# Populates GBRAIN_CI_EXTRA_MOUNTS; must be called directly, not in a
+# command substitution (it also exports the MSYS argv-conversion opt-outs).
+gbrain_ci_worktree_mounts "$PWD"
+# The `[@]+` guard keeps an EMPTY array (canonical checkout) from tripping
+# `set -u` on bash 3.2, still the default /bin/bash on macOS.
+EXTRA_MOUNTS=( ${GBRAIN_CI_EXTRA_MOUNTS[@]+"${GBRAIN_CI_EXTRA_MOUNTS[@]}"} )
 
 echo "[ci-local] Running checks inside runner container..."
-docker compose -f "$COMPOSE_FILE" run --rm "${EXTRA_MOUNTS[@]}" runner bash -c "$INNER_CMD"
+docker compose -f "$COMPOSE_FILE" run --rm \
+  ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} runner bash -c "$INNER_CMD"
 
 echo ""
 echo "[ci-local] All checks passed."

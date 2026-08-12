@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.42.88.0] - 2026-08-12
+## [0.42.89.0] - 2026-08-12
 
 **The guard that stops GBrain pointing your brain at a scratch folder now holds on Windows, and a migration that finishes its copy no longer throws that work away.**
 
@@ -57,7 +57,7 @@ When either check refuses, GBrain appends one line to `<config-dir>/audit/config
 - `test/migrate-engine-config-flip-guard.test.ts`: new. Covers the drift refusal, the unchanged-path happy path, two spellings of one directory not reading as drift, and the audit row.
 - `test/helpers/short-path.ts`: new. Windows 8.3 lookup via PowerShell's FileSystemObject, returning null when the platform, the volume or the name offers no distinct alias so callers skip rather than assert a false equality.
 
-## To take advantage of v0.42.88.0
+## To take advantage of v0.42.89.0
 
 Nothing to run. Both checks are automatic on upgrade.
 
@@ -71,6 +71,60 @@ If that prints a path inside your temp folder, your brain is not gone, only unre
 
 ```bash
 gbrain config set database_path /path/to/your/real/brain
+```
+
+## [0.42.88.0] - 2026-08-12
+
+**The local CI gate now runs from a worktree checkout on Windows, instead of stopping partway through with a message about a folder that does not exist.**
+
+`bun run ci:local` is the strongest gate GBrain ships. On Windows, from any checkout under `.claude/worktrees/`, it could not finish. It started normally, brought up the four Postgres shards, passed the first few guards, and then stopped with `fatal: not a git repository` and exit code 128. The path in that message was not a path anyone had typed, so it read like a broken checkout rather than a broken setup step. Most work on Windows happens in a worktree, so in practice the gate was unavailable there.
+
+A worktree keeps its git data outside the folder you are working in, so the gate mounts that data into the container. The mount was built from a single path string used on both sides of the Docker `-v` flag. On macOS and Linux the shell's form of a path and Docker's form are the same string, so one value works for both and nothing looks wrong. On Windows they are different. Docker Desktop does not recognize the shell's form, and rather than refusing it, quietly mounts an empty folder. Underneath that, the pointer file inside a worktree names a Windows path, and git running in the Linux container reads it as a relative path and looks for it inside the project folder.
+
+The gate now works out the two sides separately. The host side is converted to the form Docker understands, the shared git data is mounted at a fixed location inside the container, and a corrected pointer file is placed over the project's own so that git finds it. A full checkout is unaffected and mounts nothing extra.
+
+### How to use it
+
+Nothing to configure. Run the gate the way you always have:
+
+```bash
+bun run ci:local
+```
+
+From a worktree, it now prints both sides of the mount, so a bad path is visible at the point it is chosen rather than several minutes later:
+
+```
+[ci-local] Worktree detected; mounting shared gitdir:
+[ci-local]   host      C:/Users/you/gbrain/.git
+[ci-local]   container /gbrain-gitdir (worktree gitdir: /gbrain-gitdir/worktrees/my-branch)
+```
+
+### Things to watch
+
+A full checkout, the kind where `.git` is a folder rather than a file, behaves exactly as before.
+
+On a Git Bash shell with no working `cygpath`, the gate now stops at that point and says why, rather than continuing with a mount that points at nothing.
+
+The guards that read every tracked file are slow inside a container on Windows, because each read crosses the boundary between the container and the host. That is a property of the setup rather than anything this release changed, so expect `check-trailing-newline.sh` to sit for a while before it reports.
+
+### Itemized changes
+
+#### Added
+- **`scripts/ci-worktree-mounts.sh`**, a sourced helper that computes the Docker arguments a worktree checkout needs. The host side goes through `cygpath -m` on MSYS and Cygwin shells and is left alone elsewhere; the shared git directory is mounted at the fixed container path `/gbrain-gitdir`, which covers the per-worktree directory under it; and a normalized pointer naming that path is overlaid at `/app/.git`. The pointer is a mount rather than a `GIT_DIR` setting on purpose, because a process-wide `GIT_DIR` would also capture the temporary repositories many tests create for fixtures. On MSYS shells it opts out of the shell's argument rewriting, which would otherwise turn the container side of each mount into a path under the Git installation.
+- **`test/ci-worktree-mounts.test.ts`**, six tests that stub `uname` and `cygpath` on the path so both platform branches run from any host. This failure class cannot appear on Linux, where the two path forms are identical, so a test that only ran the native branch would never see it.
+
+#### Fixed
+- **`scripts/ci-local.sh`** builds its worktree mounts through the new helper instead of reusing one path string for the host and the container. An unusable `cygpath` now fails the run rather than producing a mount that silently resolves to nothing. Array expansion is also guarded so an empty mount list stays safe under older shells.
+
+#### Docs
+- `docs/architecture/KEY_FILES.md` describes the helper, why the two sides are computed separately, and why the pointer is a mount rather than an environment variable.
+
+## To take advantage of v0.42.88.0
+
+Nothing to do, and nothing to migrate. Run the gate once from a worktree and it will get past the guard that used to stop it:
+
+```bash
+bun run ci:local
 ```
 
 ## [0.42.87.0] - 2026-08-12
