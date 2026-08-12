@@ -210,6 +210,9 @@ describe('GBRAIN_HOME write-side isolation', () => {
 
         const row = JSON.parse(lines[0]!);
         expect(row.event).toBe('refused_global_config_repoint');
+        // `kind` discriminates this from the drift refusal `migrate-engine.ts`
+        // writes into the same trail — see migrate-engine-config-flip-guard.
+        expect(row.kind).toBe('temp_target');
         expect(row.pid).toBe(process.pid);
         expect(row.database_path).toBe(target);
         expect(row.engine).toBe('pglite');
@@ -226,6 +229,77 @@ describe('GBRAIN_HOME write-side isolation', () => {
         rmSync(auditDir, { recursive: true, force: true });
         rmSync(join(target, '..'), { recursive: true, force: true });
       }
+    });
+
+    test('a Windows 8.3 SHORT NAME for the temp dir does not defeat containment', async () => {
+      // `isPathInside` is pure `path.relative()` math, so a target spelled
+      // `...\GBRAIN~1\brain.pglite` is lexically OUTSIDE the long-name
+      // spelling `tmpdir()` returns — the fence reads false and the write goes
+      // through. `canonicalizeNative` (`realpathSync.native`; plain
+      // `realpathSync` does NOT collapse short names) is what makes the two
+      // spellings compare equal.
+      //
+      // POSIX has no 8.3 names, so this is an identity transform there and
+      // ubuntu-only CI can never catch the regression. It is live on the
+      // machine where the observed repoint incidents happened.
+      //
+      // CONSTRUCTION. A real `%TEMP%` often has no short alias of its own
+      // (every segment already conforms to 8.3), so the interesting case is
+      // built rather than assumed: point TEMP at a freshly created dir whose
+      // name is long enough to earn an alias, then spell the target through
+      // that alias.
+      if (process.platform !== 'win32') return;
+      const { saveConfig } = await import('../src/core/config.ts');
+      const { shortPathOrNull } = await import('./helpers/short-path.ts');
+      const tempRoot = mkdtempSync(join(tmpdir(), 'gbrain-guard-temproot-'));
+      const short = shortPathOrNull(tempRoot);
+      const prevTemp = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+      try {
+        if (!short) return; // 8.3 disabled on this volume, or no distinct alias
+        process.env.TEMP = tempRoot;
+        process.env.TMP = tempRoot;
+        process.env.TMPDIR = tempRoot;
+        const target = join(short, 'brain.pglite');
+        // CONTROL: prove the lexical fence really does miss this, so a pass
+        // below can't come from the containment test happening to hold.
+        const { isPathInside } = await import('../src/core/path-confine.ts');
+        expect(isPathInside(target, tmpdir())).toBe(false);
+
+        withFakeHome((fakeHome) => {
+          expect(() => saveConfig({ engine: 'pglite', database_path: target })).toThrow(/temporary directory/i);
+          expect(existsSync(join(fakeHome, '.gbrain', 'config.json'))).toBe(false);
+        });
+      } finally {
+        for (const [k, v] of Object.entries(prevTemp)) {
+          if (v !== undefined) process.env[k] = v; else delete process.env[k];
+        }
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    test('the mkdtemp prefix is matched by NAME, outside tmpdir() entirely', async () => {
+      // Second net under the containment test: if TMPDIR/TEMP was redirected
+      // between the migration and this write, `tmpdir()` resolves somewhere the
+      // target does not live and containment finds nothing. No durable brain is
+      // ever named `gbrain-migrate-target-*`, so the name alone is enough.
+      const { saveConfig } = await import('../src/core/config.ts');
+      // Deliberately NOT under tmpdir(), so only the name match can catch it.
+      const target = resolve(sep, 'gbrain-permanent-brain', 'gbrain-migrate-target-M72hsf', 'brain.pglite');
+      withFakeHome((fakeHome) => {
+        expect(() => saveConfig({ engine: 'pglite', database_path: target })).toThrow(/migration target/i);
+        expect(existsSync(join(fakeHome, '.gbrain', 'config.json'))).toBe(false);
+      });
+    });
+
+    test('the prefix match is anchored at a path segment, not a substring', async () => {
+      // `my-gbrain-migrate-target-cache` is a legitimate directory name that
+      // merely contains the prefix. An unanchored `includes()` would refuse it.
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      const permanent = resolve(sep, 'brains', 'my-gbrain-migrate-target-cache', 'brain.pglite');
+      withFakeHome(() => {
+        expect(() => saveConfig({ engine: 'pglite', database_path: permanent })).not.toThrow();
+        expect(loadConfigFileOnly()?.database_path).toBe(permanent);
+      });
     });
 
     test('allows the identical write when GBRAIN_HOME sandboxes it', async () => {

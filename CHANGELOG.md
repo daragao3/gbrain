@@ -2,6 +2,77 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.89.0] - 2026-08-12
+
+**The guard that stops GBrain pointing your brain at a scratch folder now holds on Windows, and a migration that finishes its copy no longer throws that work away.**
+
+Last release added a check that refuses to save your settings when they would point your brain at a temporary folder. On Windows that check could be walked straight past. Windows keeps a second, older name for many folders, an abbreviated one that looks like `GBRAIN~1`. It names the same folder, but as far as plain text comparison is concerned it is a completely different path. Anything holding the abbreviated spelling looked like it was pointing somewhere permanent, and the check waved it through. That is the spelling in play on the machines where this went wrong in the first place, and it cannot show up on Linux at all, so no amount of testing there would have found it.
+
+There was a second way past. The check asks your operating system where the temporary folder is. If a program has been told to use a different one, the answer comes back pointing at the wrong place and nothing matches. Migration scratch folders are always named the same way, so GBrain now recognises them by name too, wherever they happen to live.
+
+Separately, `gbrain migrate` could throw away good work. It copies all your pages first and updates your settings last. When the settings update was refused, the whole command stopped with an error, as if nothing had happened, even though every page had already been copied. Now the copy stands, the command tells you plainly that your settings were left alone, and it finishes with a failure status so nothing mistakes it for a clean switch.
+
+Finally, `gbrain migrate` now notices when the settings file it is writing is not the one it started against. Long migrations can outlive whatever launched them, and when that happens the last step can land on your real settings instead of the private ones the run was using. That is the exact way a scratch folder gets written into your real configuration, and it is now refused.
+
+### How to use it
+
+Nothing to configure. Upgrade and the checks are on.
+
+Confirm your brain is where you expect:
+
+```bash
+gbrain config get database_path
+```
+
+If a migration ever tells you your settings were left alone, your copied data is fine. Re-run the migration pointing at a permanent location:
+
+```bash
+gbrain migrate --to pglite --path /path/to/a/permanent/folder
+```
+
+Migrating into a temporary folder on purpose is still allowed, you just have to say so:
+
+```bash
+GBRAIN_ALLOW_TEMP_BRAIN=1 gbrain migrate --to pglite --path "$TMPDIR/scratch"
+```
+
+For a test or a throwaway repro, prefer `GBRAIN_HOME` instead. It gives the process its own settings file, so it cannot reach the shared one at all.
+
+### Things to watch
+
+**Refusing and stopping are two different things, on purpose.** Saving settings refuses by raising an error, because a save that quietly does nothing would let `gbrain init` believe it wrote a file it never wrote. Anything reading its own settings back would then be reading a lie, which is a worse failure than a loud one. Migration is the one place that error is caught and turned into a warning instead, because by then the pages have already been copied and throwing an exception away would cost you that work for nothing. The rule is: the low level save always fails loudly, and the one caller that has something worth keeping decides to keep it.
+
+Only the migration command carries the "settings file moved underneath me" check. Saving settings on its own has no idea when a run began, so it cannot see that at all. The check has to sit with the code that knows.
+
+When either check refuses, GBrain appends one line to `<config-dir>/audit/config-repoint-refused.jsonl` recording the process id, command line, working directory and call stack, with a `kind` field saying which of the two fired. That names the program responsible, which matters most for the moved-settings case: the thing that started the run has usually exited by then, so the record written from inside the run is the only thing that can identify it.
+
+### Itemized changes
+
+- `src/core/path-confine.ts`: added `canonicalizeNative()`, which resolves a path through its deepest existing ancestor using `realpathSync.native` and re-attaches the not-yet-created tail. Unlike plain `realpathSync` it collapses Windows 8.3 short names, so `…\GBRAIN~1\…` and the long spelling compare equal. Deliberately opt-in rather than folded into `realpathOrResolve`, which would change every registered-path matcher, mount resolver and upload fence at once. `isWriteTargetContained` now shares the ancestor walk with it; its behavior is unchanged.
+- `src/core/config.ts`: `unsafeGlobalConfigWrite()` now feeds both sides of the temp-directory containment test through `canonicalizeNative()`, and additionally refuses a `database_path` carrying the `gbrain-migrate-target-` mkdtemp prefix, anchored at a path segment so a directory merely containing that text is unaffected. Containment still runs through `isPathInside()` per the path-boundary invariant, never a `startsWith` prefix test.
+- `src/core/config.ts`: `saveConfig()` now throws the typed `UnsafeConfigWriteError` (exported, carrying `reason`) so a caller can distinguish a guard refusal from a real write failure. `auditUnsafeConfigWrite()` is now exported and takes a `kind` of `temp_target` or `config_path_drift`, recorded in the JSONL row.
+- `src/commands/migrate-engine.ts`: `runMigrateEngine` pins `configPath()` at entry, and the new exported `unsafeConfigFlipReason(atStart, now)` withholds the config flip when the two disagree, writing the shared audit row with `kind: 'config_path_drift'`. Both refusals converge on one disposition: the migrated data is left intact, a warning names the reason and the settings file, `setCliExitVerdict(1)` makes the run non-zero, and the closing summary reports the engine that is still active instead of claiming a switch.
+- `test/path-confine.test.ts`: covers `canonicalizeNative` over an existing directory, an absent leaf, a wholly absent path, a symlinked ancestor, and a real Windows 8.3 alias. The short-name case asserts first that the plain lexical test fails on the same input, so it cannot pass for the wrong reason.
+- `test/gbrain-home-isolation.test.ts`: adds the short-name refusal (built by pointing the temp directory at a freshly created folder long enough to earn an alias), the prefix-by-name refusal outside the temp directory entirely, the segment-anchoring case that must stay allowed, and the `kind` field on the audit row.
+- `test/migrate-engine-config-flip-guard.test.ts`: new. Covers the drift refusal, the unchanged-path happy path, two spellings of one directory not reading as drift, and the audit row.
+- `test/helpers/short-path.ts`: new. Windows 8.3 lookup via PowerShell's FileSystemObject, returning null when the platform, the volume or the name offers no distinct alias so callers skip rather than assert a false equality.
+
+## To take advantage of v0.42.89.0
+
+Nothing to run. Both checks are automatic on upgrade.
+
+If you want to confirm nothing was already repointed before you upgraded:
+
+```bash
+gbrain config get database_path
+```
+
+If that prints a path inside your temp folder, your brain is not gone, only unreachable. Point it back:
+
+```bash
+gbrain config set database_path /path/to/your/real/brain
+```
+
 ## [0.42.88.0] - 2026-08-12
 
 **The local CI gate now runs from a worktree checkout on Windows, instead of stopping partway through with a message about a folder that does not exist.**
