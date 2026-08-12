@@ -22,14 +22,6 @@
  *    repo-controlled script.
  *  - Credential is repo-scoped (local git config), token redacted everywhere
  *    via shell-redact's exact-value scrubber, store file 0600.
- *  - NO push ever assumes `origin`. `sources harden` accepts any source row
- *    with a local_path — including `--path` trees gbrain never cloned — so the
- *    repo can be fork-shaped (origin = an upstream project, the operator's own
- *    fork under another remote name). In-process pushes resolve via
- *    `resolvePushRemote`; the generated bash resolves the same order at RUN
- *    time (the helper is COMMITTED and executes in every clone, each with its
- *    own remote names). Both REFUSE rather than guess: a local-only commit is
- *    recoverable, a commit published to a stranger's repo is not.
  *
  * CLI-only by design (writes executables + an OS cron + a credential helper on
  * the host): never exposed over MCP.
@@ -42,6 +34,7 @@ import { join, dirname, relative, isAbsolute } from 'path';
 import { execFileSync, execSync } from 'child_process';
 import {
   GIT_ENV, GIT_ENV_AUTH, divergenceSafePull, detectDefaultBranch, pushProbe,
+  noPushRemoteMessage, resolvePushRemote,
   type PullOutcome, type PushProbeResult,
 } from './git-remote.ts';
 import { findResolverFile, RESOLVER_FILENAMES } from './resolver-filenames.ts';
@@ -70,9 +63,6 @@ export interface DurabilityReport {
   missing: string[];        // what was missing on entry
   fixed: string[];          // what this run changed
   needs_attention: string[];
-  /** HEAD == <resolved push remote>/<branch>. Key name kept for wire
-   *  compatibility; the comparison is against the RESOLVED remote, which is
-   *  only literally `origin` when resolution lands there. */
   clean_against_origin: boolean;
 }
 
@@ -139,58 +129,42 @@ function pushLogPath(): string {
 // Rendered into BOTH the (committed) helper and the (local, untracked) hook so
 // there is one source of truth without the hook executing repo-controlled code.
 const PUSH_RETRY = `# --- gbrain durability push-retry (generated; one source of truth) ---
-# Resolve WHERE to push. NEVER assumes "origin": in a fork-shaped checkout
-# (origin = upstream, the operator's own fork under another remote name) that
-# assumption aims agent commits at a repo the operator does not own. Order:
-#   branch.<b>.pushRemote -> remote.pushDefault -> branch.<b>.remote
-#   -> trunk branch .remote -> a lone remote -> refuse (exit 1).
-# Every configured value is checked against \`git remote\` — git accepts a URL
-# where a remote name belongs, so an unvalidated config read is an arbitrary
-# push destination. Resolved at RUN time, not baked in at render time: this
-# helper is COMMITTED and runs in every clone of the brain repo, each with its
-# own remote names.
-# Deliberately pipe-free: under \`set -o pipefail\` a \`printf | grep -q\` pair
-# can fail the whole pipeline on SIGPIPE (grep exits at the first match before
-# printf finishes writing), which would turn a correct match into a refusal.
-brain_push_remote() {
+# NEVER hardcode "origin": a brain repo is the user's OWN working tree, which may
+# be fork-shaped (origin = an upstream project they do not own). Resolve the
+# remote the way git resolves a push, and refuse rather than guess.
+brain_remote() {
   _rb="$1"
   _remotes="$(git remote 2>/dev/null || true)"
   [ -n "$_remotes" ] || return 1
-  _nl="
-"
-  _known="$_nl$_remotes$_nl"
-  for _k in "branch.$_rb.pushRemote" "remote.pushDefault" "branch.$_rb.remote"; do
+  for _k in "branch.$_rb.pushRemote" remote.pushDefault "branch.$_rb.remote" \\
+            branch.main.remote branch.master.remote; do
     _v="$(git config --get "$_k" 2>/dev/null || true)"
-    [ -n "$_v" ] || continue
-    # Set-but-unknown is a hard refusal, not a fall-through — the operator
-    # asked for something specific; do not silently substitute.
-    case "$_known" in *"$_nl$_v$_nl"*) printf '%s\\n' "$_v"; return 0 ;; esac
-    return 1
+    # A config value may be a URL rather than a remote name; only names are usable.
+    if [ -n "$_v" ] && printf '%s\\n' "$_remotes" | grep -qxF -- "$_v"; then
+      printf '%s' "$_v"; return 0
+    fi
   done
-  for _t in main master trunk; do
-    _v="$(git config --get "branch.$_t.remote" 2>/dev/null || true)"
-    [ -n "$_v" ] || continue
-    case "$_known" in *"$_nl$_v$_nl"*) printf '%s\\n' "$_v"; return 0 ;; esac
-  done
-  _count=0; _sole=""
-  for _r in $_remotes; do _count=$((_count+1)); _sole="$_r"; done
-  [ "$_count" = "1" ] || return 1
-  printf '%s\\n' "$_sole"; return 0
+  if [ "$(printf '%s\\n' "$_remotes" | grep -c .)" = "1" ]; then
+    printf '%s' "$_remotes"; return 0
+  fi
+  printf '%s\\n' "$_remotes" | grep -qxF -- origin || return 1
+  printf '%s' origin
 }
 brain_push() {
   _branch="$1"
   _log="\${GBRAIN_HOME:-$HOME/.gbrain}/brain-push.log"
   mkdir -p "$(dirname "$_log")" 2>/dev/null || true
   _gd="$(git rev-parse --git-dir 2>/dev/null || echo .git)"
+  _remote="$(brain_remote "$_branch" || true)"
+  if [ -z "$_remote" ]; then
+    echo "$(date -u +%FT%TZ) [push] NO PUSH REMOTE for $_branch — refusing to guess. Set branch.$_branch.pushRemote or remote.pushDefault." >>"$_log"
+    return 1
+  fi
   # Serialize concurrent pushes (commit bursts) so they coalesce instead of a
   # rebase-retry herd. No-op if flock is unavailable.
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$_gd/gbrain-push.lock"
     flock -w 30 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch" >>"$_log"; return 0; }
-  fi
-  if ! _remote="$(brain_push_remote "$_branch")"; then
-    echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) — no push remote could be resolved (refusing to guess \\"origin\\"). Set one: git config branch.$_branch.pushRemote <remote>" >>"$_log"
-    return 1
   fi
   if git push "$_remote" "HEAD:$_branch" >>"$_log" 2>&1; then
     echo "$(date -u +%FT%TZ) [push] ok $_branch -> $_remote $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
@@ -755,19 +729,24 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
   // 7. verify (push-probe) + commit scaffolding if push works
   let clean = false;
   if (verify && !dryRun) {
-    // Resolve the push destination ONCE for the whole verify+commit flow, so the
-    // probe and the real push can never disagree about where they are aiming.
-    // No `origin` fallback — see resolvePushRemote.
-    const probe: PushProbeResult = pushProbe(repoPath, branch, { redactDetail: redact });
-    if (!probe.ok) {
-      push('verify', { status: 'needs_attention', detail: `push-probe failed (${probe.reason}): ${probe.detail}` });
+    // Resolve ONCE and reuse: probe, scaffolding push and the cleanliness check
+    // must all agree on the remote, and it is never assumed to be `origin`
+    // (repoPath is the user's own tree and may be fork-shaped).
+    const remote = resolvePushRemote(repoPath, branch);
+    const probe: PushProbeResult = remote
+      ? pushProbe(repoPath, branch, { redactDetail: redact, remote })
+      : { ok: false, reason: 'no_remote' as const, detail: noPushRemoteMessage(branch) };
+    if (!remote || !probe.ok) {
+      const detail = probe.ok ? noPushRemoteMessage(branch) : probe.detail;
+      const reason = probe.ok ? 'no_remote' : probe.reason;
+      push('verify', { status: 'needs_attention', detail: `push-probe failed (${reason}): ${detail}` });
     } else {
-      push('verify', { status: 'ok', detail: `push-probe ok — push auth confirmed against remote "${probe.remote}"` });
+      push('verify', { status: 'ok', detail: `push-probe ok — push auth confirmed against ${remote}` });
       // Commit the durability scaffolding (helper + rules) — real content, the
       // genuine end-to-end proof (no synthetic heartbeat). No-op when unchanged.
-      const committed = commitScaffolding(repoPath, branch, probe.remote, redact);
+      const committed = commitScaffolding(repoPath, branch, redact, remote);
       if (committed) push('commit', committed);
-      clean = headMatchesRemote(repoPath, probe.remote, branch);
+      clean = headMatchesRemote(repoPath, remote, branch);
     }
   } else if (dryRun) {
     push('verify', { status: 'skipped', detail: 'dry-run' });
@@ -781,7 +760,7 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
   return { source_id: sourceId, repo_path: repoPath, branch, steps, missing, fixed, needs_attention, clean_against_origin: clean };
 }
 
-function commitScaffolding(repoPath: string, branch: string, remote: string, redact: (s: string) => string): { status: StepStatus; detail: string } | null {
+function commitScaffolding(repoPath: string, branch: string, redact: (s: string) => string, remote: string): { status: StepStatus; detail: string } | null {
   // Stage only the durability artifacts we manage — never a blind add.
   const paths: string[] = [HELPER_REL];
   const resolver = findResolverFile(repoPath);
@@ -802,7 +781,7 @@ function commitScaffolding(repoPath: string, branch: string, remote: string, red
     execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', remote, `HEAD:${branch}`], {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, env: { ...process.env, ...GIT_ENV_AUTH },
     });
-    return { status: 'fixed', detail: `committed + pushed durability scaffolding to "${remote}"` };
+    return { status: 'fixed', detail: `committed + pushed durability scaffolding to ${remote}` };
   } catch (e) {
     return { status: 'needs_attention', detail: redact(`scaffolding commit/push failed: ${(e as Error).message.slice(0, 140)}`) };
   }

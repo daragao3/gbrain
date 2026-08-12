@@ -596,22 +596,10 @@ exact body
     // importFromContent read-back-verifies every successful write, so the mock
     // has to make the created page readable afterwards or verifyPageReadable
     // throws the silent-desync error. It compares content_hash too, so the
-    // read-back has to carry the hash importFromContent actually computed —
-    // derived here the same way the sibling conditional test derives it.
-    const { createHash } = await import('crypto');
-    const { parseMarkdown } = await import('../src/core/markdown.ts');
-    const parsedExact = parseMarkdown(content, 'notes/exact.md');
-    const exactHash = createHash('sha256')
-      .update(JSON.stringify({
-        title: parsedExact.title,
-        type: parsedExact.type,
-        compiled_truth: parsedExact.compiled_truth,
-        timeline: parsedExact.timeline,
-        frontmatter: parsedExact.frontmatter,
-        tags: parsedExact.tags.sort(),
-      }))
-      .digest('hex');
-
+    // read-back has to carry the hash importFromContent actually computed.
+    // Spread the `input` the write passed rather than re-deriving the hash
+    // here — a local re-derivation duplicates the production hashing algorithm
+    // and silently drifts from it the moment production changes what it hashes.
     let createdExact: Record<string, unknown> | null = null;
     const engine = mockEngine({
       findDuplicatePage: async () => ({ slug: 'notes/other', id: 1 }),
@@ -622,16 +610,9 @@ exact body
         if (candidateSlug === 'notes/exact') return createdExact;
         return null;
       },
-      createPageOnly: async (createdSlug: string) => {
-        createdExact = {
-          ...otherPage,
-          id: 2,
-          slug: createdSlug,
-          title: 'Exact',
-          compiled_truth: parsedExact.compiled_truth,
-          content_hash: exactHash,
-          revision: 1,
-        };
+      createPageOnly: async (createdSlug: string, input: Record<string, unknown>) => {
+        // Spread `input` so the stored row carries the hash the write computed.
+        createdExact = { ...otherPage, ...input, id: 2, slug: createdSlug, revision: 1 };
         return { status: 'created', page: createdExact };
       },
     });

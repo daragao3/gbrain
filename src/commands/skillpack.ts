@@ -1305,7 +1305,7 @@ async function cmdEndorse(args: string[]): Promise<void> {
         '  --tier     Target tier (default: endorsed)\n' +
         '  --repo     Path to a clone of the registry repo (default: .)\n' +
         '  --note     Optional human note recorded in endorsements.json\n' +
-        '  --push     git push origin HEAD after committing\n' +
+        '  --push     push HEAD to the configured push remote after committing\n' +
         '  --dry-run  Report what would change without writing or committing\n' +
         '  --json     Stable JSON envelope for agent consumption\n\n' +
         'This is the Garry-only operator workflow. It writes endorsements.json + commits;\n' +
@@ -1361,7 +1361,7 @@ async function cmdEndorse(args: string[]): Promise<void> {
         : `(unset) -> ${result.new_tier}`;
       console.log(`${verb}: ${result.pack_name} ${fromTo}`);
       if (result.commit_sha) console.log(`commit: ${result.commit_sha}`);
-      if (result.pushed) console.log(`pushed to ${result.push_remote ?? '(remote)'}`);
+      if (result.pushed) console.log(`pushed to ${result.push_remote}`);
       if (dryRun) console.log(`\n(no writes; re-run without --dry-run to commit)`);
     }
     process.exit(0);

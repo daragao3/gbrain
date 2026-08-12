@@ -133,9 +133,7 @@ describe('divergenceSafePull', () => {
 describe('pushProbe', () => {
   test('ok against a writable remote', () => {
     const { work } = makePair();
-    // Single-remote clone → resolution lands on `origin`, and the probe now
-    // reports WHICH remote it proved auth against.
-    expect(pushProbe(work, 'main')).toEqual({ ok: true, remote: 'origin' });
+    expect(pushProbe(work, 'main')).toEqual({ ok: true });
   });
 
   test('not ok when origin is unreachable', () => {

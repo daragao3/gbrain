@@ -18,7 +18,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
-import { resolvePushRemote } from '../git-remote.ts';
+import { noPushRemoteMessage, resolvePushRemote } from '../git-remote.ts';
 import {
   ENDORSEMENTS_SCHEMA_VERSION,
   REGISTRY_SCHEMA_VERSION,
@@ -40,7 +40,7 @@ export interface EndorseOptions {
   note?: string;
   /** Dry-run: report what would change without writing or committing. */
   dryRun?: boolean;
-  /** Push the commit after writing, to the remote `resolvePushRemote` picks. */
+  /** Push the commit to origin/main after writing. */
   push?: boolean;
 }
 
@@ -52,8 +52,8 @@ export interface EndorseResult {
   endorsements_path: string;
   commit_sha: string | null;
   pushed: boolean;
-  /** Remote the commit was pushed to; null when --push was not requested. */
-  push_remote?: string | null;
+  /** Remote the push targeted — resolved from config, never assumed `origin`. */
+  push_remote: string | null;
   dry_run: boolean;
 }
 
@@ -61,8 +61,7 @@ export type EndorseErrorCode =
   | 'not_a_registry_repo'
   | 'pack_not_in_catalog'
   | 'git_commit_failed'
-  | 'git_push_failed'
-  | 'push_remote_unresolved';
+  | 'git_push_failed';
 
 export class EndorseError extends Error {
   constructor(
@@ -172,6 +171,7 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
       endorsements_path: endPath,
       commit_sha: null,
       pushed: false,
+      push_remote: null,
       dry_run: true,
     };
   }
@@ -205,27 +205,32 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
   let pushed = false;
   let pushRemote: string | null = null;
   if (opts.push) {
-    // `--repo` defaults to CWD and gbrain never provisions this checkout, so it
-    // can be fork-shaped (origin = upstream registry, the operator's fork under
-    // another remote name). Resolve, never assume `origin`, refuse rather than
-    // guess — a wrong guess publishes an endorsement to a repo the operator
-    // does not own.
-    const res = resolvePushRemote(opts.registryRepoRoot);
-    if (!res.ok) {
+    // NEVER hardcode `origin`: registryRepoRoot is caller-supplied (defaults to
+    // the CWD) and a registry contributor's clone is fork-shaped — `origin` is
+    // the upstream registry they cannot and must not push to.
+    let branch: string | null = null;
+    try {
+      branch = execFileSync('git', ['-C', opts.registryRepoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+        encoding: 'utf-8',
+      }).trim() || null;
+    } catch { /* detached or no commits — resolve without a branch */ }
+    if (branch === 'HEAD') branch = null;
+    const remote = resolvePushRemote(opts.registryRepoRoot, branch);
+    if (!remote) {
       throw new EndorseError(
-        `cannot determine where to push: ${res.reason}. The commit is already made — push it yourself, or configure a push remote and re-run.`,
-        'push_remote_unresolved',
+        `git push failed: ${noPushRemoteMessage(branch)}`,
+        'git_push_failed',
       );
     }
-    pushRemote = res.remote;
     try {
-      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', pushRemote, 'HEAD'], {
+      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', remote, 'HEAD'], {
         encoding: 'utf-8',
       });
       pushed = true;
+      pushRemote = remote;
     } catch (err) {
       throw new EndorseError(
-        `git push to "${pushRemote}" failed: ${(err as Error).message}`,
+        `git push failed: ${(err as Error).message}`,
         'git_push_failed',
       );
     }
