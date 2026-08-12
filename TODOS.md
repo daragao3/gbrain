@@ -52,6 +52,50 @@
   the v0.42.84.0 change so a data-loss fix stays reviewable on its own.
   Where: `src/core/link-extraction.ts` (`extractUndeclaredPrefixRefs`, the
   `seen` key).
+## v0.42.89.0 follow-ups (config repoint guard, Windows gaps + flip drift)
+
+- [ ] **P2 — `buildRetrievalReflexCheck` swallows the real error, so a CI failure names
+  nothing.** The whole body sits in one `try`, and the `catch` returns
+  `{name, status:'warn', message}` with NO `details`. A test asserting
+  `details.policy_skill_installed` therefore fails with `Received: undefined` and the
+  actual thrown error never appears anywhere — not in the assertion, not in the log
+  (`c.name` still passes, because the catch sets it). A shard-1 failure on this check cost
+  hours of bisection precisely because the cause was invisible. Fix: include the error, and
+  ideally its stack, in `details` on the catch path so the check reports WHY it could not
+  run. Where: `src/commands/doctor.ts` (`buildRetrievalReflexCheck`), pinned by
+  `test/doctor-retrieval-reflex.test.ts`.
+- [ ] **P3 — Adding one test file re-packs every shard, so unrelated latent pollution
+  surfaces as a red CI on the PR that added the file.** `scripts/test-shard.sh` partitions
+  by weight-aware LPT, and bun then runs each shard's files ALPHABETICALLY, not in the argv
+  order the script emits. Adding a single test file moved ~53 files in and out of shard 1
+  and changed the alphabetical predecessor set of `test/doctor-retrieval-reflex.test.ts` by
+  9 files, turning it red; a later merge re-packed again and it went green with no fix. The
+  test passes in isolation on both platforms, so the pollution is real but currently
+  unowned. Fix direction: make the partition stable against single-file additions (bucket
+  by a hash of the path rather than LPT position), or find and fix the polluter. Note for
+  whoever picks this up: the argv order from `--dry-run-list` is NOT the execution order —
+  reason about the alphabetical set. Where: `scripts/test-shard.sh`, `scripts/sharding.ts`.
+
+- [ ] **P3 — Every other path fence in the repo is still Windows 8.3 short-name blind.**
+  `canonicalizeNative` closed this for the temp-brain guard only. `isPathContained`,
+  `isWriteTargetContained`, the registered-path prefix matchers and the mount resolvers all
+  go through `realpathOrResolve`, which uses plain `realpathSync` and does NOT collapse
+  short names — so the same "`…\GBRAIN~1\…` reads as a different path" defeat applies to
+  each of them, invisibly on POSIX. Switching `realpathOrResolve` to `.native` would fix
+  them all in one line, which is exactly why it was NOT done here: it changes the semantics
+  of every upload fence, mount resolver and source router at once, and `.native` has its own
+  Windows edge cases (`\\?\`-prefixed returns on long/UNC paths). Needs its own change with
+  its own test pass over each consumer, not a drive-by. Where: `src/core/path-confine.ts`.
+- [ ] **P3 — The config-path drift refusal covers `gbrain migrate` only.** Any other
+  long-running command that ends in `saveConfig` has the same orphaned-promise exposure: a
+  run that outlives the env that launched it lands its config write on whatever
+  `GBRAIN_HOME` is in effect at the end. `saveConfig` cannot see this by construction (no
+  concept of run-start), so closing it elsewhere means each such caller pinning
+  `configPath()` at entry the way `runMigrateEngine` now does. Worth auditing which
+  commands actually run long enough to matter before adding the pin to any of them — this
+  may well be a one-caller problem. Where: `src/commands/migrate-engine.ts`
+  (`unsafeConfigFlipReason`) as the reference implementation.
+
 ## v0.42.83.0 follow-ups (machine-global config repoint guard)
 
 - [ ] **P2 — Identify the caller the audit log names, then fix it at the source.** The
@@ -63,8 +107,12 @@
   `GBRAIN_HOME`, and note whether it is in-repo at all. Until a row exists there is
   nothing actionable, so this stays open pending evidence rather than being investigated
   speculatively.
-- [ ] **P3 — The guard covers `tmpdir()` only; other silent-repoint shapes are not
-  covered.** A machine-global repoint at a durable-looking path that is nonetheless wrong
+- [ ] **P3 — The guard covers throwaway targets only; other silent-repoint shapes are not
+  covered.** (Narrowed in v0.42.89.0: the check is no longer `tmpdir()` containment alone.
+  It canonicalizes both sides with `canonicalizeNative` so a Windows 8.3 short name cannot
+  slip past, and separately matches the `gbrain-migrate-target-` mkdtemp prefix by name so
+  a redirected `TMPDIR` cannot either. The gap below is unchanged.)
+  A machine-global repoint at a durable-looking path that is nonetheless wrong
   (a deleted checkout, a mount that will not exist next boot, a per-run directory outside
   `tmpdir()`) produces the identical silent `page_not_found` failure with no refusal. The
   narrow shape was chosen deliberately so a legitimate migration is never reverted, and

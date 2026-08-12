@@ -143,6 +143,63 @@ export function realpathOrResolve(p: string): string {
 }
 
 /**
+ * Resolve `target` through the deepest EXISTING ancestor using `resolver`, then
+ * re-attach the not-yet-created tail lexically. Shared by the two "the path may
+ * not exist yet" resolvers below; the resolver choice is what distinguishes
+ * them (`realpathOrResolve` vs the short-name-collapsing native variant).
+ */
+function resolveViaExistingAncestor(target: string, resolver: (p: string) => string): string {
+  let existing = resolvePath(target);
+  const tail: string[] = [];
+  for (let i = 0; i < 4096 && !existsSync(existing); i++) {
+    tail.unshift(basename(existing));
+    const parent = dirname(existing);
+    if (parent === existing) break; // filesystem root
+    existing = parent;
+  }
+  const base = resolver(existing);
+  return tail.length ? join(base, ...tail) : base;
+}
+
+/**
+ * Canonicalize a path for containment comparison, collapsing Windows 8.3 SHORT
+ * NAMES so `C:\Users\DIEGO~1\AppData\Local\Temp` and
+ * `C:\Users\diego\AppData\Local\Temp` compare equal.
+ *
+ * WHY A SEPARATE HELPER. `isPathInside` is pure `path.relative()` math, and
+ * `realpathOrResolve` (hence `isPathContained` / `isWriteTargetContained`) uses
+ * plain `realpathSync`, which does NOT expand short names on Windows. So a
+ * caller that happens to hold the `DIEGO~1` spelling of `%TEMP%` is lexically
+ * OUTSIDE the `diego` spelling `tmpdir()` returns, and a temp-containment fence
+ * built on either one alone reads `false` and lets the write through. That is
+ * the exact machine where the config-repoint incidents happened, and it is an
+ * identity transform on POSIX, so ubuntu-only CI can never catch it.
+ *
+ * Only `realpathSync.native` collapses the short form. It requires the path to
+ * exist, so we resolve through the deepest existing ancestor and re-attach the
+ * tail — a migration target's leaf file typically does not exist yet, while its
+ * mkdtemp parent does.
+ *
+ * Deliberately NOT folded into `realpathOrResolve`: that would change the
+ * semantics of every registered-path prefix matcher, mount resolver and upload
+ * fence at once. This is opt-in, for fences that must survive a short-name
+ * spelling.
+ *
+ * The result still goes through `isPathInside` for the boundary test — never
+ * compare it with `startsWith(parent + sep)`.
+ */
+export function canonicalizeNative(p: string): string {
+  const native = (realpathSync as unknown as { native?: (x: string) => string }).native;
+  return resolveViaExistingAncestor(p, (x) => {
+    try {
+      return native ? native(x) : realpathSync(x);
+    } catch {
+      return resolvePath(x);
+    }
+  });
+}
+
+/**
  * Containment check for a write TARGET that may not exist yet (a new page file).
  * `isPathContained` requires the child to already exist; this instead realpaths
  * the deepest EXISTING ancestor of `target` (catching a symlinked intermediate
@@ -155,15 +212,6 @@ export function realpathOrResolve(p: string): string {
  */
 export function isWriteTargetContained(target: string, root: string): boolean {
   const resolvedRoot = realpathOrResolve(root);
-  let existing = resolvePath(target);
-  const tail: string[] = [];
-  for (let i = 0; i < 4096 && !existsSync(existing); i++) {
-    tail.unshift(basename(existing));
-    const parent = dirname(existing);
-    if (parent === existing) break; // filesystem root
-    existing = parent;
-  }
-  const base = realpathOrResolve(existing);
-  const finalPath = tail.length ? join(base, ...tail) : base;
+  const finalPath = resolveViaExistingAncestor(target, realpathOrResolve);
   return isPathInside(finalPath, resolvedRoot);
 }

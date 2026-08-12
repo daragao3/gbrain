@@ -1,120 +1,112 @@
 /**
- * `gbrain migrate` must not repoint the ACTIVE config at a throwaway target.
+ * `gbrain migrate` must not land its config flip on a config home that MOVED
+ * underneath the run.
  *
- * Background: `saveConfig()` resolves GBRAIN_HOME at CALL time, so the config
- * flip at the end of a migration writes whatever home is in effect then — the
- * machine-global `~/.gbrain/config.json` when GBRAIN_HOME is unset. Two ways
- * that has bitten this machine, both pinned here:
+ * Background: `saveConfig()` resolves GBRAIN_HOME at CALL time. A run that
+ * outlives the env that launched it therefore writes whatever home is in
+ * effect at the END — a test sets GBRAIN_HOME, starts a migration, hits its
+ * timeout, and its cleanup deletes GBRAIN_HOME while the orphaned migration
+ * promise keeps going and lands its `saveConfig` on the real machine-global
+ * `~/.gbrain/config.json`, repointing the shared brain at the test's throwaway
+ * target.
  *
- *   1. A migration whose target is a `%TEMP%` scratch dir. The temp store is
- *      deleted moments later and every subsequent CLI lookup returns
- *      `page_not_found` — indistinguishable from a genuinely deleted page.
- *   2. A run that outlives the env that launched it: a test sets GBRAIN_HOME,
- *      starts a migration, hits its timeout, and its cleanup deletes
- *      GBRAIN_HOME while the orphaned migration promise keeps going and lands
- *      its saveConfig on the real global config.
+ * `saveConfig` structurally CANNOT see this: it has no concept of run-start, so
+ * by the time it runs the moved home is the only truth it has. The pin lives in
+ * `runMigrateEngine`; `unsafeConfigFlipReason` is just the comparison.
  *
- * `unsafeConfigFlipReason` is the gate for both. A migration to a PGLite brain
- * in a PERMANENT location must still be allowed — this is a tripwire, not a
- * policy — so that case is pinned too.
+ * The sibling temp-target shape is NOT tested here — it lives in
+ * `unsafeGlobalConfigWrite` (`config.ts`), covering every `saveConfig` caller
+ * rather than this one, and is pinned in `gbrain-home-isolation.test.ts`.
  */
 
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve, sep } from 'path';
+import { withEnv } from './helpers/with-env.ts';
 import { unsafeConfigFlipReason } from '../src/commands/migrate-engine.ts';
-import type { GBrainConfig } from '../src/core/config.ts';
+import { auditUnsafeConfigWrite, type GBrainConfig } from '../src/core/config.ts';
 
-const SAME = '/home/u/.gbrain/config.json';
+// Absolute so the comparison is platform-honest: on win32 these resolve onto
+// the current drive, and both sides get the identical treatment.
+const GLOBAL_CONFIG = resolve(sep, 'home', 'u', '.gbrain', 'config.json');
+const SCOPED_CONFIG = resolve(sep, 'tmp', 'gbrain-migrate-home-abc123', '.gbrain', 'config.json');
 
-describe('unsafeConfigFlipReason — temp-dir targets are refused', () => {
-  test('a database_path inside the OS temp dir is refused', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gbrain-migrate-target-'));
+describe('unsafeConfigFlipReason — a config home that moved mid-run is refused', () => {
+  test('drift between run-start and flip time is refused', () => {
+    const reason = unsafeConfigFlipReason(SCOPED_CONFIG, GLOBAL_CONFIG);
+    expect(reason).not.toBeNull();
+    expect(reason).toContain('changed mid-migration');
+    // The message must name BOTH paths — the whole point is telling the
+    // operator which home the run meant and which one it would have hit.
+    expect(reason).toContain(SCOPED_CONFIG);
+    expect(reason).toContain(GLOBAL_CONFIG);
+  });
+
+  test('an unchanged config path is the happy path', () => {
+    expect(unsafeConfigFlipReason(GLOBAL_CONFIG, GLOBAL_CONFIG)).toBeNull();
+  });
+
+  test('a different spelling of the SAME directory is not drift', () => {
+    // Canonicalization is what keeps this from firing spuriously: a trailing
+    // separator, a mixed separator, or (on Windows) an 8.3 short name all name
+    // the same file and must not read as a moved home.
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-flip-guard-'));
     try {
-      const cfg = { engine: 'pglite', database_path: join(dir, 'brain.pglite') } as GBrainConfig;
-      const reason = unsafeConfigFlipReason(cfg, SAME, SAME, { gbrainHomeSet: false });
-      expect(reason).not.toBeNull();
-      expect(reason).toContain('temp directory');
+      const a = join(dir, 'config.json');
+      const b = join(dir + sep, 'config.json');
+      expect(unsafeConfigFlipReason(a, b)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test('the mkdtemp prefix is matched by name even if the path is not under tmpdir()', () => {
-    // Defends the case where TMPDIR is redirected between the migration and
-    // this check, so the containment test alone would miss it.
-    const cfg = {
-      engine: 'pglite',
-      database_path: '/somewhere/else/gbrain-migrate-target-M72hsf/brain.pglite',
-    } as GBrainConfig;
-    expect(unsafeConfigFlipReason(cfg, SAME, SAME, { gbrainHomeSet: false })).not.toBeNull();
-  });
-
-  test('a PGLite brain in a permanent location is allowed', () => {
-    const cfg = {
-      engine: 'pglite',
-      database_path: join('/home/u/.gbrain', 'brain.pglite'),
-    } as GBrainConfig;
-    expect(unsafeConfigFlipReason(cfg, SAME, SAME, { gbrainHomeSet: false })).toBeNull();
-  });
-
-  test('a postgres target carries no database_path and is allowed', () => {
-    const cfg = {
-      engine: 'postgres',
-      database_url: 'postgres://user:pw@127.0.0.1:5437/gbrain_db',
-    } as GBrainConfig;
-    expect(unsafeConfigFlipReason(cfg, SAME, SAME, { gbrainHomeSet: false })).toBeNull();
-  });
-
-  test('under a GBRAIN_HOME a temp target is allowed — the config written is itself scoped', () => {
-    // This is the hermetic shape the migrate tests use. Refusing it there would
-    // break isolated runs without preventing any machine-global repoint.
-    const cfg = {
-      engine: 'pglite',
-      database_path: join(tmpdir(), 'gbrain-migrate-target-x', 'brain.pglite'),
-    } as GBrainConfig;
-    expect(unsafeConfigFlipReason(cfg, SAME, SAME, { gbrainHomeSet: true })).toBeNull();
+  test('drift is judged on the config path alone, not on the target', () => {
+    // The temp-target question belongs to `unsafeGlobalConfigWrite`. This
+    // function must stay a single-purpose comparison, so a perfectly permanent
+    // target still trips it when the home moved...
+    expect(unsafeConfigFlipReason(SCOPED_CONFIG, GLOBAL_CONFIG)).not.toBeNull();
+    // ...and a throwaway-looking one does NOT trip it when the home held still.
+    expect(unsafeConfigFlipReason(GLOBAL_CONFIG, GLOBAL_CONFIG)).toBeNull();
   });
 });
 
-describe('unsafeConfigFlipReason — a config home that moved mid-run is refused', () => {
-  test('a changed config path is refused even when the target is permanent', () => {
-    const cfg = {
-      engine: 'pglite',
-      database_path: '/home/u/.gbrain/brain.pglite',
-    } as GBrainConfig;
-    const reason = unsafeConfigFlipReason(
-      cfg,
-      '/tmp/gbrain-migrate-home-abc123/.gbrain/config.json', // GBRAIN_HOME at start
-      '/home/u/.gbrain/config.json',                          // global, after cleanup
-      { gbrainHomeSet: false },
-    );
-    expect(reason).not.toBeNull();
-    expect(reason).toContain('changed mid-migration');
-  });
+describe('a drift refusal is recorded in the same audit trail', () => {
+  test('writes a config-repoint-refused row discriminated by kind', async () => {
+    // Drift is the case where "which process did this?" is HARDEST to answer:
+    // the run's launcher has already exited, so the in-process stack is the
+    // only thing that names the offender. It must reach the same JSONL trail
+    // the temp-target refusal writes, not a second private one.
+    //
+    // GBRAIN_AUDIT_DIR goes through `withEnv` rather than a hand-rolled
+    // save/restore: `process.env` is process-global and the shard runner loads
+    // many files into one bun process, so a raw mutation here leaks into every
+    // later file (and trips `scripts/check-test-isolation.sh` rule R1). Pinning
+    // the dir explicitly is still required — the shared bootstrap
+    // (test/helpers/audit-dir-preload.ts) sets it process-globally, so asserting
+    // the default location would be reading another test's scratch dir.
+    const auditDir = mkdtempSync(join(tmpdir(), 'gbrain-flip-audit-'));
+    try {
+      await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, () => {
+        const cfg: GBrainConfig = { engine: 'pglite', database_path: join(tmpdir(), 'x', 'brain.pglite') };
+        const reason = unsafeConfigFlipReason(SCOPED_CONFIG, GLOBAL_CONFIG)!;
+        auditUnsafeConfigWrite(cfg, reason, 'config_path_drift');
 
-  test('drift is refused even under a GBRAIN_HOME — the scoping allowance must not bypass it', () => {
-    // The scoped-config allowance is an early return; this pins that it sits
-    // AFTER the drift check, so a moved config home is caught either way.
-    const cfg = {
-      engine: 'pglite',
-      database_path: join(tmpdir(), 'gbrain-migrate-target-x', 'brain.pglite'),
-    } as GBrainConfig;
-    const reason = unsafeConfigFlipReason(
-      cfg,
-      '/tmp/gbrain-migrate-home-abc123/.gbrain/config.json',
-      '/home/u/.gbrain/config.json',
-      { gbrainHomeSet: true },
-    );
-    expect(reason).toContain('changed mid-migration');
-  });
+        const rowsPath = join(auditDir, 'config-repoint-refused.jsonl');
+        expect(existsSync(rowsPath)).toBe(true);
+        const lines = readFileSync(rowsPath, 'utf8').trim().split('\n').filter(Boolean);
+        expect(lines.length).toBe(1);
 
-  test('an unchanged config path with a permanent target is the happy path', () => {
-    const cfg = {
-      engine: 'pglite',
-      database_path: '/home/u/.gbrain/brain.pglite',
-    } as GBrainConfig;
-    expect(unsafeConfigFlipReason(cfg, SAME, SAME)).toBeNull();
+        const row = JSON.parse(lines[0]!);
+        expect(row.event).toBe('refused_global_config_repoint');
+        expect(row.kind).toBe('config_path_drift');
+        expect(row.pid).toBe(process.pid);
+        expect(row.reason).toContain('changed mid-migration');
+        expect(typeof row.stack).toBe('string');
+        expect(Number.isNaN(Date.parse(row.ts))).toBe(false);
+      });
+    } finally {
+      rmSync(auditDir, { recursive: true, force: true });
+    }
   });
 });

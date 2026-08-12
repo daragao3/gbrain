@@ -96,12 +96,28 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   `saveConfig`), not at any individual caller — the writer behind the observed incidents was
   never findable by repo-wide search. It refuses exactly one shape: no `GBRAIN_HOME` plus a
   `database_path` inside `tmpdir()` (containment via `isPathInside`, per the bullet above —
-  never `startsWith`). Sandboxed writes, durable PGLite brains and postgres configs are
-  untouched, so a deliberate migration is never reverted. A refusal appends pid/argv/cwd/stack
-  to `<audit>/config-repoint-refused.jsonl` so the offender names itself from inside its own
-  process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B lever that reproduces
-  pre-fix behavior. New code that writes config goes THROUGH `saveConfig` — never
-  `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
+  never `startsWith`), OR a path carrying the `gbrain-migrate-target-` mkdtemp prefix (the
+  name net, which survives a redirected `TMPDIR` that containment alone would miss). Both
+  sides of the containment test go through `canonicalizeNative` (`path-confine.ts`,
+  `realpathSync.native` — plain `realpathSync` does NOT collapse 8.3 short names), because
+  `isPathInside` is `path.relative()` math and a caller holding `…\GBRAIN~1\…` is otherwise
+  lexically OUTSIDE the long-name `tmpdir()`; that is an identity transform on POSIX and so
+  invisible to ubuntu-only CI. Sandboxed writes, durable PGLite brains and postgres configs
+  are untouched, so a deliberate migration is never reverted. A refusal appends
+  pid/argv/cwd/stack to `<audit>/config-repoint-refused.jsonl` so the offender names itself
+  from inside its own process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B
+  lever that reproduces pre-fix behavior. New code that writes config goes THROUGH
+  `saveConfig` — never `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
+  **Disposition is split on purpose.** `saveConfig` THROWS (`UnsafeConfigWriteError`) because
+  a primitive must fail closed — a silent no-op would let `gbrain init` believe it wrote a
+  config it didn't. `migrate-engine.ts` catches that one error type and converts it into a
+  WITHHELD flip (warning + `setCliExitVerdict(1)`), so a page copy that already finished
+  isn't thrown away. The one shape `saveConfig` structurally cannot see is config-path DRIFT
+  — `GBRAIN_HOME` moving underneath an in-flight run — since it has no concept of run-start;
+  `runMigrateEngine` pins `configPath()` at entry and `unsafeConfigFlipReason` compares, then
+  writes the same audit row via the exported `auditUnsafeConfigWrite` (`kind:
+  'config_path_drift'`). Do NOT re-add a temp-target check in the migrate caller: it would be
+  a second, weaker copy with one caller, no escape hatch and no audit row.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows
