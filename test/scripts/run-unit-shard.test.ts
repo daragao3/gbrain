@@ -143,10 +143,111 @@ shift
       const windowsDefaultChunkTimeout = Number(timeoutCalls[0]?.replace(/s$/, ''));
       expect(calls.length).toBeGreaterThan(1);
       expect(windowsDefaultChunkSize).toBe(4);
-      expect(windowsDefaultChunkTimeout).toBe(300);
+      // The cap is DERIVED from the chunk size (600s per file), never a flat
+      // constant. It was a flat 300s — a 75s-per-file budget for a four-file
+      // chunk — while a single Windows unit file that builds a PGLite engine
+      // spends ~65s replaying migrations before its first assertion and
+      // test/sync-monorepo.test.ts measures 389s alone. Assert the
+      // relationship, not the number, so raising the chunk size can't
+      // silently turn the cap back into a guaranteed kill.
+      expect(windowsDefaultChunkTimeout).toBe(windowsDefaultChunkSize * 600);
       for (const call of calls) {
         expect((call.match(/test\/[^ ]+\.test\.ts/g) ?? []).length).toBeLessThanOrEqual(4);
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('scales the chunk cap with an explicit chunk size', () => {
+    // The regression this pins: the cap used to be derived from the DEFAULT
+    // chunk size, so raising GBRAIN_TEST_CHUNK_SIZE bought more files per bun
+    // process without buying them any more wallclock — turning the cap into a
+    // guaranteed kill that reports "totals lost" for every file in the chunk.
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-chunkcap-'));
+    const timeoutInvocations = join(dir, 'timeout-invocations.txt');
+    const uname = join(dir, 'uname');
+    const bun = join(dir, 'bun');
+    const timeout = join(dir, 'timeout');
+
+    try {
+      writeFileSync(uname, '#!/usr/bin/env bash\necho Linux\n');
+      writeFileSync(bun, `#!/usr/bin/env bash
+if [ "$1" = "-e" ]; then
+  echo win32
+  exit 0
+fi
+echo " 1 pass"
+echo " 0 fail"
+echo " 0 skip"
+`);
+      writeFileSync(timeout, `#!/usr/bin/env bash
+if [ "$1" = "--kill-after=5s" ]; then shift; fi
+printf '%s\\n' "$1" >> "${timeoutInvocations.replace(/\\/g, '/')}"
+shift
+"$@"
+`);
+      chmodSync(uname, 0o755);
+      chmodSync(bun, 0o755);
+      chmodSync(timeout, 0o755);
+
+      execFileSync('bash', [SHARD_SH], {
+        cwd: REPO_ROOT,
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`,
+          SHARD: '1/500',
+          GBRAIN_TEST_CHUNK_SIZE: '2',
+          GBRAIN_TEST_CHUNK_SECONDS_PER_FILE: '600',
+        },
+      });
+
+      const caps = readFileSync(timeoutInvocations, 'utf-8').trim().split('\n');
+      expect(caps.length).toBeGreaterThan(0);
+      for (const cap of caps) expect(cap).toBe('1200s');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports its effective chunk cap for the wrapper to size bounds against', () => {
+    // run-unit-parallel.sh sizes its stall window off this number instead of
+    // hardcoding a copy of the chunk constants. Bun's reporter is silent for
+    // a whole passing chunk, so a stall window shorter than the chunk cap
+    // kills healthy shards; the two must be sized against each other, and the
+    // only way to do that without drift is to ask the owner. Answering must
+    // not require globbing the test tree, so it stays cheap to call.
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-unit-shard-cap-'));
+    const uname = join(dir, 'uname');
+    const bun = join(dir, 'bun');
+
+    try {
+      writeFileSync(uname, '#!/usr/bin/env bash\necho Linux\n');
+      writeFileSync(bun, '#!/usr/bin/env bash\nif [ "$1" = "-e" ]; then echo win32; exit 0; fi\nexit 9\n');
+      chmodSync(uname, 0o755);
+      chmodSync(bun, 0o755);
+
+      const run = (env: Record<string, string>) => spawnSync(
+        'bash',
+        [SHARD_SH, '--print-chunk-cap'],
+        {
+          cwd: REPO_ROOT,
+          encoding: 'utf-8',
+          timeout: 60_000,
+          env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH ?? ''}`, ...env },
+        },
+      );
+
+      const windowsDefault = run({ GBRAIN_TEST_CHUNK_SIZE: '' });
+      expect(windowsDefault.status).toBe(0);
+      expect(windowsDefault.stdout.trim()).toBe('2400');
+
+      const biggerChunk = run({ GBRAIN_TEST_CHUNK_SIZE: '8' });
+      expect(biggerChunk.stdout.trim()).toBe('4800');
+
+      const pinned = run({ GBRAIN_TEST_CHUNK_TIMEOUT: '777' });
+      expect(pinned.stdout.trim()).toBe('777');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -302,12 +403,15 @@ sleep 30
       // then model a child that ignores SIGTERM. Only the exact owned child is
       // signalled; the fixture never enumerates or targets unrelated processes.
       writeFileSync(timeout, `#!/usr/bin/env bash
-preserve_status="$1"
-kill_after="$2"
-limit="$3"
-shift 3
-if [ "$preserve_status" != "--preserve-status" ] || [ "$kill_after" != "--kill-after=5s" ] || [ "$limit" != "1s" ]; then
-  echo "unexpected timeout args: $preserve_status $kill_after $limit" >&2
+kill_after="$1"
+limit="$2"
+shift 2
+# Deliberately NOT --preserve-status: that flag makes a timed-out chunk exit
+# with bun's own signal status (143 on TERM, 137 on KILL) instead of GNU
+# timeout's 124/137, and report_chunk_failure keys on the latter. Asserting
+# its absence here keeps the flag from being reintroduced silently.
+if [ "$kill_after" != "--kill-after=5s" ] || [ "$limit" != "1s" ]; then
+  echo "unexpected timeout args: $kill_after $limit" >&2
   exit 98
 fi
 "$@" &

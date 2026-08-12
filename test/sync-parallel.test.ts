@@ -14,12 +14,40 @@
  * the T1 + CODEX-3 contracts. A separate Postgres E2E covers worker-engine
  * construction directly.
  */
-import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
+import { describe, expect, test, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+
+// ONE engine for the whole file (the canonical block documented in
+// test/helpers/reset-pglite.ts), not one per test.
+//
+// This file used to build a fresh PGLiteEngine in four separate beforeEach
+// hooks — one cold initSchema() per test, so seven for the seven tests here.
+// On Windows a cold init replays 121 migrations through the PGLite WASM
+// build at ~65s each, so the file spent roughly 7.5 minutes on schema replay
+// alone and blew every wallclock cap the unit runner has. Sharing one engine
+// and TRUNCATEing user data between tests is the same isolation for ~1/7 the
+// wallclock. It also clears the R3/R4 violations that kept this file on
+// scripts/check-test-isolation.allowlist.
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+}, 300_000);
+
+afterAll(async () => {
+  await engine.disconnect();
+}, 60_000);
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+});
 
 function git(repo: string, ...args: string[]): string {
   return execSync(`git ${args.join(' ')}`, { cwd: repo, encoding: 'utf-8' }).trim();
@@ -45,18 +73,13 @@ function seedRepoWithMarkdown(repoPath: string, fileCount: number): string {
 }
 
 describe('sync-parallel: PGLite + concurrency=4 (T4)', () => {
-  let engine: PGLiteEngine;
   let repoPath: string;
 
-  beforeEach(async () => {
-    engine = new PGLiteEngine();
-    await engine.connect({});
-    await engine.initSchema();
+  beforeEach(() => {
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-par-'));
   });
 
-  afterEach(async () => {
-    await engine.disconnect();
+  afterEach(() => {
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
   });
 
@@ -92,18 +115,13 @@ describe('sync-parallel: PGLite + concurrency=4 (T4)', () => {
 });
 
 describe('sync-parallel: bookmark gate under concurrency request (T1)', () => {
-  let engine: PGLiteEngine;
   let repoPath: string;
 
-  beforeEach(async () => {
-    engine = new PGLiteEngine();
-    await engine.connect({});
-    await engine.initSchema();
+  beforeEach(() => {
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-gate-'));
   });
 
-  afterEach(async () => {
-    await engine.disconnect();
+  afterEach(() => {
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
   });
 
@@ -163,18 +181,13 @@ describe('sync-parallel: bookmark gate under concurrency request (T1)', () => {
 });
 
 describe('sync-parallel: head-drift gate (CODEX-3)', () => {
-  let engine: PGLiteEngine;
   let repoPath: string;
 
-  beforeEach(async () => {
-    engine = new PGLiteEngine();
-    await engine.connect({});
-    await engine.initSchema();
+  beforeEach(() => {
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-drift-'));
   });
 
-  afterEach(async () => {
-    await engine.disconnect();
+  afterEach(() => {
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
   });
 
@@ -217,18 +230,13 @@ describe('sync-parallel: head-drift gate (CODEX-3)', () => {
 });
 
 describe('sync-parallel: writer lock prevents reentrance (CODEX-2)', () => {
-  let engine: PGLiteEngine;
   let repoPath: string;
 
-  beforeEach(async () => {
-    engine = new PGLiteEngine();
-    await engine.connect({});
-    await engine.initSchema();
+  beforeEach(() => {
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-lock-'));
   });
 
-  afterEach(async () => {
-    await engine.disconnect();
+  afterEach(() => {
     if (repoPath) rmSync(repoPath, { recursive: true, force: true });
   });
 
