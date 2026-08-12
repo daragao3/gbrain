@@ -2,6 +2,78 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.93.0] - 2026-08-12
+
+**The local test suite can now finish on Windows without someone sitting there killing processes.**
+
+Running the full unit suite on Windows used to end one of two ways. Either a batch of tests announced that its pass and fail counts were lost, or a whole shard was declared wedged. Both read like a test had hung, so the usual rescue was to find the right process by hand and kill it. Neither diagnosis was true. The runner was cutting healthy work short and then reporting it as a hang.
+
+The cause is that the runner's limits were fixed numbers chosen on a fast machine. On Windows, a single test file that starts a local database spends about 65 seconds building it before it checks anything, and the limits assumed roughly six seconds per file. Ten files had been written down as hanging or spinning forever. Measured one at a time on an idle machine, none of them hangs. They take 19 to 389 seconds and all of them finish.
+
+Every limit is now worked out from the thing it bounds. The per shard time budget is built from how many files that shard actually owns, for any number of shards rather than only the single shard Windows picks by default. The per batch budget is built from how many files are in the batch, so asking for bigger batches gives them proportionally more time. The no output watchdog is sized against the batch budget, because the test reporter prints nothing at all until it exits, so a healthy batch of quiet tests looks identical to a dead one.
+
+Four test files also had real problems that the old limits were hiding, including one that gave up on a subprocess while it was still running and left it burning CPU against everything else in the shard.
+
+### How to use it
+
+Nothing changes about how you run the suite:
+
+```bash
+bash scripts/run-unit-parallel.sh --shards 4
+```
+
+The banner now shows how each limit was derived, so a killed shard is actionable instead of mysterious:
+
+```
+[unit-parallel] N=4 shards | --max-concurrency=4 | timeout=8250s (275 files/shard × 30s) | stall=2700s
+```
+
+If a batch does get cut off, the message names every file in it.
+
+Three environment variables tune the budgets when your machine is slower or faster:
+
+```bash
+GBRAIN_TEST_SECONDS_PER_FILE=45 bash scripts/run-unit-parallel.sh --shards 4
+GBRAIN_TEST_CHUNK_SECONDS_PER_FILE=900 bash scripts/run-unit-parallel.sh
+GBRAIN_TEST_SHARD_STALL_SECONDS=3600 bash scripts/run-unit-parallel.sh
+```
+
+### Numbers that matter
+
+| Limit | Before | After |
+|---|---|---|
+| Per shard budget at `--shards 4` | 1500s flat, 5.5s per file | 8250s, 275 files per shard at 30s |
+| Per batch budget, 4 file batch | 300s flat, 75s per file | 2400s, 4 files at 600s |
+| No output watchdog on Windows | 600s | batch budget plus 300s |
+| `test/chunk-grain-fts.test.ts` | 192s | 40s, same 11 checks |
+| Slowest single unit file measured | `test/sync-monorepo.test.ts`, 389s | unchanged, now inside its budget |
+
+### Things to watch
+
+The budgets are deliberately generous, because a limit that is too low makes the suite unusable while one that is too high only delays the report of a real hang. If you want a genuine hang surfaced faster, lower the no output watchdog rather than the time budgets.
+
+A batch cut short still loses its pass and fail counts. That is unchanged, and it is why the message lists the files.
+
+### Itemized changes
+
+- `scripts/run-unit-parallel.sh`: derives the per shard wallclock cap on Windows for every shard count instead of only the defaulted one, using ceiling division over the discovered file count; adds `GBRAIN_TEST_SECONDS_PER_FILE`; sizes the stall window from the shard runner's own effective batch cap; removes a variable that no longer had a reader.
+- `scripts/run-unit-shard.sh`: derives the batch cap from the effective batch size rather than the default one; adds `GBRAIN_TEST_CHUNK_SECONDS_PER_FILE` and a `--print-chunk-cap` flag that answers without listing the test tree; drops `--preserve-status` from the `timeout` call, which had been reporting a cut off batch as 143 or 137 where the reporting code only recognized 124 and 137; accepts 143 in that reporting code as well; accepts a handed down platform so the extra query costs no runtime startup.
+- `test/scripts/run-unit-shard.test.ts`: asserts the batch cap tracks the batch size rather than pinning a constant, and adds two cases covering the derived cap and `--print-chunk-cap`.
+- `test/timeout.test.ts`: bounds the clear on settle check at half the deadline instead of at 200ms, which was measuring machine speed and returned 477ms on a loaded box.
+- `test/cli-dispatch-thin-client.test.ts`: gives the two cases that seed a local database config a budget that covers the subprocess's cold setup, so the test stops abandoning a live child process.
+- `test/chunk-grain-fts.test.ts`: one shared engine plus a data reset per section instead of three separate engines.
+- `test/sync-parallel.test.ts`: one shared engine plus a data reset per test instead of one engine per test, and comes off `scripts/check-test-isolation.allowlist`.
+- `docs/TESTING.md`: documents the derivations, the new variables, and why the reporter's silence forced the watchdog change.
+
+## To take advantage of v0.42.93.0
+
+Nothing to do. The new defaults apply the next time you run the suite. If you had pinned `GBRAIN_TEST_SHARD_TIMEOUT` to a large number to work around the false wedge reports, you can unset it and let the derived value take over:
+
+```bash
+unset GBRAIN_TEST_SHARD_TIMEOUT
+bash scripts/run-unit-parallel.sh --shards 4
+```
+
 ## [0.42.91.0] - 2026-08-12
 
 **GBrain now works out which repository your work belongs to before it pushes, instead of always pushing to the one named "origin".**
