@@ -187,7 +187,7 @@ mount, CEO-class with multiple team brains) and
 
 ## Architecture
 
-Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`). CLI and MCP
+Contract-first: `src/core/operations.ts` defines ~90 shared operations (v0.29 adds `get_recent_salience`, `find_anomalies`, `get_recent_transcripts`; v0.42.43.0 adds `volunteer_context` — push-based context, see `docs/guides/push-context.md`; v0.42.87.0 adds `put_page_conditional` — conditional page writes, see the invariant below). CLI and MCP
 server are both generated from this single source. Engine factory (`src/core/engine-factory.ts`)
 dynamically imports the configured engine (`'pglite'` or `'postgres'`). Skills are fat
 markdown files (tool-agnostic, work with both CLI and plugin contexts).
@@ -330,6 +330,18 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   Postgres; plain `CREATE INDEX` on PGLite via `sqlFor.pglite`).
 - **Multi-source.** Slug uniqueness is `(source_id, slug)`, not slug. Key batch ops and
   reverse-writes on the composite key; `validateSourceId` before any `source_id` path join.
+- **Page writes are last-writer-wins unless they opt out.** `put_page` overwrites, which is
+  correct for a sole writer and lossy for concurrent ones — there is no trash can for the
+  content and links it removes. A caller that can race uses `put_page_conditional`
+  (`create_only`, or `compare_and_swap` at an `expected_revision`); conflicts come back as
+  typed results (`already_exists`, `revision_mismatch`) carrying the revision actually found
+  and never overwrite. `pages.revision` is maintained by the `bump_page_revision_trg` trigger,
+  NOT by application code, and it counts unconditional writers too — that is precisely what
+  lets a conditional write detect a plain `put_page` that landed underneath it. Never derive
+  the next revision in TypeScript. Migration v126 `page_revision_cas` adds the column
+  (`DEFAULT 1`) and the trigger; `src/schema.sql` carries both for fresh installs, so the two
+  must move together like any other engine-parity change. The op is agent-facing: it carries
+  no `cliHints`, so it appears in `gbrain --tools-json` and over MCP but has no subcommand.
 - **One canonical chat-pricing table.** All paid-cloud chat/completion prices live ONCE in
   `src/core/model-pricing.ts` (`CANONICAL_PRICING` + `canonicalLookup`). Every other table
   (`anthropic-pricing.ts`'s `ANTHROPIC_PRICING`, `takes-quality-eval/pricing.ts`'s

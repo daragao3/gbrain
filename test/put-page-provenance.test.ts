@@ -27,9 +27,18 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { OperationError } from '../src/core/operations.ts';
-import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
+import {
+  configureGateway,
+  resetGateway,
+  __setChatTransportForTests,
+  __setEmbedTransportForTests,
+  type ChatResult,
+} from '../src/core/ai/gateway.ts';
+import { __resetFactsQueueForTests, getFactsQueue } from '../src/core/facts/queue.ts';
 
 const putPageOp = operations.find((o) => o.name === 'put_page')!;
+const conditionalOp = operations.find(o => o.name === 'put_page_conditional');
+if (!conditionalOp) throw new Error('put_page_conditional missing');
 
 let engine: PGLiteEngine;
 
@@ -64,15 +73,18 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  __setChatTransportForTests(null);
   __setEmbedTransportForTests(null);
+  __resetFactsQueueForTests();
   resetGateway();
 });
 
 beforeEach(async () => {
-  // Wipe pages so each test starts from a known empty state. We use
-  // executeRaw rather than a TRUNCATE-by-name sweep because this file
-  // only touches one table.
+  // Wipe operation outputs so each test starts from a known empty state.
+  await engine.executeRaw('DELETE FROM facts', []);
   await engine.executeRaw('DELETE FROM pages', []);
+  __setChatTransportForTests(null);
+  __resetFactsQueueForTests();
 });
 
 function makeCtx(opts: Partial<OperationContext> = {}): OperationContext {
@@ -195,6 +207,126 @@ describe('put_page provenance — CV6 spoofing guard (ctx.remote !== false)', ()
     });
     const prov = await readProvenance('wiki/p3a-undefined-trust');
     expect(prov.source_kind).toBe('mcp:put_page');
+  });
+});
+
+describe('put_page_conditional provenance', () => {
+  test('trusted local caller provenance params are honored', async () => {
+    await conditionalOp.handler(makeCtx({ remote: false }), {
+      slug: 'wiki/conditional-local',
+      content: '---\ntype: note\ntitle: Conditional Local\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+      source_uri: 'file:///tmp/conditional.md',
+      ingested_via: 'conditional-cli',
+    });
+    expect(await readProvenance('wiki/conditional-local')).toMatchObject({
+      source_kind: 'capture-cli',
+      source_uri: 'file:///tmp/conditional.md',
+      ingested_via: 'conditional-cli',
+    });
+  });
+
+  test('remote payload provenance is replaced by the conditional server stamp', async () => {
+    await conditionalOp.handler(makeCtx({ remote: true }), {
+      slug: 'wiki/conditional-remote',
+      content: '---\ntype: note\ntitle: Conditional Remote\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+      source_uri: 'spoofed://attacker',
+      ingested_via: 'file-watcher',
+    });
+    expect(await readProvenance('wiki/conditional-remote')).toMatchObject({
+      source_kind: 'mcp:put_page_conditional',
+      source_uri: null,
+      ingested_via: 'mcp:put_page_conditional',
+    });
+  });
+
+  test('undefined trust is fail-closed for conditional provenance', async () => {
+    await conditionalOp.handler(makeCtx({ remote: undefined as unknown as boolean }), {
+      slug: 'wiki/conditional-undefined',
+      content: '---\ntype: note\ntitle: Conditional Undefined\n---\n\nbody',
+      mode: 'create_only',
+      source_kind: 'capture-cli',
+    });
+    expect(await readProvenance('wiki/conditional-undefined')).toMatchObject({
+      source_kind: 'mcp:put_page_conditional',
+      source_uri: null,
+      ingested_via: 'mcp:put_page_conditional',
+    });
+  });
+
+  test('remote successful conditional write stamps extracted facts with conditional provenance', async () => {
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({
+        facts: [{
+          fact: 'The project committed to ship the source-scoped conditional writer.',
+          kind: 'commitment',
+          entity: null,
+          confidence: 1,
+          notability: 'high',
+        }],
+      }),
+      blocks: [],
+      stopReason: 'end',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:stub',
+      providerId: 'test',
+    }));
+
+    const slug = 'meetings/conditional-facts-provenance';
+    const result = await conditionalOp.handler(makeCtx({ remote: true }), {
+      slug,
+      content: '---\ntype: meeting\ntitle: Conditional Facts Provenance\n---\n\n' +
+        'The project committed to ship the source-scoped conditional writer. '.repeat(3),
+      mode: 'create_only',
+    });
+    expect(result).toMatchObject({ status: 'created', facts_backstop: { queued: true } });
+
+    expect(await getFactsQueue().drainPending({ timeout: 2_000 })).toMatchObject({ unfinished: 0 });
+    const rows = await engine.executeRaw<{ source: string }>(
+      'SELECT source FROM facts WHERE fact = $1',
+      ['The project committed to ship the source-scoped conditional writer.'],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.source).toBe('mcp:put_page_conditional');
+  });
+});
+
+describe('put_page facts provenance', () => {
+  test('trusted local legacy write preserves the historical facts source', async () => {
+    __setChatTransportForTests(async (): Promise<ChatResult> => ({
+      text: JSON.stringify({
+        facts: [{
+          fact: 'The project committed to preserve the legacy facts provenance.',
+          kind: 'commitment',
+          entity: null,
+          confidence: 1,
+          notability: 'high',
+        }],
+      }),
+      blocks: [],
+      stopReason: 'end',
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:stub',
+      providerId: 'test',
+    }));
+
+    const result = await putPageOp.handler(makeCtx({ remote: false }), {
+      slug: 'meetings/legacy-facts-provenance',
+      content: '---\ntype: meeting\ntitle: Legacy Facts Provenance\n---\n\n' +
+        'The project committed to preserve the legacy facts provenance. '.repeat(3),
+    });
+    expect(result).toMatchObject({ status: 'created_or_updated', facts_backstop: { queued: true } });
+
+    expect(await getFactsQueue().drainPending({ timeout: 2_000 })).toMatchObject({ unfinished: 0 });
+    const rows = await engine.executeRaw<{ source: string }>(
+      'SELECT source FROM facts WHERE fact = $1',
+      ['The project committed to preserve the legacy facts provenance.'],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.source).toBe('mcp:put_page');
   });
 });
 

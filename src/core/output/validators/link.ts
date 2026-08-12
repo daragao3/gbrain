@@ -62,9 +62,13 @@ export const linkValidator: PageValidator = {
       linkPositions.set(slug, list);
     }
 
-    // Batch-check which targets exist.
+    // Batch-check which targets exist within the validation read scope.
+    const sourceOpts = {
+      ...(ctx.sourceIds ? { sourceIds: ctx.sourceIds } : {}),
+      ...(!ctx.sourceIds && ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+    };
     for (const slug of internalTargets) {
-      const page = await ctx.engine.getPage(slug);
+      const page = await ctx.engine.getPage(slug, sourceOpts);
       if (page) continue;
       const positions = linkPositions.get(slug) ?? [];
       for (const pos of positions) {
