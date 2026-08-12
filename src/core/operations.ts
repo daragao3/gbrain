@@ -932,8 +932,8 @@ async function executePutPage(
 
   // Empty-overwrite guard: empty/whitespace-only content over an existing
   // non-empty page is almost always an input-plumbing failure (e.g. a
-  // caller that meant file input — put has no --file flag — so the missing
-  // --content fell back to reading an empty non-interactive stdin), not an
+  // caller that meant file input but did not reach for `put --file`, so the
+  // missing --content fell back to reading an empty non-interactive stdin), not an
   // intentional write. Refuse loudly unless the caller opts in with
   // allow_empty. The read is scoped to the exact (source_id, slug) row the
   // write below targets. New-slug creates and soft-deleted-page overwrites
@@ -951,7 +951,7 @@ async function executePutPage(
       throw new OperationError(
         'invalid_params',
         `Refusing to overwrite existing non-empty page '${slug}' with empty content.`,
-        'For file input use `gbrain capture --file PATH --slug SLUG` (put has no --file flag). To intentionally blank the page, pass allow_empty: true (CLI: --allow-empty).',
+        'For file input use `gbrain put SLUG --file PATH` (CLI-only; keeps the body out of argv). To intentionally blank the page, pass allow_empty: true (CLI: --allow-empty).',
       );
     }
   }
