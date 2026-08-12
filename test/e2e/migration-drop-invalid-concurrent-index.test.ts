@@ -14,6 +14,14 @@
  * issue's exact repro steps against real Postgres and confirms the migration
  * now recovers instead of throwing.
  *
+ * v66 was the issue-reported migration and is the behavioral repro here, but
+ * the same broken idiom shipped in ten more migrations (v14, v34, v41, v72,
+ * v91, v96, v97, v103, v104, v112) and all of them now route through the same
+ * helper. Because the recovery path is shared, the per-migration guarantee is
+ * enforced as source-text regressions in test/migrate.test.ts ("#1178:
+ * invalid-remnant cleanup is delegated to the shared helper everywhere"),
+ * which also carries a class-level backstop against the idiom reappearing.
+ *
  * Real Postgres only — gated by DATABASE_URL, skips otherwise.
  *
  * Run: DATABASE_URL=... bun test test/e2e/migration-drop-invalid-concurrent-index.test.ts

@@ -686,15 +686,17 @@ describe('migrate v14 — pages_updated_at_index (handler-based, engine-aware)',
     const v14Start = src.indexOf("name: 'pages_updated_at_index'");
     expect(v14Start).toBeGreaterThan(-1);
     const v14Block = src.slice(v14Start, v14Start + 3000);
-    expect(v14Block).toContain('pg_index');
-    expect(v14Block).toContain('indisvalid');
-    expect(v14Block).toContain('DROP INDEX CONCURRENTLY IF EXISTS idx_pages_updated_at_desc');
+    // #1178: the invalid-remnant probe + drop live in the shared
+    // dropInvalidConcurrentIndex() helper, NOT in an inline
+    // `DO $$ ... EXECUTE 'DROP INDEX CONCURRENTLY ...' ... END $$;` block —
+    // Postgres rejects CONCURRENTLY from any function/EXECUTE context, so the
+    // inline form threw exactly when its guard fired.
+    expect(v14Block).toContain("dropInvalidConcurrentIndex(engine, 14, 'idx_pages_updated_at_desc')");
+    expect(v14Block).not.toMatch(/EXECUTE\s+'DROP INDEX CONCURRENTLY/);
     expect(v14Block).toContain('CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pages_updated_at_desc');
-    // Order within the handler body: DROP IF EXISTS must precede CREATE IF NOT EXISTS,
-    // so a failed prior CONCURRENTLY build is cleaned before re-create. Anchor on the
-    // explicit "IF EXISTS" / "IF NOT EXISTS" phrases so the header doc-comment
-    // (which mentions both unqualified) doesn't fool the ordering assertion.
-    const dropIdx = v14Block.indexOf('DROP INDEX CONCURRENTLY IF EXISTS');
+    // Order within the handler body: the cleanup must precede CREATE IF NOT
+    // EXISTS, so a failed prior CONCURRENTLY build is cleaned before re-create.
+    const dropIdx = v14Block.indexOf('dropInvalidConcurrentIndex');
     const createIdx = v14Block.indexOf('CREATE INDEX CONCURRENTLY IF NOT EXISTS');
     expect(dropIdx).toBeLessThan(createIdx);
     expect(v14Block).toContain('engine.kind');
@@ -836,6 +838,117 @@ describe('migrate v66 — embed_stale_partial_index (D6)', () => {
 
   test('v66 idempotent flag is true (re-run safety)', () => {
     expect(v66!.idempotent).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// #1178 class sweep — EVERY CREATE INDEX CONCURRENTLY migration, not just
+// v66.
+//
+// The broken idiom was:
+//
+//   DO $$ BEGIN
+//     IF EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ...
+//                WHERE c.relname = 'X' AND NOT i.indisvalid) THEN
+//       EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS X';
+//     END IF;
+//   END $$;
+//
+// The guard evaluates fine, but Postgres rejects CONCURRENTLY from any
+// function/EXECUTE context — so the EXECUTE throws
+// "DROP INDEX CONCURRENTLY cannot be executed from a function" EXACTLY when
+// the block fires, i.e. when an interrupted concurrent build left an invalid
+// remnant blocking the re-create. That is the one case the block exists to
+// handle. PGLite has no invalid-concurrent-build concept, so only a Postgres
+// brain that has actually had a CREATE INDEX CONCURRENTLY fail can hit it —
+// which is why it went unnoticed on ten sites after v66 was fixed.
+//
+// v66 was converted to dropInvalidConcurrentIndex() first; these are the
+// remaining ten. Each entry names its anchor migration, the version argument
+// the original site passed to runMigration (preserved verbatim — v72's site
+// passes 71 and v41's passes 38, both pre-existing), and its index.
+// ────────────────────────────────────────────────────────────────────────
+
+const CONCURRENT_INDEX_MIGRATIONS: Array<{
+  migrationName: string;
+  versionArg: number;
+  indexName: string;
+}> = [
+  { migrationName: 'pages_updated_at_index', versionArg: 14, indexName: 'idx_pages_updated_at_desc' },
+  { migrationName: 'destructive_guard_columns', versionArg: 34, indexName: 'pages_deleted_at_purge_idx' },
+  { migrationName: 'pages_recency_columns', versionArg: 38, indexName: 'pages_coalesce_date_idx' },
+  { migrationName: 'takes_resolved_at_trend_idx_v0_36', versionArg: 71, indexName: 'takes_resolved_at_idx' },
+  { migrationName: 'pages_generation_trigger_and_bookmark', versionArg: 91, indexName: 'pages_generation_idx' },
+  {
+    migrationName: 'facts_extract_conversation_session_index',
+    versionArg: 96,
+    indexName: 'idx_facts_extract_conversation_session',
+  },
+  { migrationName: 'pages_dedup_partial_index', versionArg: 97, indexName: 'pages_dedup_idx' },
+  {
+    migrationName: 'migration_impact_log_and_priority_recent_idx',
+    versionArg: 103,
+    indexName: 'content_chunks_stale_idx',
+  },
+  { migrationName: 'pages_atom_source_hash_idx', versionArg: 104, indexName: 'pages_atom_source_hash_idx' },
+  { migrationName: 'pages_links_extracted_at', versionArg: 112, indexName: 'pages_links_extracted_at_idx' },
+  { migrationName: 'embed_stale_partial_index', versionArg: 66, indexName: 'idx_chunks_embedding_null' },
+];
+
+/** Slice one migration's object literal out of migrate.ts source, anchored on
+ *  its `name:` field and bounded by the next migration's `version:` field, so
+ *  a long handler body (v91's trigger, v103's CREATE TABLE) can't run the
+ *  window past the end and a short one can't bleed into its successor. */
+function sliceMigrationSource(src: string, migrationName: string): string {
+  const start = src.indexOf(`name: '${migrationName}'`);
+  expect(start).toBeGreaterThan(-1);
+  const nextVersion = src.indexOf('\n    version: ', start);
+  return nextVersion === -1 ? src.slice(start) : src.slice(start, nextVersion);
+}
+
+describe('#1178: invalid-remnant cleanup is delegated to the shared helper everywhere', () => {
+  let src: string;
+
+  beforeAll(async () => {
+    const { readFileSync } = await import('fs');
+    src = readFileSync('src/core/migrate.ts', 'utf-8');
+  });
+
+  for (const { migrationName, versionArg, indexName } of CONCURRENT_INDEX_MIGRATIONS) {
+    test(`${migrationName} (v${versionArg}) delegates ${indexName} cleanup to dropInvalidConcurrentIndex`, () => {
+      const block = sliceMigrationSource(src, migrationName);
+      // The helper call replaces the DO block entirely.
+      expect(block).toContain(`dropInvalidConcurrentIndex(engine, ${versionArg}, '${indexName}')`);
+      // ...and no trace of the broken idiom survives in this migration.
+      expect(block).not.toMatch(/EXECUTE\s+'DROP INDEX CONCURRENTLY/);
+      expect(block).not.toContain('DO $$');
+      // The cleanup still runs BEFORE the re-create it exists to unblock.
+      const dropIdx = block.indexOf('dropInvalidConcurrentIndex');
+      const createIdx = block.indexOf(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName}`);
+      expect(createIdx).toBeGreaterThan(-1);
+      expect(dropIdx).toBeLessThan(createIdx);
+      // Still engine-aware: PGLite takes the plain-CREATE branch.
+      expect(block).toContain('engine.kind');
+      expect(block).toContain(`CREATE INDEX IF NOT EXISTS ${indexName}`);
+    });
+  }
+
+  test('no migration anywhere in migrate.ts issues DROP INDEX CONCURRENTLY from an EXECUTE', () => {
+    // Class-level backstop: catches a NEW migration that copies the broken
+    // idiom from git history, which the per-migration cases above cannot.
+    expect(src).not.toMatch(/EXECUTE\s+'DROP INDEX CONCURRENTLY/);
+  });
+
+  test('every CREATE INDEX CONCURRENTLY site is covered by a helper call in the same migration', () => {
+    // Counts, not names: if someone adds an 12th concurrent-index migration
+    // without a pre-drop, the table above goes stale silently. This fails.
+    const concurrentCreates = [...src.matchAll(/CREATE INDEX CONCURRENTLY IF NOT EXISTS (\w+)/g)].map(
+      (m) => m[1],
+    );
+    const helperCalls = [...src.matchAll(/dropInvalidConcurrentIndex\(engine, \d+, '(\w+)'\)/g)].map(
+      (m) => m[1],
+    );
+    expect([...new Set(concurrentCreates)].sort()).toEqual([...new Set(helperCalls)].sort());
   });
 });
 
