@@ -1,5 +1,38 @@
 # TODOS
 
+## v0.42.93.0 follow-ups (Windows test-runner cap derivation)
+
+- [ ] **P1 — wire the PGLite snapshot into the local unit loop.** Follow-up from
+  v0.42.93.0. `scripts/ci-local.sh` is still the only thing that sets
+  `GBRAIN_PGLITE_SNAPSHOT`; `bun run test` → `run-unit-parallel.sh` →
+  `run-unit-shard.sh` never does, so every PGLite-using unit file replays the whole
+  migration chain. Measured on Windows that is about 65 seconds per engine
+  construction, which is what made v0.42.93.0's caps necessary in the first place:
+  the suite is roughly 1100 files and a large share of them build an engine. A
+  `bunfig.toml` `[test] preload` that sets the variable only when both fixture files
+  exist is the lever (precedent: `test/helpers/audit-dir-preload.ts`), and it was
+  already prototyped once. The catch is that the snapshot restores a fully-migrated
+  directory, so genuinely cold-path files need an opt-out and several of them have
+  per-test budgets sized for a cold init. Wants its own pass, not a flag flip.
+- [ ] **P2 — `test/scripts/run-unit-parallel.test.ts` cannot gate anything on
+  Windows.** Follow-up from v0.42.93.0. Identical unmodified code measured 0 fails
+  in 362s and 4 fails in 611s within one session on the same box. The failures are
+  its own wallclock-helper and process-tree termination cases, and one run logged
+  `taskkill.exe ... Segmentation fault` from `kill_process_tree`. So the file is
+  reporting a real Windows weakness in the termination path rather than pure noise,
+  but it reports it non-deterministically, which makes it useless as a local gate
+  and a trap for anyone attributing a red run to their own change. Either make the
+  termination path deterministic on Windows or move the affected cases behind an
+  `it.skipIf(process.platform === 'win32')` with the reason recorded. Until then a
+  paired A/B is the only honest way to read that file locally.
+- [ ] **P3 — `test/sync-monorepo.test.ts` is the slowest unit-loop resident at
+  389s.** Follow-up from v0.42.93.0. It already uses the canonical single-engine
+  block, so the remaining cost is 12 tests each running five `git` subprocesses in
+  `beforeEach` plus a `performSync`. Either seed one repository per describe and
+  reset it, or accept the cost and move the file to `*.slow.test.ts`. It sets the
+  floor for the per-chunk budget, so shrinking it is what would let that budget come
+  back down.
+
 ## v0.42.91.0 follow-ups (push remote resolved from config)
 
 - [ ] **P2 — fetch paths still name `origin`, so a fork-shaped brain repo pulls the
