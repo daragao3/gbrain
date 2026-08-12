@@ -2,6 +2,42 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.90.0] - 2026-08-12
+
+**A database connection that runs out of time while the machine is busy is now retried, instead of taking the whole server down with it.**
+
+GBrain already retried the connection failures that mean "the database is not ready yet", like a refused connection or a database still starting up. It did not retry the one that means "the database did not answer in time".
+
+That gap only shows on a loaded machine, and it is the worst moment for it. When the host is starved, opening a fresh connection can exceed its own time limit even though the database is perfectly healthy and has been running for hours. GBrain treated that as fatal, so a server start failed outright. A supervisor restarting it hit the same wall, so the restarts did not stick.
+
+Two timeout shapes now count as retryable, matching how the existing retries already work. A slow connection gets another attempt with a short backoff, and only a genuine failure stops the run.
+
+Nothing to turn on, and no change on an idle machine, where these connections were never timing out.
+
+### How to use it
+
+Nothing to do. It applies to every Postgres connection GBrain opens, including the one a long running server makes when its pool has been idle and has to open a fresh connection.
+
+If you want to watch it work, the retry announces itself:
+
+```
+[connect] attempt 1 failed (write CONNECT_TIMEOUT 127.0.0.1:5437), retrying in 1ms
+```
+
+### Things to watch
+
+A connection that is genuinely unreachable now takes slightly longer to report failure, because it is retried before giving up. The attempt count and backoff are unchanged from the other retryable failures.
+
+This does not paper over a real outage. A database that stays down still fails the run; the retry only covers the case where the answer arrives late.
+
+### Itemized changes
+
+#### Fixed
+- **Connection timeouts are retryable.** `RETRYABLE_DB_CONNECT_PATTERNS` in `src/core/db.ts` gains `/CONNECT_TIMEOUT/i` and `/ETIMEDOUT/i`, alongside the existing refused/starting-up/reset patterns. The first is how the Postgres driver reports its own connect deadline expiring; the second is the operating system socket equivalent. Both mean the backend did not answer in time, which is transient under load.
+
+#### Tests
+- **`test/db-connect-retry-timeout.test.ts`** pins both new shapes as retryable and confirms the existing patterns and the non-retryable cases are unchanged.
+
 ## [0.42.89.0] - 2026-08-12
 
 **The guard that stops GBrain pointing your brain at a scratch folder now holds on Windows, and a migration that finishes its copy no longer throws that work away.**
