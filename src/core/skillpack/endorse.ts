@@ -18,6 +18,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
+import { resolvePushRemote } from '../git-remote.ts';
 import {
   ENDORSEMENTS_SCHEMA_VERSION,
   REGISTRY_SCHEMA_VERSION,
@@ -39,7 +40,7 @@ export interface EndorseOptions {
   note?: string;
   /** Dry-run: report what would change without writing or committing. */
   dryRun?: boolean;
-  /** Push the commit to origin/main after writing. */
+  /** Push the commit after writing, to the remote `resolvePushRemote` picks. */
   push?: boolean;
 }
 
@@ -51,6 +52,8 @@ export interface EndorseResult {
   endorsements_path: string;
   commit_sha: string | null;
   pushed: boolean;
+  /** Remote the commit was pushed to; null when --push was not requested. */
+  push_remote?: string | null;
   dry_run: boolean;
 }
 
@@ -58,7 +61,8 @@ export type EndorseErrorCode =
   | 'not_a_registry_repo'
   | 'pack_not_in_catalog'
   | 'git_commit_failed'
-  | 'git_push_failed';
+  | 'git_push_failed'
+  | 'push_remote_unresolved';
 
 export class EndorseError extends Error {
   constructor(
@@ -199,15 +203,29 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
   }
 
   let pushed = false;
+  let pushRemote: string | null = null;
   if (opts.push) {
+    // `--repo` defaults to CWD and gbrain never provisions this checkout, so it
+    // can be fork-shaped (origin = upstream registry, the operator's fork under
+    // another remote name). Resolve, never assume `origin`, refuse rather than
+    // guess — a wrong guess publishes an endorsement to a repo the operator
+    // does not own.
+    const res = resolvePushRemote(opts.registryRepoRoot);
+    if (!res.ok) {
+      throw new EndorseError(
+        `cannot determine where to push: ${res.reason}. The commit is already made — push it yourself, or configure a push remote and re-run.`,
+        'push_remote_unresolved',
+      );
+    }
+    pushRemote = res.remote;
     try {
-      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', 'origin', 'HEAD'], {
+      execFileSync('git', ['-C', opts.registryRepoRoot, 'push', pushRemote, 'HEAD'], {
         encoding: 'utf-8',
       });
       pushed = true;
     } catch (err) {
       throw new EndorseError(
-        `git push failed: ${(err as Error).message}`,
+        `git push to "${pushRemote}" failed: ${(err as Error).message}`,
         'git_push_failed',
       );
     }
@@ -221,6 +239,7 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
     endorsements_path: endPath,
     commit_sha: commitSha,
     pushed,
+    push_remote: pushRemote,
     dry_run: false,
   };
 }
