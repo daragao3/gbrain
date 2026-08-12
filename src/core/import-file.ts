@@ -306,9 +306,16 @@ export async function importFromContent(
   slug: string,
   content: string,
   opts: ImportFromContentOptions = {},
+
 ): Promise<ImportResult> {
   // Legacy options preserve the narrow result-status type through the overload
   // above; conditional callers receive the extended result union.
+
+  // Normalize BEFORE any tx write: putPage lowercases via validateSlug but
+  // upsertChunks used to query by the caller's raw slug, so a mixed-case slug
+  // created the page row then failed the chunk upsert with "Page not found",
+  // rolling back the whole import (#430).
+  slug = validateSlug(slug);
 
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
   // every per-page tx call must carry `sourceId` so writes target the right
@@ -634,9 +641,12 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
-  // A conditional write must reach the CAS check even when the body is
-  // byte-identical, so the precondition still gets evaluated against the
-  // current revision rather than short-circuiting as an unchanged no-op.
+  // `existing` is read above (#1035) so type preservation participates in the
+  // hash; do not re-read it here. A conditional write must skip this
+  // hash-match short-circuit — the precondition still has to be evaluated
+  // against the stored revision even when the content is byte-identical,
+  // otherwise put_page_conditional would report 'skipped' without ever
+  // checking the caller's expected_revision.
   if (!opts.writePrecondition && existing?.content_hash === hash && !opts.forceRechunk) {
     return { slug, status: 'skipped', chunks: 0, parsedPage };
   }

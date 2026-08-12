@@ -2,6 +2,138 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.88.0] - 2026-08-12
+
+**The local CI gate now runs from a worktree checkout on Windows, instead of stopping partway through with a message about a folder that does not exist.**
+
+`bun run ci:local` is the strongest gate GBrain ships. On Windows, from any checkout under `.claude/worktrees/`, it could not finish. It started normally, brought up the four Postgres shards, passed the first few guards, and then stopped with `fatal: not a git repository` and exit code 128. The path in that message was not a path anyone had typed, so it read like a broken checkout rather than a broken setup step. Most work on Windows happens in a worktree, so in practice the gate was unavailable there.
+
+A worktree keeps its git data outside the folder you are working in, so the gate mounts that data into the container. The mount was built from a single path string used on both sides of the Docker `-v` flag. On macOS and Linux the shell's form of a path and Docker's form are the same string, so one value works for both and nothing looks wrong. On Windows they are different. Docker Desktop does not recognize the shell's form, and rather than refusing it, quietly mounts an empty folder. Underneath that, the pointer file inside a worktree names a Windows path, and git running in the Linux container reads it as a relative path and looks for it inside the project folder.
+
+The gate now works out the two sides separately. The host side is converted to the form Docker understands, the shared git data is mounted at a fixed location inside the container, and a corrected pointer file is placed over the project's own so that git finds it. A full checkout is unaffected and mounts nothing extra.
+
+### How to use it
+
+Nothing to configure. Run the gate the way you always have:
+
+```bash
+bun run ci:local
+```
+
+From a worktree, it now prints both sides of the mount, so a bad path is visible at the point it is chosen rather than several minutes later:
+
+```
+[ci-local] Worktree detected; mounting shared gitdir:
+[ci-local]   host      C:/Users/you/gbrain/.git
+[ci-local]   container /gbrain-gitdir (worktree gitdir: /gbrain-gitdir/worktrees/my-branch)
+```
+
+### Things to watch
+
+A full checkout, the kind where `.git` is a folder rather than a file, behaves exactly as before.
+
+On a Git Bash shell with no working `cygpath`, the gate now stops at that point and says why, rather than continuing with a mount that points at nothing.
+
+The guards that read every tracked file are slow inside a container on Windows, because each read crosses the boundary between the container and the host. That is a property of the setup rather than anything this release changed, so expect `check-trailing-newline.sh` to sit for a while before it reports.
+
+### Itemized changes
+
+#### Added
+- **`scripts/ci-worktree-mounts.sh`**, a sourced helper that computes the Docker arguments a worktree checkout needs. The host side goes through `cygpath -m` on MSYS and Cygwin shells and is left alone elsewhere; the shared git directory is mounted at the fixed container path `/gbrain-gitdir`, which covers the per-worktree directory under it; and a normalized pointer naming that path is overlaid at `/app/.git`. The pointer is a mount rather than a `GIT_DIR` setting on purpose, because a process-wide `GIT_DIR` would also capture the temporary repositories many tests create for fixtures. On MSYS shells it opts out of the shell's argument rewriting, which would otherwise turn the container side of each mount into a path under the Git installation.
+- **`test/ci-worktree-mounts.test.ts`**, six tests that stub `uname` and `cygpath` on the path so both platform branches run from any host. This failure class cannot appear on Linux, where the two path forms are identical, so a test that only ran the native branch would never see it.
+
+#### Fixed
+- **`scripts/ci-local.sh`** builds its worktree mounts through the new helper instead of reusing one path string for the host and the container. An unusable `cygpath` now fails the run rather than producing a mount that silently resolves to nothing. Array expansion is also guarded so an empty mount list stays safe under older shells.
+
+#### Docs
+- `docs/architecture/KEY_FILES.md` describes the helper, why the two sides are computed separately, and why the pointer is a mount rather than an environment variable.
+
+## To take advantage of v0.42.88.0
+
+Nothing to do, and nothing to migrate. Run the gate once from a worktree and it will get past the guard that used to stop it:
+
+```bash
+bun run ci:local
+```
+
+## [0.42.87.0] - 2026-08-12
+
+**You can now save a page in a way that refuses to overwrite someone else's edit, instead of silently winning.**
+
+Saving a page has always been last-writer-wins. If two agents read the same page and both save, the second save quietly replaces the first, and the first is gone. There is no trash can for that. The risk grows with the page: a busy page that several agents keep updating is exactly the one most likely to lose work this way.
+
+The problem was that a save had no way to say what it expected to find. GBrain could not tell "this is a fresh edit" from "this is an edit built on a version that has since moved", so it treated both the same.
+
+Every page now carries a revision number that goes up on each save. A save can state which revision it expected. If the page has moved on since then, the save is refused and reported back to you, and the page is left exactly as it was. You get told the revision it actually found, so you can re-read and try again. A save that loses a race costs you a retry, never someone else's work.
+
+Ordinary saves are unchanged and still work the way they always did. Nothing you have to adopt.
+
+### How to use it
+
+This one is for agents, not the terminal. `put_page_conditional` is exposed to any connected MCP client and has no `gbrain` subcommand, so it shows up in the tool list rather than in `gbrain --help`. Confirm your client can see it:
+
+```bash
+gbrain --tools-json
+```
+
+Read a page's current revision before you edit it:
+
+```bash
+gbrain get notes/quarterly-plan --json
+```
+
+Then have the agent call `put_page_conditional` with `mode: "create_only"` to insert only when the slug is absent, or `mode: "compare_and_swap"` with `expected_revision` set to the number you just read. `expected_revision` is required for `compare_and_swap` and rejected for `create_only`.
+
+A refusal is a normal result, not an error. `create_only` on a page that exists reports `already_exists` with the revision it found. `compare_and_swap` against a stale number reports `revision_mismatch` with both the revision you expected and the one that is actually there. Neither one changes the page.
+
+Ordinary `gbrain put` is untouched and still overwrites, which is the right behavior when you are the only writer.
+
+### The numbers that matter
+
+| Situation | Before | Now |
+|---|---|---|
+| Two saves race on one page | second silently replaces the first | second is refused, first is kept |
+| Save on a page that moved | overwrites | reports the current revision |
+| Create on a page that exists | overwrites | reports `already_exists` |
+| Ordinary save | unchanged | unchanged |
+
+### Things to watch
+
+The revision goes up on every save, including ordinary ones. That is deliberate, so a conditional save can still tell that an ordinary save happened underneath it.
+
+A refused save is reported as a result rather than raised as a failure, so a caller that only checks for errors will read a refusal as success. Check the status field.
+
+### Itemized changes
+
+#### Added
+- **`put_page_conditional`**, a write that states what it expects. `create_only` inserts only when the exact source scoped slug is absent; `compare_and_swap` updates only at `expected_revision`. Conflicts come back as typed results and never overwrite. Defined in `src/core/operations.ts` and exposed over MCP; it carries no `cliHints`, so it appears in `gbrain --tools-json` but has no `gbrain` subcommand.
+- **Page revision tokens.** `pages.revision` is added by migration v126 (`page_revision_cas`) and maintained by a database trigger, so it counts unconditional writers too. `Page.revision` in `src/core/types.ts`, schema in `src/schema.sql`.
+- **Atomic conditional page primitives** in the engine layer, so the read, compare and write happen in one transaction rather than as separate steps a competing writer can interleave with.
+
+#### Fixed
+- **Saving a page no longer loses its post processing.** Results are persisted, so a response that never arrives is no longer a lost fact.
+- **`POST /mcp` no longer leaks.** The per request MCP scope is disposed.
+- **`/health` no longer reports a cold connection pool as a dead backend.**
+- **Line endings are normalized on the way in**, both through the writer and through file import, so stored text holds the single line ending convention the rest of the system assumes.
+- **Imports refuse placeholder shaped truncations** instead of landing them silently.
+- **Marker-less writes no longer erase a page's timeline column.**
+- **The test suite's prebuilt database is baked at the width the tests actually run at**, so tests that store embeddings stop failing on a size mismatch.
+
+#### Tests
+- Conditional write concurrency, revision lifecycle, migration identity, source routing after writes, and conditional writes driven over HTTP MCP.
+
+## To take advantage of v0.42.87.0
+
+Upgrade and run any GBrain command once. Migration v126 applies on its own and only adds a column, so an existing brain needs no manual step and nothing is rewritten.
+
+To confirm it is there:
+
+```bash
+gbrain get <any-slug> --json
+```
+
+A `revision` field in the output means the migration has applied. Existing pages start at revision 1.
+
 ## [0.42.85.0] - 2026-08-11
 
 **The test suite stops rebuilding its database speed-up fixture when the one on disk is already fine, so the slow serial tests start about half a minute sooner every run.**

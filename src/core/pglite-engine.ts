@@ -139,7 +139,6 @@ function resolveEmbeddingDimsSync(): number {
     return DEFAULT_EMBEDDING_DIMENSIONS;
   }
 }
-
 // Exported for test: the staleness guard is safety-critical (a stale snapshot
 // would restore an out-of-date schema) and cannot be pinned while private.
 export function tryLoadSnapshot(snapshotPath: string): Blob | null {
