@@ -84,6 +84,24 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   URL paths, and Git-relative paths retain `/` as their platform-independent separator.
   `scripts/check-path-sep-boundary.sh` guards this invariant; use `path-sep-guard-ok` only
   for a documented logical `/` contract.
+- **`saveConfig` writes the MACHINE-GLOBAL config; `GBRAIN_HOME` sandboxing is ADVISORY.**
+  `configDir()` reads `GBRAIN_HOME` fresh at call time and falls back to `homedir()`, so
+  honoring the sandbox is the caller's job and any caller that forgets silently rewrites the
+  user's real `~/.gbrain/config.json`. The damage is a SILENT FALSE NEGATIVE, not an error:
+  repointed at an empty brain, every later read returns `page_not_found` / "No pages found"
+  with nothing logged — indistinguishable from a deleted page, so an agent can conclude a
+  page is gone and recreate it, forking the subject, while the MCP server keeps serving the
+  real brain and nothing else looks wrong. The guard is therefore FAIL-CLOSED at the choke
+  point (`unsafeGlobalConfigWrite` in `src/core/config.ts`, called at the top of
+  `saveConfig`), not at any individual caller — the writer behind the observed incidents was
+  never findable by repo-wide search. It refuses exactly one shape: no `GBRAIN_HOME` plus a
+  `database_path` inside `tmpdir()` (containment via `isPathInside`, per the bullet above —
+  never `startsWith`). Sandboxed writes, durable PGLite brains and postgres configs are
+  untouched, so a deliberate migration is never reverted. A refusal appends pid/argv/cwd/stack
+  to `<audit>/config-repoint-refused.jsonl` so the offender names itself from inside its own
+  process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B lever that reproduces
+  pre-fix behavior. New code that writes config goes THROUGH `saveConfig` — never
+  `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows
@@ -126,10 +144,15 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   that key is a destructive operation wearing a config change's clothes: gate it, never
   "simplify" it. `global_basename` is NOT a mitigation (it resolves via the basename path,
   which emits a different `link_source` + `link_type`, so the original edge still misses the
-  desired set). v0.42.80.0's `unresolvableRefs` net covers the generic-wikilink shape ONLY —
-  markdown-link, bare-slug and qualified-wikilink refs never become a ref, so they never
-  reach it (`TODOS.md` P1). Guarded by the `entity_dirs_orphaned_edges` doctor check and the
-  `gbrain config set/unset` preflight; detail in `docs/architecture/KEY_FILES.md`.
+  desired set). The `unresolvableRefs` net covers all four reference shapes: the generic
+  `[[bare-name]]` wikilink pass, plus a tail fold of `extractUndeclaredPrefixRefs` that adds
+  markdown-link, bare-slug and qualified-wikilink refs under an undeclared prefix. That is
+  the SAME matcher the `entity_dirs_orphaned_edges` detector uses, so detection and
+  protection cannot drift apart; keep them sharing it. Its entries are literals lifted from
+  the body, not validated slugs — it over-reports by design, so intersect them against edges
+  that already exist and NEVER create an edge from one. Also guarded by the
+  `entity_dirs_orphaned_edges` doctor check and the `gbrain config set/unset` preflight;
+  detail in `docs/architecture/KEY_FILES.md`.
 - **Engine parity.** `src/core/postgres-engine.ts` and `src/core/pglite-engine.ts` move in
   lockstep — a new method/SQL shape lands in BOTH, pinned by `test/e2e/engine-parity.test.ts`.
   Forward-referenced columns/indexes go in the bootstrap probe set (guarded by

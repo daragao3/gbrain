@@ -25,8 +25,8 @@ const SNAPSHOT_VERSION = SNAPSHOT.replace(/\.tar$/, '.version');
 if (!existsSync(SNAPSHOT) || !existsSync(SNAPSHOT_VERSION)) {
   throw new Error('snapshot fixture missing; run bun run build:pglite-snapshot before this test');
 }
-// Same width the fixture was baked at (see scripts/build-pglite-snapshot.ts);
-// hashing at any other width reports a fresh fixture as stale.
+// The width the builder bakes in — folded into the hash, so passing the wrong
+// one here would report a perfectly current fixture as stale.
 const expectedSnapshotVersion = computeSnapshotSchemaHash(
   MIGRATIONS,
   PGLITE_SCHEMA_SQL,

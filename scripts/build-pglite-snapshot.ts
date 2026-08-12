@@ -16,9 +16,19 @@
 // Run: bun run scripts/build-pglite-snapshot.ts
 //      (or: bun run build:pglite-snapshot)
 //
+//      bun run scripts/build-pglite-snapshot.ts --if-stale
+//        Build only when the fixture is missing OR its recorded hash no longer
+//        matches the current schema/migrations/embedding width. A fixture that
+//        is already current is left alone and the ~15-95s boot is skipped.
+//        This is what scripts/ci-local.sh calls: an "exists?" check alone
+//        cannot see a fixture built before a schema change, and
+//        test/pglite-snapshot-file-seeding.serial.test.ts THROWS on a stale
+//        fixture at module scope rather than degrading to a cold init the way
+//        the engine does.
+//
 // Re-run whenever you touch src/core/migrate.ts or src/schema.sql.
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import * as crypto from "node:crypto";
 
@@ -37,12 +47,56 @@ function computeSchemaHash(): string {
   );
 }
 
+/**
+ * Why the fixture on disk cannot be reused, or null when it can be.
+ *
+ * The reason is returned rather than a bare boolean so the caller can say WHICH
+ * of "absent" and "stale" it hit — a rerunning CI job that keeps rebuilding is
+ * a different problem from one that never had the fixture at all.
+ */
+function staleReason(fixturePath: string, versionPath: string, schemaHash: string): string | null {
+  if (!existsSync(fixturePath)) return `${fixturePath} is missing`;
+  if (!existsSync(versionPath)) return `${versionPath} is missing`;
+  let recorded: string;
+  try {
+    recorded = readFileSync(versionPath, "utf8").trim();
+  } catch (err) {
+    return `${versionPath} is unreadable (${(err as Error).message})`;
+  }
+  if (recorded !== schemaHash) {
+    return `schema hash changed (fixture ${recorded.slice(0, 16) || "<empty>"}..., expected ${schemaHash.slice(0, 16)}...)`;
+  }
+  return null;
+}
+
 async function main() {
+  const args = process.argv.slice(2);
+  const ifStale = args.includes("--if-stale");
+  const unknown = args.filter((a) => a !== "--if-stale");
+  if (unknown.length > 0) {
+    console.error(`[build-pglite-snapshot] unknown argument(s): ${unknown.join(" ")}`);
+    console.error(`[build-pglite-snapshot] usage: bun run scripts/build-pglite-snapshot.ts [--if-stale]`);
+    process.exit(2);
+  }
+
   const fixturePath = "test/fixtures/pglite-snapshot.tar";
   const versionPath = "test/fixtures/pglite-snapshot.version";
   mkdirSync(dirname(fixturePath), { recursive: true });
 
   const schemaHash = computeSchemaHash();
+
+  if (ifStale) {
+    const reason = staleReason(fixturePath, versionPath, schemaHash);
+    if (reason === null) {
+      console.log(
+        `[build-pglite-snapshot] --if-stale: fixture is current ` +
+        `(${schemaHash.slice(0, 16)}...) — skipping rebuild.`,
+      );
+      return;
+    }
+    console.log(`[build-pglite-snapshot] --if-stale: rebuilding — ${reason}.`);
+  }
+
   console.log(`[build-pglite-snapshot] schema hash: ${schemaHash.slice(0, 16)}...`);
   console.log(`[build-pglite-snapshot] booting PGLite (in-memory)...`);
   const engine = new PGLiteEngine();

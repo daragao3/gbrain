@@ -152,6 +152,14 @@ Why this exact shape: `beforeAll` creates a single engine per file (PGLite WASM 
 
 `scripts/ci-local.sh` exports `GBRAIN_PGLITE_SNAPSHOT` for all four unit shards, so
 every PGLite file restores a pre-migrated fixture instead of replaying ~120 migrations.
+It builds that fixture with `bun run scripts/build-pglite-snapshot.ts --if-stale`, which
+rebuilds when the fixture is absent *or* when its `.version` sidecar no longer matches the
+current schema/migration/embedding-width hash, and is a no-op otherwise. An exists-only
+check is not enough: the engine degrades to a cold init on a hash mismatch, but
+`test/pglite-snapshot-file-seeding.serial.test.ts` throws `snapshot fixture stale` at
+module scope, so a cached fixture from before a schema change would fail the run until
+someone rebuilt it by hand.
+
 A file that genuinely asserts on the cold path (bootstrap behaviour, migration ledgers,
 fresh-install state) opts out with `useColdPglite()` from `test/helpers/cold-pglite.ts`,
 registered at the top of the file, above its own `beforeAll`:
@@ -197,6 +205,8 @@ await withEnv({ A: '1', B: '2', C: undefined }, fn);
 ```
 
 `withEnv` saves the prior value of every key it touches and restores via try/finally — including when the callback throws. **It is cross-test safe but NOT intra-file concurrent-safe.** `process.env` is process-global; two `test.concurrent()` calls in the same file both touching the same key will race. Files using `withEnv` stay outside the `test.concurrent()` codemod's eligibility filter.
+
+**Unsetting `GBRAIN_HOME` makes a `saveConfig` call machine-global.** `configDir()` re-reads the var at call time and falls back to `homedir()`, so a test that clears it is writing the developer's real `~/.gbrain/config.json`, not a sandbox. `saveConfig` fails closed on the one shape that silently destroys a brain — no `GBRAIN_HOME` plus a `database_path` inside `tmpdir()` — and throws instead of writing. Keep `GBRAIN_HOME` pointed at a temp dir for anything that saves config; clear it only to assert the fallback itself, and redirect `USERPROFILE`/`HOME` to a temp dir when you do, so a regression cannot reach the real config. `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out where a test genuinely needs the pre-guard behavior.
 
 #### When to quarantine instead of fix
 

@@ -2,6 +2,224 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.84.0] - 2026-08-11
+
+**The last three ways of writing a reference are now protected from losing their links when you save a page.**
+
+GBrain builds a page's links by reading the references in its body. It only recognizes references under folder names it knows about, and folder names you invented are taught to it through a setting. When a folder name is missing from that setting, GBrain stops seeing the references under it.
+
+That turns an ordinary save into a loss. GBrain could not tell "the author removed this reference" from "GBrain can no longer read this reference", and it treated both the same way, so it dropped the links. The links table keeps no trash can.
+
+The previous two releases closed part of this. One stopped the loss for references written as `[[notes/quarterly-plan]]`. The other added warnings so you could find the folder names you were missing. References written as a plain markdown link, as bare text, or with a source name in front were still dropped. This release covers all four ways of writing one.
+
+### How to use it
+
+Nothing to turn on. Upgrade, then check whether your settings name every folder your pages reference:
+
+```bash
+gbrain doctor
+```
+
+A healthy brain reports nothing. If it names folders, copy the command it prints to put them back, then rebuild the links those references should have produced:
+
+```bash
+gbrain extract links
+```
+
+### The numbers that matter
+
+| How the reference is written | Before | Now |
+|---|---|---|
+| `[[notes/quarterly-plan]]` | kept | kept |
+| `[Quarterly plan](notes/quarterly-plan)` | link dropped on save | kept |
+| bare `notes/quarterly-plan` | link dropped on save | kept |
+| `[[archive:notes/quarterly-plan]]` | link dropped on save | kept |
+
+| Check | Result |
+|---|---|
+| The four reference shapes, end to end | 23 pass, 0 fail |
+| The two related save paths | 16 pass, 0 fail |
+| Reference reading and folder settings | 262 pass, 0 fail |
+
+### Things to watch
+
+A reference you genuinely removed from a page is still cleaned up on the next save. That behavior is unchanged, and each of the four shapes has a matching test for it.
+
+The protection is deliberately generous about what counts as a reference. Prose that happens to mention a folder path can now hold on to a link you really did stop pointing at, so a link can go stale instead of being removed. That is the safer of the two mistakes, because a stale link is rebuilt by `gbrain extract links` and a removed one cannot be recovered. Tightening it is tracked as a follow-up.
+
+Links written under folder names GBrain already recognizes were never affected, and neither were links you added by hand.
+
+## To take advantage of v0.42.84.0
+
+Nothing to configure or migrate. Upgrade normally.
+
+If `gbrain doctor` names folders your settings are missing, run the command it prints, then run `gbrain extract links` to rebuild the links those references should have produced. Links dropped by an earlier version come back this way, because they are rebuilt from what your pages actually say.
+
+### Itemized changes
+
+#### Fixed
+- **The removal safety net covers all four reference shapes.** `extractPageLinks` in `src/core/link-extraction.ts` reported an unresolvable reference only from its generic wikilink pass, so a body carrying `[label](dir/slug)`, a bare `dir/slug`, or a qualified `[[source:dir/slug]]` under an undeclared folder produced no link candidates and no unresolvable references at all. To a caller reconciling links, that is indistinguishable from the author deleting the reference, so those links were removed. `extractPageLinks` now folds `extractUndeclaredPrefixRefs(content, opts.entityDirs)` into the reported set. That is the same matcher the stranded-links check in `gbrain doctor` already uses, so detection and protection share one definition of what counts as a reference and cannot drift apart.
+
+#### Tests
+- **`test/e2e/put-page-autolink-unresolvable-ref-shapes-pglite.test.ts`** covers each of the four shapes through a real save: the reference present and its link kept, the reference gone and its link removed, and a page that drops one reference while keeping another so only the matching link goes. It also covers a folder path that appears inside a URL, a reference inside a code span, and links added by hand.
+
+#### Documentation
+- **`docs/architecture/KEY_FILES.md`** records that the safety net now has two populating paths, and that its entries are literals lifted from the page body rather than validated slugs, so a consumer must match them against links that already exist and must never build a link from one.
+
+## [0.42.83.0] - 2026-08-11
+
+**GBrain now refuses to repoint your brain at a temporary folder, instead of quietly leaving you reading an empty one.**
+
+When something migrates your brain to a new location, it writes that location into your settings file. That file is shared by everything on your machine, so whatever it says last is where every later command looks. A script that migrates into a scratch folder is supposed to keep that private to itself, but nothing forces it to. If it forgets, your real settings get rewritten to point at the scratch folder.
+
+That folder is empty, and your operating system deletes it later anyway. From then on `gbrain get`, `gbrain list` and `gbrain timeline` all answer "not found" against the empty folder. Nothing fails, nothing warns, and your real brain is sitting there untouched the whole time. The MCP server keeps serving the real one, so nothing else looks wrong either.
+
+That is the worst shape a bug can take, because "not found" is also what a deleted page looks like. An agent that trusts the answer can decide a page is gone and write a fresh one, and now the same subject exists twice with half the history in each.
+
+GBrain now checks for exactly that shape before saving your settings, and refuses it.
+
+### How to use it
+
+Nothing to configure. Upgrade, and the write is blocked with a message naming the settings file and the folder it was about to point at.
+
+If your settings were already repointed before you upgraded, check where your brain currently lives:
+
+```bash
+gbrain config get database_path
+```
+
+If that prints a path inside your temp folder, your brain is not gone, only unreachable. Point it back:
+
+```bash
+gbrain config set database_path /path/to/your/real/brain
+```
+
+Migrating into a temporary folder on purpose is still allowed, you just have to say so:
+
+```bash
+GBRAIN_ALLOW_TEMP_BRAIN=1 gbrain migrate --to pglite --path "$TMPDIR/scratch"
+```
+
+If you are writing a test or a throwaway repro, prefer `GBRAIN_HOME` instead. It gives the process its own settings file, so it cannot reach the shared one at all.
+
+### Things to watch
+
+Only one shape is refused: no `GBRAIN_HOME` set, and the new brain path lands inside the operating system temp folder. Migrating your real brain to a PGLite file in a durable location is a normal thing to do and is untouched, as are Postgres settings and anything running under `GBRAIN_HOME`. A deliberate migration is never undone.
+
+When a write is refused, GBrain appends one line to `<config-dir>/audit/config-repoint-refused.jsonl` recording the process id, command line, working directory and call stack. That names the program responsible, which matters because the caller is often a script that is not in any repository you can search.
+
+### Itemized changes
+
+- `src/core/config.ts`: added `unsafeGlobalConfigWrite()`, which returns a reason string when a save would repoint the machine-global config at a path inside `tmpdir()` with no `GBRAIN_HOME` set, and `null` otherwise. `saveConfig()` now calls it first and throws on a non-null result. Containment uses `isPathInside()` from `path-confine.ts` per the path-boundary invariant, never a `startsWith` prefix test.
+- `src/core/config.ts`: added `auditUnsafeConfigWrite()`, a best-effort JSONL appender that records pid, ppid, argv, cwd, engine, target path and stack to `<config-dir>/audit/config-repoint-refused.jsonl`. Honors `GBRAIN_AUDIT_DIR`. Never throws, so it cannot turn a refusal into a different failure.
+- `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out of the check.
+- `test/gbrain-home-isolation.test.ts`: covers the refusal, the audit row, and each case that must stay allowed (`GBRAIN_HOME` set, durable PGLite path, Postgres config, opt-out set).
+- `CLAUDE.md`: recorded the invariant that `saveConfig` writes the machine-global config and `GBRAIN_HOME` sandboxing is advisory, so the guard belongs at the choke point rather than at each caller.
+
+## To take advantage of v0.42.83.0
+
+Confirm your brain is not currently pointed at a temporary folder. Run:
+
+```bash
+gbrain config get database_path
+gbrain list --limit 3
+```
+
+If the path is inside your temp folder, or `gbrain list` reports no pages while you know the brain has some, your settings were repointed at some earlier moment. The data is still in your real brain. Set `database_path` back to it with `gbrain config set database_path <path>`, then re-run `gbrain list` to confirm your pages are back.
+
+If both commands look right, there is nothing to do. The guard only acts on future writes.
+## [0.42.82.0] - 2026-08-11
+
+**The test suite's database speed-up fixture is now built at the same vector size the tests run at, so tests that save embeddings pass instead of failing on a size mismatch.**
+
+GBrain's test suite can restore a prebuilt database instead of rebuilding the schema from scratch for every test file. The tool that builds that prebuilt database and the test suite itself disagreed about how wide an embedding vector is. The builder recorded one width, the tests wrote another, and every test that saved an embedding failed with a dimension mismatch.
+
+Nothing caught the disagreement. The freshness check that decides whether a prebuilt database is still usable looked at the schema template, where the width appears as a placeholder that reads identically at any size. A restored database also skips the normal schema setup, so a test file could not correct the width on its own.
+
+A second problem made the speed-up mostly ineffective. A test file that needed the slow path opted out by clearing a setting shared by the whole process, which switched every file loaded after it to the slow path too. Which files were affected depended on how the runner packed them into shards, so adding any test file reshuffled it.
+
+Nothing changes for normal CLI use or for stored brain data. This affects contributors running the test suite.
+
+### How to use it
+
+The prebuilt fixture is not checked in. Build it once, then point the suite at it:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test
+```
+
+`bun run ci:local` does both steps for you, and rebuilds the fixture whenever it has gone out of date. You can ask for the same thing directly:
+
+```bash
+bun run scripts/build-pglite-snapshot.ts --if-stale
+```
+
+That rebuilds only when the fixture is missing or no longer matches the schema it was built from. When it is already current it costs about 4 seconds and does nothing.
+
+If you change the width the suite runs at, edit it in one place, `test/helpers/legacy-embedding-config.ts`. The builder and the suite's preload both read that file, and the freshness check folds the width in, so a fixture built at the old width stops matching and falls back to a normal cold start.
+
+### The numbers that matter
+
+| Check | Result |
+|---|---|
+| Tests that save embeddings, with the fixture active | 15 pass, 0 fail |
+| Fixture build, 120 migrations applied | schema setup in ~12s, 44 MB fixture |
+| Fixture and cold start produce the same schema | 5 pass, 0 fail |
+
+### Things to watch
+
+A fixture built before this release will not match the new freshness check. It is reported as stale and the engine falls back to a normal cold start, which is correct but slower. `bun run ci:local` rebuilds it for you. If you run the suite by hand, rebuild it once with `bun run build:pglite-snapshot` to get the speed-up back.
+
+Test files that genuinely need the slow path now opt out through `useColdPglite()`, which brackets a single file instead of changing the setting for the whole process. Files that run before or after keep whatever the runner gave them.
+
+## To take advantage of v0.42.82.0
+
+Nothing to configure or migrate for normal use. Upgrade normally.
+
+If you develop on GBrain and keep a prebuilt test fixture around, rebuild it once:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+Then confirm the fixture and the cold start still agree:
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test test/pglite-snapshot-file-seeding.serial.test.ts
+```
+
+If that reports a stale fixture after a rebuild, please file an issue at
+https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and
+the command you ran.
+
+### Itemized changes
+
+#### Fixed
+- **The fixture builder pins the same embedding config the test preload pins.** `scripts/build-pglite-snapshot.ts` runs under `bun run`, which does not apply the test runner's preload, so it fell back to the production default width. It now calls `configureGateway()` with the shared config and logs the width it baked.
+- **The freshness check covers the embedding width.** `computeSnapshotSchemaHash()` in `src/core/pglite-engine.ts` takes the width as an argument and folds it into the hash. A fixture at the wrong width now fails the check and degrades to a normal cold start rather than loading and rejecting every insert.
+- **`tryLoadSnapshot()` resolves the width the same way schema setup does.** A synchronous helper reads the gateway's width and falls back to the canonical default when the gateway is not configured.
+- **The local CI run rebuilds an out-of-date fixture instead of skipping it.** `scripts/ci-local.sh` rebuilt the fixture only when the file was missing, so a fixture left over from an older schema was kept and the suite ran against it. `scripts/build-pglite-snapshot.ts` takes a new `--if-stale` flag that rebuilds when the fixture is absent, when its recorded version is absent or unreadable, or when that version no longer matches the current schema, and ci-local now calls it that way. The staleness comparison lives in the builder rather than in shell, so the hash is computed in one place.
+
+#### Added
+- **One definition of the width the unit suite runs at.** `test/helpers/legacy-embedding-config.ts` is read by both `test/helpers/legacy-embedding-preload.ts` and the fixture builder. It deliberately imports nothing from the test runner so a plain script can use it.
+- **A file-scoped slow-path opt-out.** `test/helpers/cold-pglite.ts` exposes `useColdPglite()`, which clears and restores the setting around one file instead of leaking to every file after it.
+
+#### Tests
+- **The width agreement is pinned.** `test/pglite-snapshot-embedding-width.test.ts` covers the shared config, the hash folding the width in, and a wrong-width fixture degrading rather than failing.
+- **Five files moved to the scoped opt-out.** `test/bootstrap.test.ts`, `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, `test/schema-bootstrap-coverage.test.ts`, and `test/e2e/schema-drift.test.ts` use `useColdPglite()` and still exercise the cold path.
+- **The seeded and cold schemas are compared at the correct width.** `test/pglite-snapshot-file-seeding.serial.test.ts` passes the shared width into the freshness check so a current fixture is not reported stale.
+
+#### Documentation
+- **`docs/TESTING.md`** explains how to build the fixture, how the width is shared, when to reach for the scoped opt-out, and how `--if-stale` decides whether a rebuild is needed.
+- **`docs/architecture/KEY_FILES.md`** records the widened hash signature.
+
+#### Maintenance
+- **`scripts/bench-pglite-bootstrap.ts`** passes the width through to the hash helper.
+
 ## [0.42.81.0] - 2026-08-11
 
 **GBrain now warns you when a folder name is missing from your settings, instead of letting it quietly cost you links.**
@@ -88,7 +306,6 @@ If any of your own scripts narrow `link_resolution.entity_dirs`, they now need `
 #### Tests
 - `test/entity-dirs-undeclared-refs.test.ts`, `test/entity-dirs-guard-scan.test.ts`, `test/doctor-entity-dirs-orphaned-edges.test.ts`, and `test/config-entity-dirs-preflight.test.ts` cover each reference shape, references inside code blocks and URLs, links that are not eligible for removal, the environment override, the refusal and its `--yes` override, the row cap, and a regression for the page shape that lost links in the first place.
 - `test/link-extraction-remote-reconcile.test.ts` covers the network write path, including that it only ever adds.
-
 
 ## [0.42.80.0] - 2026-08-11
 
