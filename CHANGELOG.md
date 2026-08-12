@@ -2,6 +2,85 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.86.0] - 2026-08-11
+
+**Moving your brain to a different engine can no longer leave the real brain pointing at a scratch folder.**
+
+`gbrain migrate` copies your pages to a new engine and then switches your settings over to it. If the place it copied to was a temporary folder, the switch pointed your real brain there. Temporary folders get cleaned up, and once that one went away, every later lookup answered "not found" against an empty brain. No error, no warning. It reads exactly like your pages were deleted, and an agent that believes a page is gone will write a new one, splitting the subject in two.
+
+The previous release started refusing that switch. This one closes two ways Windows could walk around the refusal, catches a second route to the same damage that the refusal could not see, and stops the refusal from throwing away a migration that had already finished copying.
+
+### How to use it
+
+Nothing to turn on. Upgrade and migrate as usual:
+
+```bash
+gbrain migrate --to pglite --path ~/brains/my-brain
+```
+
+If a migration ever refuses to switch, it now tells you why, leaves your active brain alone, and exits non-zero. Your copied pages are still at the target, so you can point at a permanent path and run it again.
+
+Deliberate migrations into a temporary folder are still possible:
+
+```bash
+GBRAIN_ALLOW_TEMP_BRAIN=1 gbrain migrate --to pglite --path /tmp/scratch-brain
+```
+
+### The numbers that matter
+
+| Where the migration was pointed | Before | Now |
+|---|---|---|
+| A permanent folder | switched | switched |
+| A temporary folder | refused | refused |
+| The same temporary folder, written the short way Windows also accepts | switched | refused |
+| A migration scratch folder, when the system temporary location had been redirected | switched | refused |
+| A permanent folder, but the settings file moved while the migration ran | switched | refused |
+
+| When a switch is refused during a migration | Before | Now |
+|---|---|---|
+| Pages already copied | kept at the target | kept at the target |
+| The command | stopped partway with an error | finishes, says what it withheld, exits non-zero |
+| Record of what tried it | written only on some paths | always written |
+
+| Check | Result |
+|---|---|
+| Settings isolation and the refusal itself | 17 pass, 0 fail |
+| Migration switch refusals | 9 pass, 0 fail |
+| Folder boundary helpers | 23 pass, 0 fail |
+| Settings loading and saving | 23 pass, 0 fail |
+
+### Things to watch
+
+The refusal is a tripwire, not a policy. Migrating to a database file in a permanent location is a normal thing to do and is left alone. A migration run inside its own sandbox is also left alone, because the settings it writes are its own.
+
+One folder name is now treated as throwaway on its name alone, the one GBrain itself uses for migration scratch space. A permanent path that merely mentions migrating is unaffected.
+
+When a switch is refused, GBrain appends a line to `audit/config-repoint-refused.jsonl` under your settings folder naming the process that tried. Both refusal points write there now, so there is one file to read rather than two places to look.
+
+## To take advantage of v0.42.86.0
+
+Nothing to configure or migrate. Upgrade normally.
+
+If a migration you expected to switch now refuses, read the message: it names the target, the settings file, and the reason. Point the migration at a permanent path and run it again, or set `GBRAIN_ALLOW_TEMP_BRAIN=1` if the throwaway target was deliberate.
+
+If your brain was already left pointing at a folder that no longer exists, your pages are not gone. Edit `database_path` in your settings file back to the real brain.
+
+### Itemized changes
+
+#### Fixed
+- **The temporary-folder refusal now compares canonical paths.** `unsafeGlobalConfigWrite` in `src/core/config.ts` tested containment with `isPathInside`, which is pure `path.relative` math and never touches the filesystem. Windows accepts a second spelling for any folder whose name runs long, and to that lexical test the two spellings look like unrelated trees, so a target written the short way fell outside the fence. Both sides are now canonicalized first, through the new `canonicalizeForContainment`, and the comparison still routes through `isPathInside` rather than a hand-rolled prefix check.
+- **A migration scratch folder is refused by name as well as by location.** The containment test reads the system temporary location at the moment it runs, so a target created before that location was redirected sits outside the fence while being just as throwaway. `unsafeGlobalConfigWrite` now also refuses a path carrying the `gbrain-migrate-target-` prefix that GBrain itself uses for scratch space.
+- **A settings file that moves mid-migration is caught.** `saveConfig` resolves the settings location when it is called, so a migration that outlives the environment that launched it writes wherever that resolves to at the end. The target can be perfectly durable in that case, so nothing about the settings being written looks wrong and the existing refusal cannot see it. `runMigrateEngine` in `src/commands/migrate-engine.ts` now pins the settings path at entry and compares it at switch time through the new `configPathDriftReason`.
+- **A refused switch no longer discards a finished migration.** `saveConfig` throws on a refusal, which aborted `gbrain migrate` after the pages had already been copied, skipping the closing summary and the resume-manifest cleanup and reporting a hard failure for a run whose data half succeeded. Migrate now consults the same predicate itself through `configFlipRefusalReason`, which composes `unsafeGlobalConfigWrite` with `configPathDriftReason` so the two guards cannot drift apart, and withholds the switch with a warning and a non-zero exit verdict instead. Every other caller of `saveConfig` still gets the throw.
+- **Both refusal points record who tried.** `auditUnsafeConfigWrite` is exported from `src/core/config.ts` so the withheld-switch path writes the same `config-repoint-refused.jsonl` row that `saveConfig` does, leaving one file to read instead of a gap on the path where identifying the process matters most.
+
+#### Added
+- **`canonicalizeForContainment` in `src/core/path-confine.ts`** resolves a path through `realpathSync.native`, which collapses Windows short names where plain `realpathSync` does not. It walks up to the deepest existing ancestor before resolving and reattaches the remaining tail, so a target that does not exist yet still canonicalizes. That case is the normal one for a migration destination, and a plain resolve-on-failure would have preserved the short name exactly when the check matters. Purely additive; no existing caller changes behavior.
+
+#### Tests
+- **`test/migrate-engine-config-flip-guard.test.ts`** covers settings drift and the wiring: an unchanged path allowed, a moved one refused with both ends named, an equivalent respelling not misread as a move, a throwaway target refused through the shared predicate, and drift still caught underneath a sandbox that would otherwise short-circuit the throwaway check.
+- **`test/gbrain-home-isolation.test.ts`** adds the short-name spelling, demonstrating the escape and then the refusal in the same test, plus a scratch folder outside the temporary location, both documented opt-outs applying to the new shape, and a permanent path that merely mentions migrating still being allowed. The short-name test only runs on Windows, since the spelling does not exist elsewhere.
+
 ## [0.42.85.0] - 2026-08-11
 
 **The test suite stops rebuilding its database speed-up fixture when the one on disk is already fine, so the slow serial tests start about half a minute sooner every run.**

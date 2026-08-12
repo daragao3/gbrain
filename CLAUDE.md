@@ -94,14 +94,30 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
   real brain and nothing else looks wrong. The guard is therefore FAIL-CLOSED at the choke
   point (`unsafeGlobalConfigWrite` in `src/core/config.ts`, called at the top of
   `saveConfig`), not at any individual caller — the writer behind the observed incidents was
-  never findable by repo-wide search. It refuses exactly one shape: no `GBRAIN_HOME` plus a
-  `database_path` inside `tmpdir()` (containment via `isPathInside`, per the bullet above —
-  never `startsWith`). Sandboxed writes, durable PGLite brains and postgres configs are
-  untouched, so a deliberate migration is never reverted. A refusal appends pid/argv/cwd/stack
-  to `<audit>/config-repoint-refused.jsonl` so the offender names itself from inside its own
-  process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out and doubles as the A/B lever that reproduces
-  pre-fix behavior. New code that writes config goes THROUGH `saveConfig` — never
-  `writeFileSync(configPath(), …)`, which bypasses the guard entirely.
+  never findable by repo-wide search. It refuses "no `GBRAIN_HOME` plus a THROWAWAY
+  `database_path`", where throwaway is two independent tests because neither subsumes the
+  other: (a) containment in `tmpdir()` via `isPathInside` (per the bullet above — never
+  `startsWith`), with BOTH sides first run through `canonicalizeForContainment` so a Windows
+  8.3 short name can't read as an unrelated tree and walk through the fence; and (b) the
+  `gbrain-migrate-target-` mkdtemp prefix matched BY NAME, which catches a target created
+  before `TMPDIR` was redirected and therefore sitting outside (a). Sandboxed writes, durable
+  PGLite brains and postgres configs are untouched, so a deliberate migration is never
+  reverted. A refusal appends pid/argv/cwd/stack to `<audit>/config-repoint-refused.jsonl` so
+  the offender names itself from inside its own process; `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out
+  and doubles as the A/B lever that reproduces pre-fix behavior. New code that writes config
+  goes THROUGH `saveConfig` — never `writeFileSync(configPath(), …)`, which bypasses the
+  guard entirely.
+  **One caller withholds instead of throwing.** `runMigrateEngine` reaches its config flip
+  with the data copy already finished, so a throw there would abort the command and misreport
+  a run whose data half succeeded. It pre-checks via `configFlipRefusalReason`
+  (`src/commands/migrate-engine.ts`), which composes the SAME `unsafeGlobalConfigWrite`
+  predicate — not a copy of it — with `configPathDriftReason`, then warns, calls the exported
+  `auditUnsafeConfigWrite` so both refusal points share one JSONL trail, and sets a non-zero
+  exit verdict. `configPathDriftReason` is the half `saveConfig` structurally cannot see: the
+  settings path pinned at command entry no longer matches the live one, i.e. `GBRAIN_HOME`
+  moved underneath an in-flight run (an orphaned promise after a test timeout). The target can
+  be perfectly durable there, so only the moved DESTINATION gives it away. Every other
+  `saveConfig` caller still throws.
 - **YAML frontmatter fences: never LF-only.** `content.match(/^---\n…/)` cannot match a file
   that starts `---\r\n`, so a CRLF `SKILL.md` parses as having NO frontmatter — silently,
   returning null/`[]` with no error. On Windows `core.autocrlf=true` (the Git-for-Windows

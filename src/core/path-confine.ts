@@ -143,6 +143,54 @@ export function realpathOrResolve(p: string): string {
 }
 
 /**
+ * As `realpathOrResolve`, but uses `realpathSync.native` so WINDOWS 8.3 SHORT
+ * NAMES are collapsed: `C:\Users\ADMINI~1\AppData\Local\Temp\x` and
+ * `C:\Users\Administrator\AppData\Local\Temp\x` canonicalize to the same
+ * string. Plain `realpathSync` is a JS reimplementation that does NOT do this.
+ *
+ * WHY IT MATTERS. `isPathInside` is pure `path.relative()` math and never
+ * touches the filesystem — by design, so callers holding deliberately
+ * unresolved paths can use it. The cost is that two spellings of the same
+ * directory look like unrelated trees to it, and a short-name path therefore
+ * walks straight through a `tmpdir()` deny-fence. Canonicalize BOTH sides with
+ * this before an `isPathInside` call whose input could come from an arbitrary
+ * caller. Do NOT fold case here: `isPathInside` delegates case handling to
+ * `path.relative()`, which is correctly case-insensitive on win32 and
+ * case-SENSITIVE on POSIX.
+ *
+ * HANDLES A PATH THAT DOESN'T EXIST YET, which is the normal case for a
+ * migration/write TARGET and the reason a plain `try { realpath } catch {
+ * resolve }` is NOT good enough here: `realpath` throws ENOENT on the whole
+ * path, the lexical fallback preserves the short name verbatim, and the fence
+ * is escaped exactly when it matters most. Instead we canonicalize the deepest
+ * EXISTING ancestor — where the short-named components actually live — and
+ * re-attach the not-yet-created tail lexically. Same idiom as
+ * `isWriteTargetContained` below.
+ */
+export function canonicalizeForContainment(p: string): string {
+  // `.native` is present on every platform Bun and Node support; the guard is
+  // belt-and-braces for an exotic runtime shim.
+  const native = (realpathSync as unknown as { native?: (x: string) => string }).native;
+  const canon = (x: string): string => (native ? native(x) : realpathSync(x));
+
+  let existing = resolvePath(p);
+  const tail: string[] = [];
+  for (let i = 0; i < 4096 && !existsSync(existing); i++) {
+    tail.unshift(basename(existing));
+    const parent = dirname(existing);
+    if (parent === existing) break; // filesystem root
+    existing = parent;
+  }
+  let base: string;
+  try {
+    base = canon(existing);
+  } catch {
+    base = resolvePath(existing); // unreadable / permission — best available
+  }
+  return tail.length ? join(base, ...tail) : base;
+}
+
+/**
  * Containment check for a write TARGET that may not exist yet (a new page file).
  * `isPathContained` requires the child to already exist; this instead realpaths
  * the deepest EXISTING ancestor of `target` (catching a symlinked intermediate

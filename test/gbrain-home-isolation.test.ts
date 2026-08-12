@@ -278,6 +278,112 @@ describe('GBRAIN_HOME write-side isolation', () => {
         expect(loadConfigFileOnly()?.engine).toBe('postgres');
       });
     });
+
+    // ---- The two ways the tmpdir() fence gets walked around ----------------
+    //
+    // `isPathInside` is pure `path.relative()` math and never touches the
+    // filesystem. That is correct for its other callers but leaves this guard
+    // with two blind spots, both of which have a real-world shape.
+
+    test.if(process.platform === 'win32')(
+      'refuses a temp target spelled with a Windows 8.3 short name',
+      async () => {
+        // WINDOWS-ONLY, and therefore invisible to this project's ubuntu CI —
+        // 8.3 aliases do not exist on POSIX, so there is nothing to assert
+        // there. Written for the machine where the real repoints happened.
+        //
+        // The hazard needs a short-named component ABOVE the target. A user
+        // directory longer than 8 characters (`Administrator` -> `ADMINI~1`)
+        // does it on a normal install; here we redirect TMP/TEMP at a
+        // long-named root, which is the same shape and is exactly how a CI
+        // runner or installer that exports a short-form %TEMP% hits it.
+        const { saveConfig } = await import('../src/core/config.ts');
+        const { isPathInside } = await import('../src/core/path-confine.ts');
+        const { execFileSync } = await import('child_process');
+
+        // No quotes around %I's argument: execFileSync already quotes the /c
+        // string, and cmd would keep an inner pair literally.
+        const shortPathOf = (p: string): string =>
+          execFileSync('cmd', ['/d', '/c', `for %I in (${p}) do @echo %~sI`], { encoding: 'utf8' }).trim();
+
+        const longRoot = mkdtempSync(join(tmpdir(), 'gbrain-longname-temproot-'));
+        const prevTemp = process.env.TEMP;
+        const prevTmp = process.env.TMP;
+        try {
+          const shortRoot = shortPathOf(longRoot);
+          // A volume with NtfsDisable8dot3NameCreation=1 hands back the long
+          // path unchanged. Nothing to prove there — don't fail, just stop.
+          if (shortRoot.toLowerCase() === longRoot.toLowerCase()) return;
+
+          withFakeHome(() => {
+            // os.tmpdir() reads TMP/TEMP on Windows, so this repoints the very
+            // fence under test at our long-named root.
+            process.env.TEMP = longRoot;
+            process.env.TMP = longRoot;
+            const target = join(shortRoot, 'sub', 'brain.pglite');
+
+            // The hazard, demonstrated: to the lexical check the short spelling
+            // is an unrelated directory, so the fence reads as "outside".
+            expect(isPathInside(target, tmpdir())).toBe(false);
+            // The guard canonicalizes both sides first, so it still fires.
+            expect(() => saveConfig({ engine: 'pglite', database_path: target }))
+              .toThrow(/temporary directory/i);
+          });
+        } finally {
+          if (prevTemp !== undefined) process.env.TEMP = prevTemp; else delete process.env.TEMP;
+          if (prevTmp !== undefined) process.env.TMP = prevTmp; else delete process.env.TMP;
+          rmSync(longRoot, { recursive: true, force: true });
+        }
+      },
+    );
+
+    test('refuses a migration scratch dir even when it sits OUTSIDE tmpdir()', async () => {
+      // `tmpdir()` is read at call time, so a run whose TMPDIR was redirected
+      // after it created its target — or that hardcoded a scratch dir on
+      // another volume — lands outside the containment fence while being just
+      // as throwaway. The mkdtemp prefix is the tell, so it is matched by name.
+      const { saveConfig } = await import('../src/core/config.ts');
+      const { isPathInside } = await import('../src/core/path-confine.ts');
+      const target = resolve(sep, 'gbrain-not-the-temp-dir', 'gbrain-migrate-target-M72hsf', 'brain.pglite');
+      withFakeHome(() => {
+        // Precondition: containment alone would let this through.
+        expect(isPathInside(target, tmpdir())).toBe(false);
+        expect(() => saveConfig({ engine: 'pglite', database_path: target }))
+          .toThrow(/migration scratch directory/i);
+      });
+    });
+
+    test('the scratch-dir refusal still yields to GBRAIN_HOME and the escape hatch', async () => {
+      // Same narrowness as the containment arm: a sandboxed write is never a
+      // machine-global repoint, and the documented opt-out must cover both
+      // throwaway shapes, not just the one that existed first.
+      const { saveConfig } = await import('../src/core/config.ts');
+      const target = resolve(sep, 'elsewhere', 'gbrain-migrate-target-M72hsf', 'brain.pglite');
+      const sandbox = fresh();
+      const prev = process.env.GBRAIN_HOME;
+      process.env.GBRAIN_HOME = sandbox;
+      try {
+        expect(() => saveConfig({ engine: 'pglite', database_path: target })).not.toThrow();
+      } finally {
+        if (prev !== undefined) process.env.GBRAIN_HOME = prev; else delete process.env.GBRAIN_HOME;
+        rmSync(sandbox, { recursive: true, force: true });
+      }
+      withFakeHome(() => {
+        process.env.GBRAIN_ALLOW_TEMP_BRAIN = '1';
+        expect(() => saveConfig({ engine: 'pglite', database_path: target })).not.toThrow();
+      });
+    });
+
+    test('a durable path that merely MENTIONS a brain is still allowed', async () => {
+      // Guard the name-match against over-reach: only the scratch prefix is
+      // special, not the word "gbrain" or "migrate" anywhere in a real path.
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      const durable = resolve(sep, 'srv', 'gbrain-migrations', 'production', 'brain.pglite');
+      withFakeHome(() => {
+        expect(() => saveConfig({ engine: 'pglite', database_path: durable })).not.toThrow();
+        expect(loadConfigFileOnly()?.database_path).toBe(durable);
+      });
+    });
   });
 
   test('GBRAIN_AUDIT_DIR override still wins over GBRAIN_HOME', async () => {
