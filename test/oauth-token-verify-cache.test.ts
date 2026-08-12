@@ -26,6 +26,7 @@ import {
   GBrainOAuthProvider,
   resolveAuthCacheTtlMs,
   DEFAULT_AUTH_CACHE_TTL_MS,
+  DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS,
   AuthDbTimeoutError,
 } from '../src/core/oauth-provider.ts';
 import type { SqlQuery } from '../src/core/sql-query.ts';
@@ -241,19 +242,58 @@ describe('verifyAccessToken memoization — TTL', () => {
 });
 
 describe('verifyAccessToken memoization — auth correctness must not regress', () => {
-  test('an unknown token still throws InvalidTokenError and is NOT cached', async () => {
+  test('an unknown token is NOT cached when the negative memo is off', async () => {
+    // This was the original contract for ALL configurations: "a negative result
+    // must never be memoized: a token created a moment ago must not be rejected
+    // for the rest of the TTL." It is now the behaviour of the off switch, and
+    // it must keep working exactly as it did.
     const captured: string[] = [];
     const provider = new GBrainOAuthProvider({
       sql: mockSql(captured, { legacyRows: () => [] }), // both lookups miss
+      authNegativeCacheTtlMs: 0,
     });
 
     await expect(provider.verifyAccessToken('bogus')).rejects.toBeInstanceOf(InvalidTokenError);
     const afterFirst = reads(captured).length;
 
-    // A negative result must never be memoized: a token created a moment ago
-    // must not be rejected for the rest of the TTL.
     await expect(provider.verifyAccessToken('bogus')).rejects.toBeInstanceOf(InvalidTokenError);
     expect(reads(captured).length).toBeGreaterThan(afterFirst);
+  });
+
+  test('an unknown token still throws, and its negative memo lapses quickly', async () => {
+    // Why the original blanket rule was narrowed rather than kept: measured
+    // 2026-08-12 on :7483, the 401 path was the single most expensive request
+    // the server served — 9.07 / 13.40 / 22.17 / 27.21s against a static
+    // no-DB route at 0.09-0.79s in the same interleaved window — because it is
+    // the only path that ALWAYS reaches Postgres. A client with a stale token
+    // amplified its own failures.
+    //
+    // The original rule's INTENT is preserved by bounding the window instead of
+    // removing it: the mint race is now ~2s, not the 30s positive TTL. This
+    // test pins both halves — that it caches, and that it stops caching fast.
+    const captured: string[] = [];
+    const provider = new GBrainOAuthProvider({
+      sql: mockSql(captured, { legacyRows: () => [] }),
+      authNegativeCacheTtlMs: 150,
+    });
+
+    await expect(provider.verifyAccessToken('bogus')).rejects.toBeInstanceOf(InvalidTokenError);
+    const afterFirst = reads(captured).length;
+
+    // Inside the window: same answer, no second trip to the database.
+    await expect(provider.verifyAccessToken('bogus')).rejects.toBeInstanceOf(InvalidTokenError);
+    expect(reads(captured).length).toBe(afterFirst);
+
+    // Past it: re-reads, so a token minted in the meantime starts working.
+    await sleep(200);
+    await expect(provider.verifyAccessToken('bogus')).rejects.toBeInstanceOf(InvalidTokenError);
+    expect(reads(captured).length).toBeGreaterThan(afterFirst);
+  });
+
+  test('the negative window is far below the positive memo TTL', () => {
+    // The asymmetry is the safety argument: a negative entry denies service, so
+    // it must expire long before a positive one.
+    expect(DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS * 10).toBeLessThanOrEqual(DEFAULT_AUTH_CACHE_TTL_MS);
   });
 
   test('AuthDbTimeoutError propagates unchanged and is NOT cached', async () => {
