@@ -1,5 +1,26 @@
 # TODOS
 
+## v0.42.84.0 follow-ups (Tier 3 fixture staleness)
+
+- [ ] **P3 — `scripts/run-serial-tests.sh` silently ignores a file path passed on argv.**
+  Its list is a hardcoded `find test -name '*.serial.test.ts' -not -path 'test/e2e/*' | sort`,
+  and the only argument it recognizes is `--dry-run-list`. So
+  `bash scripts/run-serial-tests.sh test/pglite-snapshot-file-seeding.serial.test.ts`
+  discards the path and runs all 95 files, one bun process each. That is easy to mistake
+  for a hang: the intended single file takes about 2 minutes, the full sweep takes roughly
+  an hour on a loaded machine. The tell is the script's own first line,
+  `[serial-tests] running 95 file(s), one bun process per file`. Fix: accept an optional
+  argv file list the way `scripts/run-e2e.sh` already does, falling back to the `find` when
+  invoked with no args, and reject unknown flags rather than treating them as paths.
+  Where: `scripts/run-serial-tests.sh` (the file-list block and the arg parse near
+  `--dry-run-list`).
+- [ ] **P3 — the full 95-file serial suite is unexercised on this change.** v0.42.84.0
+  switched the runner's fixture step to `--if-stale` and verified
+  `test/pglite-snapshot-file-seeding.serial.test.ts` directly (1 pass / 0 fail, 115.44s),
+  but the whole serial sweep was not run end to end, because it costs about an hour on a
+  loaded Windows machine and the argv gap above makes a scoped run impossible without
+  editing the script. Worth one full sweep on a quiet machine, or after the argv fix lands.
+
 ## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 
 - [x] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
