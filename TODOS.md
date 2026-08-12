@@ -17,6 +17,33 @@
   `resolveConfiguredRemote(..., {push: false})` reading, plus a regression test with
   the two bare repos genuinely diverged (equal trunks cannot discriminate).
 
+## v0.42.88.0 follow-ups (deploy triage)
+
+- [ ] **P2 — the deployed :7483 lineage's v66 migration never got the #1178 fix, and an
+  ordinary catch-up merge does not carry it over.** Found while deploying v0.42.88.0.
+  `src/core/migrate.ts`'s v66 (`embed_stale_partial_index`) block on the serving lineage
+  still inlines its invalid-index cleanup instead of calling the shared
+  `dropInvalidConcurrentIndex(engine, 66, 'idx_chunks_embedding_null')` helper. The trunk
+  has both the helper and the call; branch `claude/deploy-7483-v0.42.88.0` has neither
+  (`grep -c 'function dropInvalidConcurrentIndex'` is 1 on `fork/master`, 0 there). Two
+  tests in `test/migrate.test.ts` assert the delegation and fail on the deployed tree
+  today, and have been failing there for several releases. It is not cosmetic: #1178 is
+  that Postgres rejects `CONCURRENTLY` from any function or `EXECUTE` context, so the
+  inline `DO $$ ... EXECUTE 'DROP INDEX CONCURRENTLY ...' ... $$` throws exactly when its
+  guard condition fires, which is the case where a prior interrupted concurrent build left
+  an invalid remnant blocking the re-create. PGLite never exercises it, so only a Postgres
+  brain that has actually had a concurrent build fail will see it.
+  The catch is that the two lineages have MULTIPLE MERGE BASES, so the v0.42.88.0
+  catch-up merge silently kept the serving side of this file with no conflict. Re-merging
+  will not fix it. Port the helper and the v66 call explicitly, then confirm with the two
+  named tests rather than with a clean merge.
+  Where: `src/core/migrate.ts` (the `dropInvalidConcurrentIndex` helper above `MIGRATIONS`,
+  and the `name: 'embed_stale_partial_index'` block), verified by
+  `test/migrate.test.ts` ("v66 handler source delegates invalid-remnant cleanup to the
+  shared helper (#1178)" and "dropInvalidConcurrentIndex helper itself probes
+  pg_index.indisvalid and issues a standalone DROP (no DO block)") plus
+  `test/e2e/migration-drop-invalid-concurrent-index.test.ts`.
+
 ## v0.42.85.0 follow-ups (Tier 3 fixture staleness)
 
 - [x] **P3 — `scripts/run-serial-tests.sh` silently ignored a file path passed on argv.**
