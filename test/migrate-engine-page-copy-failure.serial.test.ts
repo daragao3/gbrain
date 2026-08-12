@@ -28,6 +28,93 @@ import { saveConfig, loadConfigFileOnly } from '../src/core/config.ts';
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
+import { useSnapshotPglite } from './helpers/snapshot-pglite.ts';
+
+/**
+ * Tier-3 snapshot opt-in (self-contained).
+ *
+ * Every migrate test below cold-boots several PGLite clusters, two of which
+ * run `PGLITE_SCHEMA_SQL` + the full migration ladder. `initSchema()` alone
+ * measured 6.5s per cluster on an idle machine (121 migrations) and ~14s
+ * under load, which is what pushed these tests past a 30s budget.
+ *
+ * Loading the snapshot replaces that ladder with a tarball restore. Measured
+ * with an interleaved A/B (ON/OFF/ON/OFF in ONE process, so a load trend hits
+ * both arms equally — non-interleaved runs on this box are uncomparable, see
+ * the timeout note below): one in-memory + one fresh file-backed cluster cost
+ * 36.2s avg with the snapshot vs 71.9s without. Both reps agreed. ~2x.
+ *
+ * `scripts/ci-local.sh` exports `GBRAIN_PGLITE_SNAPSHOT` for the whole suite,
+ * but a bare `bun test test/migrate-engine-page-copy-failure.serial.test.ts`
+ * inherits nothing — which is exactly how these tests are usually run when
+ * they're being debugged. So opt in here instead of depending on ambient env.
+ *
+ * The fixture is gitignored and built on demand, so it is legitimately absent
+ * on a fresh clone. Absent (or hash-stale) => `tryLoadSnapshot` returns null
+ * and the engine silently falls back to a normal cold init: slower, but still
+ * correct. That is why this only ever SETS the vars, never asserts on them.
+ *
+ * `seedFileBacked` additionally lets the FILE-BACKED migration target skip its
+ * own init. It is honoured only for a dataDir that holds no cluster yet, and
+ * a snapshot-seeded target is schema-only — 0 pages — so the "target brain is
+ * not empty" guard (which counts pages) still sees it as empty.
+ *
+ * This goes through `useSnapshotPglite()` rather than a module-level
+ * `process.env` assignment. `process.env` is process-global, and a bare
+ * assignment here would leak into every file loaded after this one in the same
+ * bun process — order-dependently, reshuffling whenever a test file is added.
+ * Leaking the seed-file flag is the worse half: it changes what a fresh
+ * on-disk brain looks like at connect() time, which would silently alter any
+ * later file asserting on fresh-install state.
+ *
+ * To be precise about the blast radius here: `scripts/run-serial-tests.sh`
+ * gives each `*.serial.test.ts` its OWN bun process, so via that runner the
+ * leak is not reachable from this file — the bracket is defensive, matching
+ * the convention rather than repairing a live escape. It does matter for a
+ * developer running `bun test <this file> <other files>` directly, which is
+ * exactly how these tests get exercised while being debugged. See
+ * `test/helpers/cold-pglite.ts` for the same reasoning in the opt-OUT
+ * direction, where the leak WAS live and cost 3 of 4 unit shards the snapshot.
+ */
+useSnapshotPglite({ seedFileBacked: true });
+
+/**
+ * In-flight `runMigrateEngine` calls, drained by `afterEach` BEFORE any
+ * `GBRAIN_HOME` restoration happens.
+ *
+ * This is the load-bearing half of the data-integrity fix, and it is not
+ * about speed. `saveConfig()` resolves `GBRAIN_HOME` at CALL time. If a test
+ * is aborted at its timeout while suspended inside `runMigrateEngine`, the
+ * test body's `finally` (or simply the next test / end of file) clears
+ * `GBRAIN_HOME` while that promise is still running. The orphan then reaches
+ * `saveConfig()` with no `GBRAIN_HOME` in effect and rewrites the
+ * MACHINE-GLOBAL `~/.gbrain/config.json`, repointing the operator's real
+ * brain at a %TEMP% PGLite store that is deleted moments later — after which
+ * every lookup returns page_not_found, indistinguishable from a deleted page.
+ *
+ * Registering the promise here and awaiting it in `afterEach` means the env
+ * is never torn down underneath a live run, regardless of timing. gbrain
+ * commit 01e4a4fe (`unsafeConfigFlipReason`) refuses the resulting write as a
+ * second line of defence; this closes the window that produces it at all.
+ */
+const inFlightMigrations = new Set<Promise<unknown>>();
+
+function trackedMigrate(source: BrainEngine, args: string[]): Promise<unknown> {
+  const run = runMigrateEngine(source, args);
+  inFlightMigrations.add(run);
+  // Swallow nothing: the caller still awaits `run`'s real outcome. The
+  // deregistration promise is deliberately separate so a rejection here
+  // can't turn into an unhandled rejection when the caller already handled it.
+  void run.then(() => { inFlightMigrations.delete(run); }, () => { inFlightMigrations.delete(run); });
+  return run;
+}
+
+/** Await every registered run to settle. Safe to call when the set is empty. */
+async function drainInFlightMigrations(): Promise<void> {
+  while (inFlightMigrations.size > 0) {
+    await Promise.allSettled([...inFlightMigrations]);
+  }
+}
 
 /**
  * Each `runMigrateEngine` test below stands up two or three PGLite engines and
@@ -46,6 +133,18 @@ import type { Page } from '../src/core/types.ts';
  * Runtime is dominated by whatever else the machine is doing — the same test has
  * both passed under a 180s budget and overrun a 300s one — so treat this number
  * as headroom, not a guarantee.
+ *
+ * Raising it is not papering over a fixable cost. The schema work HAS been
+ * shared away via the snapshot above (~2x); what remains is irreducible PGLite
+ * WASM cluster boot. The first test alone needs FIVE clusters: the in-memory
+ * source, the migration target, a verify engine, the target again for the
+ * resume run, and a second verify engine. None can be pooled — PGLite takes an
+ * exclusive lock on a data dir, so the verify engines must disconnect before
+ * the resume migrate reopens the target — and none can be dropped without
+ * giving up the actual #3194 assertion that a failed page did not silently
+ * vanish from the target. At ~15-20s per boot under load, five boots do not fit
+ * in 60s: an instrumented run of the first test came in at 62422ms WITH the
+ * snapshot active.
  */
 const MIGRATION_TEST_TIMEOUT_MS = 300_000;
 
@@ -171,7 +270,13 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
     rmSync(fileSandbox, { recursive: true, force: true });
   });
 
-  afterEach(() => {
+  // Backstop for the abort case: when bun cancels a test at its timeout, the
+  // test body's own `finally` may never run, so the drain has to exist here
+  // too. This hook is what guarantees the NEXT test cannot start (and the
+  // file cannot end) with a previous migration still running against a
+  // GBRAIN_HOME that is about to be deleted.
+  afterEach(async () => {
+    await drainInFlightMigrations();
     _resetCliExitVerdictForTests();
   });
 
@@ -227,7 +332,7 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
         return originalPutPage.call(this, slug, page, opts);
       };
 
-      await runMigrateEngine(source, ['--to', 'pglite', '--path', targetDbPath]);
+      await trackedMigrate(source, ['--to', 'pglite', '--path', targetDbPath]);
 
       // 1. Exit verdict must reflect the partial failure.
       expect(currentExitCode()).toBe(1);
@@ -264,7 +369,7 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       //    should be (re-)written.
       _resetCliExitVerdictForTests();
       PGLiteEngine.prototype.putPage = originalPutPage;
-      await runMigrateEngine(source, ['--to', 'pglite', '--path', targetDbPath]);
+      await trackedMigrate(source, ['--to', 'pglite', '--path', targetDbPath]);
 
       expect(currentExitCode()).toBe(0);
       expect(existsSync(manifestPath)).toBe(false); // clean run clears the manifest
@@ -275,6 +380,9 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       expect(await verifyEngine.getPage('good-page')).not.toBeNull();
       expect(await verifyEngine.getPage('bad-page')).not.toBeNull();
     } finally {
+      // MUST precede the GBRAIN_HOME restore below: a still-running migration
+      // would otherwise reach saveConfig() with the env already torn down.
+      await drainInFlightMigrations();
       PGLiteEngine.prototype.putPage = originalPutPage;
       if (source) await source.disconnect();
       if (verifyEngine) await verifyEngine.disconnect();
@@ -327,7 +435,7 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
         return originalGetRawData.call(this, slug, rdSource, opts);
       };
 
-      await runMigrateEngine(source, ['--to', 'pglite', '--path', targetDbPath]);
+      await trackedMigrate(source, ['--to', 'pglite', '--path', targetDbPath]);
       expect(currentExitCode()).toBe(1);
 
       // The target actually has the row (putPage succeeded) even though
@@ -351,10 +459,12 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
       // brain is not empty" abort) since a matching manifest is present.
       _resetCliExitVerdictForTests();
       PGLiteEngine.prototype.getRawData = originalGetRawData;
-      await runMigrateEngine(source, ['--to', 'pglite', '--path', targetDbPath]);
+      await trackedMigrate(source, ['--to', 'pglite', '--path', targetDbPath]);
       expect(currentExitCode()).toBe(0);
       expect(existsSync(manifestPath)).toBe(false);
     } finally {
+      // MUST precede the GBRAIN_HOME restore below — see the first test.
+      await drainInFlightMigrations();
       PGLiteEngine.prototype.getRawData = originalGetRawData;
       if (source) await source.disconnect();
       if (verifyEngine) await verifyEngine.disconnect();
@@ -414,13 +524,15 @@ describe('runMigrateEngine — per-page failures are surfaced, not swallowed (#3
 
       // --force on an empty target must NOT trust that stale manifest —
       // `real-page` must actually get copied, not skipped as "already done".
-      await runMigrateEngine(source, ['--to', 'pglite', '--path', targetDbPath, '--force']);
+      await trackedMigrate(source, ['--to', 'pglite', '--path', targetDbPath, '--force']);
       expect(currentExitCode()).toBe(0);
 
       verifyEngine = new PGLiteEngine();
       await verifyEngine.connect({ database_path: targetDbPath });
       expect(await verifyEngine.getPage('real-page')).not.toBeNull();
     } finally {
+      // MUST precede the GBRAIN_HOME restore below — see the first test.
+      await drainInFlightMigrations();
       if (source) await source.disconnect();
       if (verifyEngine) await verifyEngine.disconnect();
       _resetCliExitVerdictForTests();
