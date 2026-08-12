@@ -2,23 +2,536 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.42.76.0] - 2026-07-29
+## [0.42.84.0] - 2026-08-11
 
-**Fresh installs and upgrades no longer pull the three dependency releases flagged by the repository's security scan.**
+**The last three ways of writing a reference are now protected from losing their links when you save a page.**
 
-The affected packages arrive through GBrain's web server, request parser, and schema validator dependencies. This release raises each dependency to a patched version and moves the MCP SDK to a release that officially supports the newer server adapter. Normal GBrain commands and configuration stay the same.
+GBrain builds a page's links by reading the references in its body. It only recognizes references under folder names it knows about, and folder names you invented are taught to it through a setting. When a folder name is missing from that setting, GBrain stops seeing the references under it.
 
-One originally recommended server version has since received another security advisory, so this release skips past it to the current patched line instead of stopping at the older minimum. The result is a lockfile that passes the same official OSV scanner used by pull requests.
+That turns an ordinary save into a loss. GBrain could not tell "the author removed this reference" from "GBrain can no longer read this reference", and it treated both the same way, so it dropped the links. The links table keeps no trash can.
+
+The previous two releases closed part of this. One stopped the loss for references written as `[[notes/quarterly-plan]]`. The other added warnings so you could find the folder names you were missing. References written as a plain markdown link, as bare text, or with a source name in front were still dropped. This release covers all four ways of writing one.
 
 ### How to use it
 
-Nothing to configure or migrate. Upgrade normally, then run:
+Nothing to turn on. Upgrade, then check whether your settings name every folder your pages reference:
 
 ```bash
 gbrain doctor
 ```
 
-Contributors can verify the dependency floors with:
+A healthy brain reports nothing. If it names folders, copy the command it prints to put them back, then rebuild the links those references should have produced:
+
+```bash
+gbrain extract links
+```
+
+### The numbers that matter
+
+| How the reference is written | Before | Now |
+|---|---|---|
+| `[[notes/quarterly-plan]]` | kept | kept |
+| `[Quarterly plan](notes/quarterly-plan)` | link dropped on save | kept |
+| bare `notes/quarterly-plan` | link dropped on save | kept |
+| `[[archive:notes/quarterly-plan]]` | link dropped on save | kept |
+
+| Check | Result |
+|---|---|
+| The four reference shapes, end to end | 23 pass, 0 fail |
+| The two related save paths | 16 pass, 0 fail |
+| Reference reading and folder settings | 262 pass, 0 fail |
+
+### Things to watch
+
+A reference you genuinely removed from a page is still cleaned up on the next save. That behavior is unchanged, and each of the four shapes has a matching test for it.
+
+The protection is deliberately generous about what counts as a reference. Prose that happens to mention a folder path can now hold on to a link you really did stop pointing at, so a link can go stale instead of being removed. That is the safer of the two mistakes, because a stale link is rebuilt by `gbrain extract links` and a removed one cannot be recovered. Tightening it is tracked as a follow-up.
+
+Links written under folder names GBrain already recognizes were never affected, and neither were links you added by hand.
+
+## To take advantage of v0.42.84.0
+
+Nothing to configure or migrate. Upgrade normally.
+
+If `gbrain doctor` names folders your settings are missing, run the command it prints, then run `gbrain extract links` to rebuild the links those references should have produced. Links dropped by an earlier version come back this way, because they are rebuilt from what your pages actually say.
+
+### Itemized changes
+
+#### Fixed
+- **The removal safety net covers all four reference shapes.** `extractPageLinks` in `src/core/link-extraction.ts` reported an unresolvable reference only from its generic wikilink pass, so a body carrying `[label](dir/slug)`, a bare `dir/slug`, or a qualified `[[source:dir/slug]]` under an undeclared folder produced no link candidates and no unresolvable references at all. To a caller reconciling links, that is indistinguishable from the author deleting the reference, so those links were removed. `extractPageLinks` now folds `extractUndeclaredPrefixRefs(content, opts.entityDirs)` into the reported set. That is the same matcher the stranded-links check in `gbrain doctor` already uses, so detection and protection share one definition of what counts as a reference and cannot drift apart.
+
+#### Tests
+- **`test/e2e/put-page-autolink-unresolvable-ref-shapes-pglite.test.ts`** covers each of the four shapes through a real save: the reference present and its link kept, the reference gone and its link removed, and a page that drops one reference while keeping another so only the matching link goes. It also covers a folder path that appears inside a URL, a reference inside a code span, and links added by hand.
+
+#### Documentation
+- **`docs/architecture/KEY_FILES.md`** records that the safety net now has two populating paths, and that its entries are literals lifted from the page body rather than validated slugs, so a consumer must match them against links that already exist and must never build a link from one.
+
+## [0.42.83.0] - 2026-08-11
+
+**GBrain now refuses to repoint your brain at a temporary folder, instead of quietly leaving you reading an empty one.**
+
+When something migrates your brain to a new location, it writes that location into your settings file. That file is shared by everything on your machine, so whatever it says last is where every later command looks. A script that migrates into a scratch folder is supposed to keep that private to itself, but nothing forces it to. If it forgets, your real settings get rewritten to point at the scratch folder.
+
+That folder is empty, and your operating system deletes it later anyway. From then on `gbrain get`, `gbrain list` and `gbrain timeline` all answer "not found" against the empty folder. Nothing fails, nothing warns, and your real brain is sitting there untouched the whole time. The MCP server keeps serving the real one, so nothing else looks wrong either.
+
+That is the worst shape a bug can take, because "not found" is also what a deleted page looks like. An agent that trusts the answer can decide a page is gone and write a fresh one, and now the same subject exists twice with half the history in each.
+
+GBrain now checks for exactly that shape before saving your settings, and refuses it.
+
+### How to use it
+
+Nothing to configure. Upgrade, and the write is blocked with a message naming the settings file and the folder it was about to point at.
+
+If your settings were already repointed before you upgraded, check where your brain currently lives:
+
+```bash
+gbrain config get database_path
+```
+
+If that prints a path inside your temp folder, your brain is not gone, only unreachable. Point it back:
+
+```bash
+gbrain config set database_path /path/to/your/real/brain
+```
+
+Migrating into a temporary folder on purpose is still allowed, you just have to say so:
+
+```bash
+GBRAIN_ALLOW_TEMP_BRAIN=1 gbrain migrate --to pglite --path "$TMPDIR/scratch"
+```
+
+If you are writing a test or a throwaway repro, prefer `GBRAIN_HOME` instead. It gives the process its own settings file, so it cannot reach the shared one at all.
+
+### Things to watch
+
+Only one shape is refused: no `GBRAIN_HOME` set, and the new brain path lands inside the operating system temp folder. Migrating your real brain to a PGLite file in a durable location is a normal thing to do and is untouched, as are Postgres settings and anything running under `GBRAIN_HOME`. A deliberate migration is never undone.
+
+When a write is refused, GBrain appends one line to `<config-dir>/audit/config-repoint-refused.jsonl` recording the process id, command line, working directory and call stack. That names the program responsible, which matters because the caller is often a script that is not in any repository you can search.
+
+### Itemized changes
+
+- `src/core/config.ts`: added `unsafeGlobalConfigWrite()`, which returns a reason string when a save would repoint the machine-global config at a path inside `tmpdir()` with no `GBRAIN_HOME` set, and `null` otherwise. `saveConfig()` now calls it first and throws on a non-null result. Containment uses `isPathInside()` from `path-confine.ts` per the path-boundary invariant, never a `startsWith` prefix test.
+- `src/core/config.ts`: added `auditUnsafeConfigWrite()`, a best-effort JSONL appender that records pid, ppid, argv, cwd, engine, target path and stack to `<config-dir>/audit/config-repoint-refused.jsonl`. Honors `GBRAIN_AUDIT_DIR`. Never throws, so it cannot turn a refusal into a different failure.
+- `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out of the check.
+- `test/gbrain-home-isolation.test.ts`: covers the refusal, the audit row, and each case that must stay allowed (`GBRAIN_HOME` set, durable PGLite path, Postgres config, opt-out set).
+- `CLAUDE.md`: recorded the invariant that `saveConfig` writes the machine-global config and `GBRAIN_HOME` sandboxing is advisory, so the guard belongs at the choke point rather than at each caller.
+
+## To take advantage of v0.42.83.0
+
+Confirm your brain is not currently pointed at a temporary folder. Run:
+
+```bash
+gbrain config get database_path
+gbrain list --limit 3
+```
+
+If the path is inside your temp folder, or `gbrain list` reports no pages while you know the brain has some, your settings were repointed at some earlier moment. The data is still in your real brain. Set `database_path` back to it with `gbrain config set database_path <path>`, then re-run `gbrain list` to confirm your pages are back.
+
+If both commands look right, there is nothing to do. The guard only acts on future writes.
+## [0.42.82.0] - 2026-08-11
+
+**The test suite's database speed-up fixture is now built at the same vector size the tests run at, so tests that save embeddings pass instead of failing on a size mismatch.**
+
+GBrain's test suite can restore a prebuilt database instead of rebuilding the schema from scratch for every test file. The tool that builds that prebuilt database and the test suite itself disagreed about how wide an embedding vector is. The builder recorded one width, the tests wrote another, and every test that saved an embedding failed with a dimension mismatch.
+
+Nothing caught the disagreement. The freshness check that decides whether a prebuilt database is still usable looked at the schema template, where the width appears as a placeholder that reads identically at any size. A restored database also skips the normal schema setup, so a test file could not correct the width on its own.
+
+A second problem made the speed-up mostly ineffective. A test file that needed the slow path opted out by clearing a setting shared by the whole process, which switched every file loaded after it to the slow path too. Which files were affected depended on how the runner packed them into shards, so adding any test file reshuffled it.
+
+Nothing changes for normal CLI use or for stored brain data. This affects contributors running the test suite.
+
+### How to use it
+
+The prebuilt fixture is not checked in. Build it once, then point the suite at it:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test
+```
+
+`bun run ci:local` does both steps for you, and rebuilds the fixture whenever it has gone out of date. You can ask for the same thing directly:
+
+```bash
+bun run scripts/build-pglite-snapshot.ts --if-stale
+```
+
+That rebuilds only when the fixture is missing or no longer matches the schema it was built from. When it is already current it costs about 4 seconds and does nothing.
+
+If you change the width the suite runs at, edit it in one place, `test/helpers/legacy-embedding-config.ts`. The builder and the suite's preload both read that file, and the freshness check folds the width in, so a fixture built at the old width stops matching and falls back to a normal cold start.
+
+### The numbers that matter
+
+| Check | Result |
+|---|---|
+| Tests that save embeddings, with the fixture active | 15 pass, 0 fail |
+| Fixture build, 120 migrations applied | schema setup in ~12s, 44 MB fixture |
+| Fixture and cold start produce the same schema | 5 pass, 0 fail |
+
+### Things to watch
+
+A fixture built before this release will not match the new freshness check. It is reported as stale and the engine falls back to a normal cold start, which is correct but slower. `bun run ci:local` rebuilds it for you. If you run the suite by hand, rebuild it once with `bun run build:pglite-snapshot` to get the speed-up back.
+
+Test files that genuinely need the slow path now opt out through `useColdPglite()`, which brackets a single file instead of changing the setting for the whole process. Files that run before or after keep whatever the runner gave them.
+
+## To take advantage of v0.42.82.0
+
+Nothing to configure or migrate for normal use. Upgrade normally.
+
+If you develop on GBrain and keep a prebuilt test fixture around, rebuild it once:
+
+```bash
+bun run build:pglite-snapshot
+```
+
+Then confirm the fixture and the cold start still agree:
+
+```bash
+GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar bun test test/pglite-snapshot-file-seeding.serial.test.ts
+```
+
+If that reports a stale fixture after a rebuild, please file an issue at
+https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and
+the command you ran.
+
+### Itemized changes
+
+#### Fixed
+- **The fixture builder pins the same embedding config the test preload pins.** `scripts/build-pglite-snapshot.ts` runs under `bun run`, which does not apply the test runner's preload, so it fell back to the production default width. It now calls `configureGateway()` with the shared config and logs the width it baked.
+- **The freshness check covers the embedding width.** `computeSnapshotSchemaHash()` in `src/core/pglite-engine.ts` takes the width as an argument and folds it into the hash. A fixture at the wrong width now fails the check and degrades to a normal cold start rather than loading and rejecting every insert.
+- **`tryLoadSnapshot()` resolves the width the same way schema setup does.** A synchronous helper reads the gateway's width and falls back to the canonical default when the gateway is not configured.
+- **The local CI run rebuilds an out-of-date fixture instead of skipping it.** `scripts/ci-local.sh` rebuilt the fixture only when the file was missing, so a fixture left over from an older schema was kept and the suite ran against it. `scripts/build-pglite-snapshot.ts` takes a new `--if-stale` flag that rebuilds when the fixture is absent, when its recorded version is absent or unreadable, or when that version no longer matches the current schema, and ci-local now calls it that way. The staleness comparison lives in the builder rather than in shell, so the hash is computed in one place.
+
+#### Added
+- **One definition of the width the unit suite runs at.** `test/helpers/legacy-embedding-config.ts` is read by both `test/helpers/legacy-embedding-preload.ts` and the fixture builder. It deliberately imports nothing from the test runner so a plain script can use it.
+- **A file-scoped slow-path opt-out.** `test/helpers/cold-pglite.ts` exposes `useColdPglite()`, which clears and restores the setting around one file instead of leaking to every file after it.
+
+#### Tests
+- **The width agreement is pinned.** `test/pglite-snapshot-embedding-width.test.ts` covers the shared config, the hash folding the width in, and a wrong-width fixture degrading rather than failing.
+- **Five files moved to the scoped opt-out.** `test/bootstrap.test.ts`, `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, `test/schema-bootstrap-coverage.test.ts`, and `test/e2e/schema-drift.test.ts` use `useColdPglite()` and still exercise the cold path.
+- **The seeded and cold schemas are compared at the correct width.** `test/pglite-snapshot-file-seeding.serial.test.ts` passes the shared width into the freshness check so a current fixture is not reported stale.
+
+#### Documentation
+- **`docs/TESTING.md`** explains how to build the fixture, how the width is shared, when to reach for the scoped opt-out, and how `--if-stale` decides whether a rebuild is needed.
+- **`docs/architecture/KEY_FILES.md`** records the widened hash signature.
+
+#### Maintenance
+- **`scripts/bench-pglite-bootstrap.ts`** passes the width through to the hash helper.
+
+## [0.42.81.0] - 2026-08-11
+
+**GBrain now warns you when a folder name is missing from your settings, instead of letting it quietly cost you links.**
+
+GBrain turns the `[[folder/page]]` references you write into links in your graph. It only recognizes references under folder names it knows about, and `link_resolution.entity_dirs` is where you teach it your own folder names. That setting looks like it only controls how much GBrain notices. It does more than that.
+
+If a folder name is missing from the list, references under it are invisible to GBrain. New ones never become links. Existing links stop being kept up to date, because GBrain can no longer see what the page points at. And for references written as a plain markdown link, as bare text, or with a source prefix, the existing links are still deleted on the next save.
+
+The previous release stopped the most common form of that deletion, the one that hits `[[folder/page]]` wikilinks. The other three ways of writing a reference are not covered by it, and none of them are covered against links simply going stale. Links have no undo.
+
+Two things change here. `gbrain doctor` now tells you when your current setting is leaving links stranded, names the folder to add, and shows examples so you can check for yourself. And if you try to shorten the list in a way that would strand links, `gbrain config set` refuses and explains what would be lost instead of doing it.
+
+### How to use it
+
+Nothing to configure. Upgrade, then run:
+
+```bash
+gbrain doctor
+```
+
+A healthy brain reports nothing. A brain with stranded links reports the count, the affected pages, and a ready to paste command that puts the missing folder names back.
+
+Shortening the list is now gated:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'people,projects'
+```
+
+If that would strand links, the command stops and prints what would be lost. When you have read the list and still want to proceed, add `--yes`:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'people,projects' --yes
+```
+
+The same gate applies to `gbrain config unset link_resolution.entity_dirs`, which clears every folder name at once.
+
+### Things to watch
+
+The environment variable `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` takes priority over the stored setting, so a shell that exports a shorter list skips the `config set` gate. The doctor check reads whichever value is actually in effect, so it still reports the problem in that case.
+
+Turning on `link_resolution.global_basename` does not cover this. A reference under a folder name GBrain does not know does get matched by name in that mode, but it is recorded as a different kind of link, so the original link is still replaced.
+
+The check names a folder only when a real link depends on it. A reference you wrote to a page that was never linked is not reported, because there is nothing to lose.
+
+### Also in this release: the settings the guard is about
+
+This release is the first to carry `link_resolution.entity_dirs` and `link_resolution.remote_reconcile`, so both are new here.
+
+**`link_resolution.entity_dirs` lets you name your own top-level folders.** GBrain ships a fixed list of folder names it recognizes in references. A brain organized under other names got no links from its references at all: the page rendered the reference, the graph stayed empty, and nothing reported an error. Name your folders and the normal link path applies to them:
+
+```bash
+gbrain config set link_resolution.entity_dirs 'sessions,systems,runbooks'
+```
+
+**`link_resolution.remote_reconcile` builds the graph for pages written over the network.** Writing a page through the HTTP interface reported success while quietly skipping link and timeline building, so wikilinks never became links and a written out `## Timeline` never became timeline entries. Since most writing now happens that way, that was the normal path. With this on, a network write builds timeline entries in full and builds links from explicit `[[wikilinks]]` only, and it only ever adds. Removing links stays a local operation, so a network caller cannot prune links someone else wrote:
+
+```bash
+gbrain config set link_resolution.remote_reconcile true
+```
+
+Both settings are off by default and are now accepted by `gbrain config set` directly. Previously they existed but were not registered, so the documented command failed with "Unknown config key" and you had to find `--force` by reading the source.
+
+## To take advantage of v0.42.81.0
+
+Run `gbrain doctor` once after upgrading. If it reports stranded links, copy the command it prints and run it. That puts the missing folder names back, so those references start producing links again and the existing ones resume being kept up to date. If it reports nothing, your settings already cover every folder your pages reference and there is no action to take.
+
+If your pages live under folder names GBrain does not ship by default, set `link_resolution.entity_dirs` to name them. If you write pages over the network and your graph looks empty, turn on `link_resolution.remote_reconcile`.
+
+If any of your own scripts narrow `link_resolution.entity_dirs`, they now need `--yes` to keep working.
+
+### Itemized changes
+
+#### Added
+- **`gbrain doctor` reports links stranded by the current folder settings.** The `entity_dirs_orphaned_edges` check counts links whose reference sits under a folder name the settings do not declare, groups them by folder, names example pages, and prints a ready to paste command that restores the full list. It runs on both the local and the remote doctor paths, and reads the effective setting so an environment override is included.
+- **`gbrain config set` and `gbrain config unset` refuse a change that would strand links.** Shortening `link_resolution.entity_dirs` now runs a check first, reports the links that would be affected, and stops. `--yes` proceeds anyway. Adding folder names, and removing ones nothing depends on, are unaffected.
+- **`src/core/entity-dirs-guard.ts`** holds the shared scan behind both surfaces. It reads existing links and page bodies with plain queries, so no schema change and no engine change were needed. It reports a link only when a reference under an undeclared folder is backed by a real link, and it says so explicitly when a scan stops early rather than reporting a partial count as a complete one.
+- **`extractUndeclaredPrefixRefs` in `src/core/link-extraction.ts`** finds references the extractor can no longer see. It mirrors all four reference shapes the extractor understands and lives beside them so the two cannot drift apart.
+
+#### Added (carried in with this release)
+- **Operator-declared folder names.** `link_resolution.entity_dirs` (comma separated) extends the recognized top-level folder set that gates reference matching. `normalizeEntityDirs` lowercases, trims, drops duplicates and canonical names, and rejects anything that is not a plain lowercase slug, since these strings are built into a pattern. Resolution order is the `GBRAIN_LINK_RESOLUTION_ENTITY_DIRS` environment variable, then stored config, then empty.
+- **Graph building for network writes.** `link_resolution.remote_reconcile` runs timeline building in full and link building from explicit wikilinks only, add only, for a `put_page` that arrives over the network. Removal remains local only. Off by default.
+- **Both keys are accepted by `gbrain config set`.** They were previously reachable only through `--force`.
+
+#### Tests
+- `test/entity-dirs-undeclared-refs.test.ts`, `test/entity-dirs-guard-scan.test.ts`, `test/doctor-entity-dirs-orphaned-edges.test.ts`, and `test/config-entity-dirs-preflight.test.ts` cover each reference shape, references inside code blocks and URLs, links that are not eligible for removal, the environment override, the refusal and its `--yes` override, the row cap, and a regression for the page shape that lost links in the first place.
+- `test/link-extraction-remote-reconcile.test.ts` covers the network write path, including that it only ever adds.
+
+## [0.42.80.0] - 2026-08-11
+
+**Saving a page no longer deletes the links that page still points at.**
+
+GBrain builds a page's outbound links by reading the wikilinks in its body. When it could not turn a wikilink into a link, it read the absence as "you deleted this" and dropped the link from the graph. Saving the same page again was enough to lose every automatically built link on it, and the links table keeps no trash can, so the loss could not be undone.
+
+This hit pages whose wikilinks point at folders outside the built-in list GBrain recognizes by default. Those wikilinks never became links in the first place, so on the next save the links already in the table looked stale and were dropped. Saving the page a third time did not bring them back, because nothing about the second save was special.
+
+GBrain now tells the two cases apart. If a page still mentions something GBrain cannot resolve, the existing link stays. If you actually take a wikilink out of the body, its link is removed exactly as before. Any removal that gets held back is counted in the response, so it is visible instead of silent.
+
+This release also adds a way to write a large page from the command line without passing the whole body as an argument.
+
+### How to use it
+
+Nothing to configure for the link fix. To write a page from a file:
+
+```bash
+gbrain put notes/my-page --file ./body.md
+```
+
+To see what a save did to your links:
+
+```bash
+gbrain put notes/my-page --file ./body.md --json
+```
+
+The `auto_links` block reports `created`, `removed`, and `withheld`. A non-zero `withheld` means GBrain kept links for references it could not resolve.
+
+### The numbers that matter
+
+| Situation | Previous outcome | Current outcome |
+|---|---|---|
+| Re-saving a page whose wikilinks do not resolve | Every automatically built outbound link removed | Links kept, count reported as `withheld` |
+| Taking a wikilink out of the body | Link removed | Link removed, unchanged |
+| Removing one wikilink out of several | All links removed | Only that one removed |
+| Hand-created links | Untouched | Untouched, unchanged |
+| Writing a large page with `--content` | Could end the process with no output and no save | `--file` reads the body from disk instead |
+
+### Things to watch
+
+A held-back link can go stale. If you delete a wikilink that GBrain could not resolve anyway, its link stays until you remove it with `gbrain link-rm`. That trade is deliberate: a kept link takes one command to remove, and a deleted one cannot be recovered at all. Turning on `link_resolution.global_basename` lets more wikilinks resolve into real links, which shrinks the held-back set.
+
+On Windows, handing a large page body to `--content` can end the process before GBrain starts running, which means no error can be printed and nothing is saved. Use `--file` for anything sizable.
+
+## To take advantage of v0.42.80.0
+
+Nothing to migrate or reconfigure. Links that earlier versions removed are not restored automatically, because the removal left no record behind. If you know a page lost links, re-add them with `gbrain link`, or turn on `link_resolution.global_basename` and save the page again so the wikilinks resolve on their own.
+
+### Itemized changes
+
+#### Link reconciliation
+- **A reference the page still carries protects its link.** `extractPageLinks` in `src/core/link-extraction.ts` now returns `unresolvableRefs`, the wikilink texts present in the body that produced no link candidate.
+- **Reconciliation withholds those removals.** `runAutoLink` in `src/core/operations.ts` keeps a managed link whose target is still referenced by an unresolvable wikilink, or whose target could not be validated against the current source. Matching covers the full written text, a path suffix, and a bare name.
+- **Withheld removals are reported.** The `put_page` response's `auto_links` block gains a `withheld` count.
+
+#### Command line
+- **`gbrain put` accepts `--file`.** Handled in `src/cli.ts`, it reads the body as a buffer using the same binary-content check `capture` uses, and refuses `--content` and `--file` together. The flag is command-line only and is deliberately not a `put_page` parameter, so it adds no file-reading ability for remote callers.
+
+#### Tests
+- **Regression coverage pins both directions.** `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` covers a no-op save, a genuine rewrite, the reported `withheld` count, and two cases confirming genuinely stale links are still removed. `test/put-page-file-flag.test.ts` covers the flag's boundaries and that it stays off the operation surface.
+## [0.42.79.0] - 2026-08-11
+
+**A page can no longer be quietly gutted by a write that claims it changed nothing.**
+
+There is a failure mode where an agent rewrites a page, keeps a section or two, and replaces everything else with a single line in square brackets saying the rest is unchanged. The write succeeds. The page now holds a fraction of what it held before, and nothing anywhere says so. A reader who was not watching sees a page that simply looks short. On one brain this happened to three pages inside a minute and removed about 12,000 characters of checked facts before anyone noticed.
+
+GBrain now refuses that write. When incoming content both drops a large share of what the page already held and contains a line that is nothing but a bracketed note, the write is rejected and the stored page is left exactly as it was. The error quotes the offending line back to you, so an agent can see what its own payload was about to delete and send the full text instead.
+
+The check looks at the shape of the line, not its wording. Matching phrases like "omitted for brevity" would have missed one of the three real cases outright. Shape catches all of them.
+
+### How to use it
+
+Nothing to configure. The guard is on by default for every write path: `put_page`, `gbrain capture`, `gbrain import`, and `gbrain sync`.
+
+If a shrink is genuinely what you want, say so. Over MCP, pass `allow_truncation: true` to `put_page`. From a shell, the same parameter goes through raw tool invocation:
+
+```bash
+gbrain call put_page '{"slug":"my/slug","content":"...","allow_truncation":true}'
+```
+
+For a bulk file-sync run, where there is no per-call parameter to set:
+
+```bash
+GBRAIN_NO_TRUNCATION_GUARD=1 gbrain sync
+```
+
+### The numbers that matter
+
+| Behavior | Before | Now |
+|---|---|---|
+| Page loses most of its content behind a bracketed note | Write succeeds, no signal | Write refused, page untouched |
+| Signal reaching the caller | A normal success response | `status: "error"` plus a `truncation` object naming the line |
+| Embedding spend on a refused write | Full chunk and embed | None, the check runs before chunking |
+| Deliberate shrink with no bracketed note | Allowed | Allowed, unchanged |
+| Page holding steady or growing | Allowed | Allowed, unchanged |
+| New page with no prior content | Allowed | Allowed, unchanged |
+
+Thresholds: the write is refused only when at least 500 characters disappear and the incoming content keeps less than 75 percent of what the page held. Scanned across a 490-page brain, the line-shape check matched three lines in total, all of them ordinary content on pages that were not shrinking, so none of them would be blocked.
+
+### Things to watch
+
+- The comparison is on compiled truth only, not the timeline. A growing timeline can no longer mask a body that is being emptied.
+- The guard sees the page as it exists in the brain. A first write to a slug that does not exist yet is never refused.
+- If you hit a refusal you believe is wrong, the message names the exact line. Reword it or use the override, and the write goes through.
+
+### Itemized changes
+
+- `src/core/placeholder-truncation.ts` (new): `findPlaceholderLines` scans for a trimmed line matching `^\[.{10,}\]$` excluding wikilinks; `assessPlaceholderTruncation` pairs that with the shrink test; `formatPlaceholderTruncationError` builds the refusal message.
+- `src/core/import-file.ts`: `importFromContent` refuses with a `PLACEHOLDER_TRUNCATION` error after the hash-equality short-circuit and before chunking and embedding. New `allowTruncation` option, new `truncation` field on `ImportResult`.
+- `src/core/operations.ts`: `put_page` gains an `allow_truncation` parameter and returns a `truncation` object with the offending lines, the character count, and a hint, matching the shape the frontmatter guard already uses.
+- `test/put-page-placeholder-truncation-guard.test.ts` (new): 28 tests covering line-shape detection, wikilink and markdown-link exclusion, the shrink pairing, both override paths, and the `put_page` response envelope.
+
+## To take advantage of v0.42.79.0
+
+Upgrade and you are done. The guard applies to every write path with no configuration.
+
+If you have automation that intentionally compacts pages, add `allow_truncation: true` to those `put_page` calls, or set `GBRAIN_NO_TRUNCATION_GUARD=1` for the run. Everything else keeps working as before.
+
+Worth doing once after upgrading: look for pages that already lost content this way. A page whose body is mostly a bracketed note is the signature, and `page_versions` still holds the text that preceded the write that emptied it.
+
+## [0.42.78.0] - 2026-07-30
+
+**Windows contributors can run GBrain's tests without Unix-only launch failures, silent hangs, or cleanup races hiding the real result.**
+
+The unit runner now breaks Windows work into bounded groups instead of putting the whole suite behind one long-lived Bun process. If a group stalls or crashes before it prints totals, the runner records that outcome and fails closed. Tests that launch shells, workers, temporary repositories, or local IPC now use native Windows contracts while preserving the same behavior on Mac and Linux.
+
+This release also makes shutdown deterministic. GBrain stops only the process trees it started, waits for owned resources to settle, and still escalates when a descendant ignores the first stop request. Resolve IPC uses Windows named pipes when Unix sockets are unavailable, keeps request contents encrypted, and cannot block shutdown forever on an unresponsive peer.
+
+### How to use it
+
+Nothing to configure. Run the normal contributor gates:
+
+```bash
+git ls-files -z '*.sh' | xargs -0 rm -f && git checkout -- .
+```
+
+```bash
+bun run test
+```
+
+```bash
+bun run typecheck
+```
+
+The first command rematerializes shell scripts with the repository's LF policy in an existing Windows clone. Fresh checkouts pick up that policy automatically.
+
+### The numbers that matter
+
+| Behavior | Previous Windows outcome | Current outcome |
+|---|---|---|
+| Unit-test process size | One long-lived shard could lose all totals when Bun exited early | Four files per Bun process by default |
+| Stalled unit-test group | Could wait indefinitely or end without a trustworthy verdict | 300-second cap plus a 5-second termination grace |
+| No-log-growth watchdog | No bounded outer diagnosis | 600-second watchdog with fail-closed evidence |
+| Resolve IPC | Unix-socket assumptions blocked Windows | Native named pipe on Windows, Unix socket elsewhere |
+| Symlink tests | Platform privilege differences looked like product failures | Each test gates on the exact filesystem capability it needs |
+
+### Things to watch
+
+A bounded runner reports the evidence it actually observed. A clean focused run is not a claim that every Windows unit test passed, and a missing natural-completion marker is reported as unattested rather than guessed green. Shell-job execution remains behind `GBRAIN_ALLOW_SHELL_JOBS=1`; direct-argument jobs continue to bypass a shell.
+
+## To take advantage of v0.42.78.0
+
+Nothing to migrate or reconfigure. Existing Windows clones created before the LF policy may retain CRLF copies of tracked shell scripts, so rematerialize them once with the command above. Then run `bun run test` and `bun run typecheck` normally.
+
+### Itemized changes
+
+#### Windows test execution
+- **Unit-test failures remain attributable.** `scripts/run-unit-parallel.sh` and `scripts/run-unit-shard.sh` use bounded chunks, natural-completion attestation, no-log-growth diagnosis, and distinct crash, stall, force-kill, wedge, and unattested outcomes.
+- **Shell commands use the host platform explicitly.** `src/core/minions/handlers/shell-platform.ts` selects `cmd.exe /d /s /c` on Windows and `/bin/sh -c` on POSIX while keeping `shell: false`.
+- **Subprocess fixtures run through the current runtime.** Transcript and supervisor tests use portable JavaScript fixtures instead of Unix-only shell files.
+- **Path and frontmatter expectations survive native checkouts.** Test-local parsers accept CRLF fences, and filesystem assertions use native path semantics without changing slash-delimited logical identifiers.
+- **Symlink coverage reflects real capabilities.** Tests distinguish file symlinks, directory symlinks, junctions, and Git symlink checkout support instead of treating them as one platform flag.
+
+#### Process and resource lifecycle
+- **Owned workers shut down as trees.** POSIX workers run in their own process groups, `tini -g` forwards group signals, Windows uses bounded `taskkill /T /F`, and TERM-to-KILL escalation retains the original owned-tree identity.
+- **Cleanup preserves the primary error.** Temporary repositories, environment changes, PGLite handles, listeners, and child pipes settle deterministically, with cleanup failures aggregated rather than replacing the test or operation failure.
+- **Awaited deadlines keep the process alive.** Hard operation boundaries use referenced timers, while observer-only timers remain unreferenced.
+
+#### Resolve IPC
+- **Windows uses a path-redacting named pipe.** POSIX continues to use a mode-0600 Unix socket beneath the data directory.
+- **Requests and responses stay confidential and authenticated.** Resolve IPC rejects invalid or repeated messages and fails closed when authentication checks do not pass.
+- **Unresponsive peers cannot pin shutdown.** Clients have an absolute 250-millisecond deadline, accepted sockets are owned by the managed server, and active-handler drain is bounded before engine disconnect.
+
+#### Tests and documentation
+- **Focused regressions pin each portability contract.** New and updated tests cover shell resolution, named-pipe IPC, authenticated framing and malformed-message handling, process-tree escalation, spawn settlement, teardown ordering, exact symlink gates, bounded runner verdicts, and native path assertions.
+- **Contributor guidance matches the runner.** `docs/TESTING.md` documents Windows chunk defaults, shell line endings, subprocess floors, and the difference between focused evidence and a complete-suite result.
+- **Architecture guidance records the lifecycle boundary.** `docs/architecture/KEY_FILES.md` describes portable encrypted resolve IPC and bounded shutdown ordering.
+- **GitHub Actions remain immutable and current.** The gitleaks action pin now matches the current v2 tag commit.
+- **AI SDK dependencies stay on a compatible secure graph.** Direct provider packages are pinned as one unit so lockfile refreshes cannot introduce a dependency outside the release's security floor.
+
+## [0.42.77.0] - 2026-07-30
+
+**The security guide now tells operators what is safe today without publishing a playbook for old weaknesses.**
+
+`SECURITY.md` keeps the private reporting channel and the practical steps operators need to secure an internet-reachable brain. It now describes Dynamic Client Registration and browser-origin controls in terms of their current behavior, rather than preserving historical request sequences and probe details that are not needed to operate the product safely. The guide still makes the trust boundaries explicit: keep self-service registration off unless the deployment requires it, configure an origin allowlist for browser clients, and protect tokens and the underlying network.
+
+No server behavior, authentication default, database schema, migration, or upgrade path changes in this release.
+
+### How to use it
+
+Keep reporting vulnerabilities through the private GitHub security-advisory form, not a public issue. For remote deployments, keep Dynamic Client Registration disabled unless self-service registration is part of the trust model, and configure the existing origin allowlist for browser clients.
+
+### Things to watch
+
+`--enable-dcr-insecure` remains an explicit high-trust option for deployments that intentionally permit self-registered machine-to-machine clients. The guide still documents OAuth, token management, network isolation, proxy trust, rate limiting, and audit redaction.
+
+## To take advantage of v0.42.77.0
+
+Nothing to configure or migrate. The release changes public guidance only; existing secure defaults and deployment controls continue to work as before.
+
+### Itemized changes
+
+#### Security guidance
+- **Private vulnerability reporting remains the required path.** Reports go through GitHub security advisories rather than public issues.
+- **Remote deployment guidance describes current protections without retaining historical probe instructions.** Operators still get actionable DCR, OAuth, CORS, token, network, proxy, rate-limit, and audit-redaction guidance.
+
+## [0.42.76.0] - 2026-07-29
+
+**Fresh installs and upgrades now keep the MCP and HTTP dependency graph on compatible patched releases.**
+
+GBrain's automated dependency scan found fixes available in packages used by its transport stack. This release moves the affected graph to fixed version lines while keeping every selected release inside the compatibility range declared by its parent. The direct parent moves first where necessary, so no transitive override exceeds the support its parent promises.
+
+Normal GBrain commands and configuration stay the same. The resulting lockfile passes the same official dependency scanner used by pull requests.
+
+Contributors can verify the dependency policy with:
 
 ```bash
 bun test test/dependency-security.test.ts
@@ -26,7 +539,7 @@ bun test test/dependency-security.test.ts
 
 ### Things to watch
 
-The server adapter's new major version supports Node 20 and newer. GBrain itself runs on Bun, and its HTTP and stdio MCP paths are covered by focused tests. Applications that reuse GBrain's dependency tree from Node 18 should move to Node 20 or newer.
+The updated server line requires Node 20 or newer. GBrain itself runs on Bun, and its HTTP and stdio MCP paths are covered by focused tests. Applications that reuse GBrain's dependency tree from Node 18 should move to Node 20 or newer.
 
 ## To take advantage of v0.42.76.0
 
@@ -35,9 +548,9 @@ Nothing to configure or migrate. Upgrade normally. The patched dependency graph 
 ### Itemized changes
 
 #### Security
-- **The MCP transport stack stays on a currently patched server adapter.** `package.json` upgrades `@modelcontextprotocol/sdk` to `1.30.0`, whose declared range supports Hono adapter v2, and sets the `@hono/node-server` floor to `2.0.12`.
-- **Request parsing and URI validation stay above their patched floors.** Root overrides keep `body-parser` at `2.3.0` or newer and `fast-uri` at `3.1.4` or newer.
-- **The committed dependency graph is reproducible.** `bun.lock` resolves the audited versions for every install.
+- **The MCP transport stack stays on compatible patched releases.** Direct and transitive dependency constraints now move together so every selected line is admitted by its parent.
+- **The dependency scan is clean again.** The same pinned scanner used by pull requests reports no issues in the committed dependency graph.
+- **The committed dependency graph is reproducible.** `bun.lock` records the audited resolutions for every install.
 
 #### Tests
 - **Security floors cannot silently regress.** `test/dependency-security.test.ts` checks the manifest policy and the versions resolved in `bun.lock`.
@@ -617,31 +1130,7 @@ New provider recipes: DashScope reranking, OpenRouter reranking, and a claude-cl
 - `CLAUDE.local.md` / `AGENTS.local.md` are gitignored. (#3290, contributed by @igbymyboy)
 - The hybrid-reranker integration test isolates `GBRAIN_HOME`. (#1527, #3327, contributed by @Willisbest)
 - Test-shard scripts capture the real exit code before watchdog teardown in the no-timeout fallback. (#2864, #3340, contributed by @paul-0320)
-
-## [0.42.66.0] - 2026-07-24
-
-**The frontmatter linter now agrees with the write path: a page with unparseable YAML frontmatter is reported broken every time it is checked, not just the first.**
-
-`gbrain lint` / `gbrain frontmatter` detected a malformed-YAML page by watching the parser throw. The parser only throws on the first parse of a given payload and then serves a cached result, so a repeat check — the common case inside the long-lived MCP server — could report an already-broken page as clean. The lint check now uses the same cache-immune detection the write path already refuses on, so lint and write-refusal always give the same verdict.
-
-### How to use it
-
-Upgrade, then lint as usual:
-
-```bash
-gbrain upgrade
-gbrain lint
-```
-
-No schema migrations.
-
-### Itemized changes
-
-#### Fixed
-- **Frontmatter YAML_PARSE lint check is cache-immune.** Lint check 6 now calls the same detector the disk-side import refusal uses instead of gating on the YAML parser throwing, so a broken-frontmatter page is flagged on every check, including repeat parses inside a persistent process.
-
-#### Tests
-- **Disk-path refusal-by-inheritance is pinned.** New `test/frontmatter-parse-guard-disk-path.test.ts` (9 tests) covers the `importFromFile` disk-side refusal and drives the lint fix.
+- Frontmatter YAML parse linting uses the same cache-immune detector as the write path, so malformed frontmatter stays visible across repeated checks in a persistent process. `test/frontmatter-parse-guard-disk-path.test.ts` pins the disk-side refusal path.
 
 ## [0.42.65.0] - 2026-07-23
 
@@ -6613,7 +7102,7 @@ built-in registry covering the most common chat-export shapes on Earth, plus an
 opt-in LLM fallback for the long tail. The dream cycle picks the right parser
 per page automatically — no config, no waiting for the next release.
 
-The same wave introduces a new `progressive-batch` primitive (Wintermute-inspired
+The same wave introduces a new `progressive-batch` primitive (production-inspired
 ramp-up: trial 10 → 100 → 500 → full with verification at each stage) so future
 batch operations get the discipline for free instead of each reinventing it.
 
@@ -8155,11 +8644,11 @@ gbrain config set models.dream.synthesize_verdict deepseek:deepseek-chat
 
 ## [0.41.3.0] - 2026-05-24
 
-**Pre-register Claude and ChatGPT clients without `--enable-dcr` — the SECURITY.md-recommended setup actually works now.**
+**Pre-register browser clients while keeping Dynamic Client Registration disabled.**
 
-If you run `gbrain serve --http` to expose your brain over the network, the safe shape SECURITY.md recommends has always been "leave Dynamic Client Registration off, pre-register every browser-based client by hand." Before this release that path was broken at step one: `gbrain auth register-client` hard-coded no redirect URIs and no auth method, so claude.ai's first probe returned `Unregistered redirect_uri` and the only fix was hand-editing `oauth_clients` rows in psql. v0.41.3 makes the documented path actually usable.
+`gbrain auth register-client` now accepts the redirect URIs and authentication method that browser-based clients need, so operators can follow the recommended pre-registration path without editing OAuth database rows by hand.
 
-While the SECURITY.md-recommended pre-registration shape was being plumbed, an independent code review found that the live Express OAuth server (`/mcp`, `/token`, `/authorize`, `/register`, `/revoke`) was using default-wide-open `cors()` middleware — every web origin could complete a token exchange from a logged-in operator's browser. That's now closed by default; OAuth endpoints reject all cross-origin requests unless `GBRAIN_HTTP_CORS_ORIGIN` lists the origin explicitly.
+The HTTP MCP and OAuth surface also uses one default-deny browser-origin policy. Cross-origin requests are authorized only when `GBRAIN_HTTP_CORS_ORIGIN` explicitly lists the origin, and the same policy applies to browser preflight requests.
 
 ### How to use the new shape
 
@@ -8193,14 +8682,10 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 ### What you get
 
-| Surface | Before | After |
-|---|---|---|
-| `gbrain auth register-client` | hard-coded empty `redirect_uris`, NULL auth method, no public-client option | `--redirect-uri` (repeatable), `--token-endpoint-auth-method`, auto-set `authorization_code,refresh_token` when `--redirect-uri` is passed |
-| Express OAuth endpoints CORS | `cors()` default → `Access-Control-Allow-Origin: *` on /mcp, /token, /authorize, /register, /revoke | default-deny; allowlist via `GBRAIN_HTTP_CORS_ORIGIN`; startup WARN when `--bind 0.0.0.0` is set with no allowlist |
-| Legacy transport CORS preflight | leaked `Allow-Methods` + `Allow-Headers` to every Origin on OPTIONS regardless of allowlist | consolidated `corsHeaders(origin, {preflight})` — both Allow-Origin and Allow-Methods/Headers gated together |
-| Admin endpoint registering public client | INSERT confidential → UPDATE to NULL out `client_secret_hash` (non-atomic; UPDATE failure stranded a confidential row) | single atomic INSERT via `registerClientManual(..., tokenEndpointAuthMethod)` |
-| `token_endpoint_auth_method` validation | accepted any string at admin endpoint; CLI didn't even take the field | `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS = {client_secret_post, client_secret_basic, none}` enforced at all three registration entry points (CLI, admin, DCR) |
-| Reverse-proxy trust env | hardcoded `'loopback'` in Express; docs claimed "disabled by default" (lie) | `GBRAIN_HTTP_TRUST_PROXY` env: `'loopback'` default, `'1'` for one-hop proxies, `'0'` to disable, numeric for N hops, named modes pass through |
+- `gbrain auth register-client` accepts repeatable `--redirect-uri` values and a supported `--token-endpoint-auth-method`, and infers the browser grant types when redirect URIs are present.
+- The complete HTTP MCP and OAuth surface uses default-deny CORS with an explicit `GBRAIN_HTTP_CORS_ORIGIN` allowlist for browser clients.
+- Public-client registration is atomic, and every registration entry point applies the same authentication-method validator.
+- `GBRAIN_HTTP_TRUST_PROXY` configures loopback, one-hop, disabled, multi-hop, named-mode, and CIDR trust consistently across both HTTP transports.
 
 ### Things to watch after upgrade
 
@@ -8214,7 +8699,7 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 - `gbrain auth register-client --redirect-uri <uri>` (repeatable) — pre-register a client with one or more callback URLs. When passed without `--grant-types`, defaults to `authorization_code,refresh_token`.
 - `gbrain auth register-client --token-endpoint-auth-method <method>` — `client_secret_post` (default), `client_secret_basic`, or `none` (public PKCE-only client; no client secret minted).
-- `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS` constant + `validateTokenEndpointAuthMethod()` validator exported from `src/core/oauth-provider.ts`. Single source of truth gated at all three registration entry points (CLI, admin endpoint, DCR `/register`). Closes the `--enable-dcr` loose-path hole where DCR previously skipped allowlist validation.
+- `ALLOWED_TOKEN_ENDPOINT_AUTH_METHODS` constant + `validateTokenEndpointAuthMethod()` validator exported from `src/core/oauth-provider.ts`. The same supported-method policy applies at all three registration entry points (CLI, admin endpoint, and DCR `/register`).
 - `GBRAIN_HTTP_TRUST_PROXY` env var on the Express OAuth server (`src/commands/serve-http.ts`). Maps `'loopback'` (default), `'0'`/`'false'` (trust nothing), `'1'`/`'true'` (one hop), other numeric (N hops), other strings pass-through to Express named modes / CIDR lists. Pure `resolveTrustProxy()` helper exported for testability.
 - `parseCorsAllowlistOAuth()` + `resolveCorsOrigin()` helpers in `src/commands/serve-http.ts`. The cors middleware on OAuth endpoints now uses `cors({ origin: resolveCorsOrigin(allowlist) })` — default-deny when `GBRAIN_HTTP_CORS_ORIGIN` is unset, function-form check when set.
 - Startup stderr WARN when `--bind 0.0.0.0` is set without `GBRAIN_HTTP_CORS_ORIGIN`. Surfaces the default-deny posture before the first cross-origin request.
@@ -8222,25 +8707,25 @@ GBRAIN_HTTP_TRUST_PROXY=1 gbrain serve --http --port 8787 --bind 0.0.0.0
 
 #### Changed
 
-- `registerClientManual()` signature extends with `tokenEndpointAuthMethod?: string` parameter. Return type widens from `{clientId, clientSecret}` to `{clientId, clientSecret?}` because public clients (`'none'`) don't mint a secret. Atomic single INSERT for the public-client case — no more INSERT-then-UPDATE race.
-- `corsHeaders()` and `corsPreflightHeaders()` in `src/mcp/http-transport.ts` consolidated into one `corsHeaders(origin, {preflight: boolean})`. Methods/Headers only emit when `preflight === true AND origin in allowlist`. Closes the asymmetry where the OPTIONS handler leaked surface to non-allowlisted origins.
-- Admin endpoint `POST /admin/api/register-client` validates `tokenEndpointAuthMethod` via shared validator before calling `registerClientManual`. The post-insert UPDATE block that NULL'd `client_secret_hash` for `'none'` clients is gone; the atomic INSERT does it directly.
-- CLI argv parser at `src/commands/auth.ts:registerClient` rewritten from `indexOf`-based lookahead to a proper loop. Pre-fix the parser only honored the FIRST occurrence of any flag, so `--redirect-uri A --redirect-uri B` silently dropped B.
-- `SECURITY.md` "If you must use a custom HTTP wrapper" section gains a "Pre-registering claude.ai / ChatGPT clients without DCR" subsection with paste-ready commands. "CORS" section documents the v0.41.3 OAuth endpoint lockdown. "Reverse-proxy trust" rewritten to match reality — was claiming "disabled by default" while Express hardcoded `'loopback'`; now documents the `GBRAIN_HTTP_TRUST_PROXY` env contract honestly.
+- `registerClientManual()` signature extends with `tokenEndpointAuthMethod?: string` parameter. Return type widens from `{clientId, clientSecret}` to `{clientId, clientSecret?}` because public clients (`'none'`) don't mint a secret. Atomic single INSERT for the public-client case.
+- `corsHeaders()` and `corsPreflightHeaders()` in `src/mcp/http-transport.ts` consolidated into one `corsHeaders(origin, {preflight: boolean})`, applying the allowlist consistently to actual and preflight requests.
+- Admin endpoint `POST /admin/api/register-client` validates `tokenEndpointAuthMethod` via the shared validator before calling `registerClientManual`, and public-client registration uses one atomic INSERT.
+- CLI argv parsing in `src/commands/auth.ts:registerClient` now handles repeatable `--redirect-uri` values correctly.
+- `SECURITY.md` gains paste-ready browser-client pre-registration commands, documents the default-deny CORS policy, and describes the shared `GBRAIN_HTTP_TRUST_PROXY` contract.
 
 #### Fixed
 
-- Admin endpoint atomicity bug (codex F4): pre-v0.41.3 the registration handler did `INSERT (confidential) → UPDATE (NULL out secret_hash)` for `tokenEndpointAuthMethod === 'none'`. If the UPDATE failed mid-flight (timeout, network), a confidential row with a real client_secret stranded — the agent thought it was registering a public client, but operators ended up with a confidential one. Single atomic INSERT now.
-- DCR validator gate (codex F5): pre-v0.41.3 the `--enable-dcr` `/register` path defaulted unknown `token_endpoint_auth_method` values to `'client_secret_post'`, silently swallowing typos. The shared validator now fires on the DCR path too — closes the "DCR was the loosest entry point" hole.
-- `client_secret_basic` admitted in the allowed set (codex F3): server supports HTTP Basic confidential client auth at `/token` (`src/commands/serve-http.ts:468`) but a narrower allowlist would have rejected it. The allowlist is exactly `{client_secret_post, client_secret_basic, none}` — the three methods the SDK's `mcpAuthRouter` advertises.
-- Wide-open `cors()` on every OAuth endpoint (codex F1, the biggest finding): pre-v0.41.3 the live Express server at `src/commands/serve-http.ts:400-404` ran `app.use('/mcp', cors())` (and same for /token, /authorize, /register, /revoke) with no allowlist. `cors()` defaults to `Access-Control-Allow-Origin: *`. Any web origin could complete a full OAuth flow from a logged-in operator's browser. Closed by default; explicit allowlist required.
-- Reverse-proxy doc disagreement (codex F7): docs at `SECURITY.md:127` said "Disabled by default" while `src/commands/serve-http.ts:390` hardcoded `app.set('trust proxy', 'loopback')`. Docs now match implementation.
+- Public-client registration now uses one atomic insert and never passes through a confidential-client intermediate state.
+- The shared authentication-method validator now applies to CLI, admin, and DCR registration paths.
+- `client_secret_basic` is accepted alongside `client_secret_post` and public PKCE clients.
+- The complete HTTP MCP and OAuth surface is default-deny for cross-origin browser requests unless the operator configures an explicit allowlist.
+- Reverse-proxy documentation now matches the shared loopback-by-default implementation.
 
 ### For contributors
 
 - Three new TODOS filed in `TODOS.md` under "v0.41.3 security/MCP fix wave follow-ups": T13a (extract deny-by-default fine-grained scope wiring from PR #1316), T13b (extract real operation names in mcp_request_log from #1316), T13c (extract `access_tokens.last_used_at` LRU debounce from #1316). PR #1316's RLS posture rewrite is deliberately not filed — it changes the v0.26.7 auto-RLS event trigger that `gbrain doctor`'s `rls_event_trigger` check treats as load-bearing and needs its own plan-eng-review.
 - Community PRs closed as superseded (work either already in master or covered by this wave): #685 (chipoto69), #876 (toilalesondev), #1076 (lukejduncan), #1077 (lukejduncan), #620 (ArshyaAI). Status comment left on open PR #1316 (chipoto69) pointing at the three TODOS.
-- 4 IRON RULE regression tests added at `test/http-transport.test.ts` pin the consolidated `corsHeaders` matrix (preflight × allowlisted/non-allowlisted) so the CORS asymmetry bug class can't return silently. The fix-wave-structural assertion was updated to assert the NEW atomic admin endpoint shape; a regression guard pins that the post-insert UPDATE pattern is gone.
+- Four regression tests in `test/http-transport.test.ts` pin the consolidated CORS policy for actual and preflight requests. Structural assertions also pin atomic public-client registration.
 
 ## To take advantage of v0.41.3.0
 
@@ -8803,7 +9288,7 @@ No action required — this is a docs-only release. The wave commitments below l
 Five items duplicate older entries lower in TODOS.md (`.sql` indexing, Magika, doc_comment, CJK items) — duplication noted inline. The new top section is the canonical wave-commitment register; historical entries stay as detail.
 ## [0.40.7.0] - 2026-05-23
 
-**Your agents can now author your brain's schema pack themselves — no more shell-out, no more hand-editing YAML.** If you've ever opened `gbrain` and noticed thousands of pages stuck as untyped "notes" under `meetings/` or `research/`, this release closes that loop. Tell Wintermute (or any agent connected via MCP) "my brain has 4000 untyped meetings pages — add a `meeting` type and backfill them," and it does the whole thing safely: locks the pack file so two agents can't race, validates the change won't create dangling references, writes atomically so a crash never leaves the pack half-written, audits the mutation with the agent's identity, then updates every matching page in 1000-row batches that never wedge concurrent writers. The cathedral that was bundled but unreachable in v0.39 is now reachable from the outside.
+**Your agents can now author your brain's schema pack themselves — no more shell-out, no more hand-editing YAML.** If you've ever opened `gbrain` and noticed thousands of pages stuck as untyped "notes" under `meetings/` or `research/`, this release closes that loop. Tell your OpenClaw (or any agent connected via MCP) "my brain has 4000 untyped meetings pages — add a `meeting` type and backfill them," and it does the whole thing safely: locks the pack file so two agents can't race, validates the change won't create dangling references, writes atomically so a crash never leaves the pack half-written, audits the mutation with the agent's identity, then updates every matching page in 1000-row batches that never wedge concurrent writers. The cathedral that was bundled but unreachable in v0.39 is now reachable from the outside.
 
 This release rebuilds the design from a closed community PR ([#1321](https://github.com/garrytan/gbrain/pull/1321)) by `@garrytan-agents` into a production-grade `gbrain schema` cathedral. The four mutation verbs that PR proposed (`add-type`, `remove-type`, `stats`, `sync`) all ship — hardened with atomic+locked+audited writes, pack-aware fallback semantics that fail loud instead of silently re-introducing types you removed, and a batched MCP op (`schema_apply_mutations`) that lets a remote agent compose multi-step refactors as one atomic transaction. The lint surface grew from 2 rules to 11. The graph visualization renders link verbs. And the agent on-ramp story — RESOLVER routing, a `schema-author` skill with explicit boundary callouts to `brain-taxonomist` and `eiirp`, a `conventions/schema-evolution.md` decision tree for "when to add a type vs alias vs prefix" — means agents will actually FIND this surface instead of inventing their own ad-hoc YAML edits.
 
@@ -8828,8 +9313,8 @@ gbrain schema sync --apply     # backfills page.type on matching pages
 gbrain whoknows "machine learning"   # researcher-typed pages now route through expert routing
 
 # 4. If you run `gbrain serve --http` for remote MCP, register a client
-#    with admin scope so Wintermute or any other agent can author packs remotely:
-gbrain auth register-client wintermute --scopes admin
+#    with admin scope so a remote agent can author packs:
+gbrain auth register-client agent-fork --scopes admin
 ```
 
 If any step fails or numbers look wrong, please file an issue with the output of `gbrain doctor` and `tail -20 ~/.gbrain/audit/schema-mutations-*.jsonl` so we can debug the mutation chain.
@@ -8857,7 +9342,7 @@ If any step fails or numbers look wrong, please file an issue with the output of
 - `schema_graph` (read) — JSON `{nodes, edges}` derived from link types and frontmatter_links.
 - `schema_explain_type` (read) — resolved settings for one declared type.
 - `schema_review_orphans` (read) — drilldown into untyped pages.
-- `schema_apply_mutations` (admin scope, NOT localOnly) — **batched** atomic mutation op. One call applies a list of mutations (`add_type`, `add_link_type`, `set_extractable`, etc.) inside a single `withPackLock` scope. Remote agents like Wintermute can compose multi-step refactors as one transaction. Audit log records `actor: mcp:<clientId8>` per mutation.
+- `schema_apply_mutations` (admin scope, NOT localOnly) — **batched** atomic mutation op. One call applies a list of mutations (`add_type`, `add_link_type`, `set_extractable`, etc.) inside a single `withPackLock` scope. Remote agents can compose multi-step refactors as one transaction. Audit log records `actor: mcp:<clientId8>` per mutation.
 - `reload_schema_pack` (admin) — flush cache + extends-chain cascade.
 
 **Lint rules grew from 2 to 11:**

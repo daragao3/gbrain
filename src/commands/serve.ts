@@ -82,6 +82,10 @@ export interface ServeOptions {
   // Defaults to GBRAIN_SERVE_BOOT_TIMEOUT_SECONDS (seconds; 60 when
   // unset, 0 disables) when omitted.
   bootTimeoutMs?: number;
+  // Test seam for the disconnect hard deadline. Production always uses
+  // CLEANUP_DEADLINE_MS; tests can shorten it to exercise a permanently
+  // pending disconnect without waiting five seconds.
+  cleanupDeadlineMs?: number;
 }
 
 export async function runServe(
@@ -173,8 +177,8 @@ export async function runServe(
       log(
         `GBrain MCP server: boot did not complete within ${bootTimeoutMs}ms — releasing DB lock and exiting so other consumers unblock (check configured provider endpoints; tune via GBRAIN_SERVE_BOOT_TIMEOUT_SECONDS, 0 disables)`,
       );
-      const cleanup = setTimeout(() => { exit(1); }, CLEANUP_DEADLINE_MS);
-      cleanup.unref?.();
+      const cleanupDeadlineMs = opts.cleanupDeadlineMs ?? CLEANUP_DEADLINE_MS;
+      const cleanup = setTimeout(() => { exit(1); }, cleanupDeadlineMs);
       Promise.resolve()
         .then(() => engine.disconnect())
         .catch((err: unknown) => {
@@ -186,7 +190,6 @@ export async function runServe(
           exit(1);
         });
     }, bootTimeoutMs);
-    bootDeadline.unref?.();
   }
 
   try {
@@ -266,13 +269,13 @@ function installStdioLifecycle(
     // to trap us forever. If we hit the deadline we still exit; the
     // lock dir is advisory and the next process's stale-lock check
     // (process.kill(pid, 0) → ESRCH) will reclaim it.
+    const cleanupDeadlineMs = opts.cleanupDeadlineMs ?? CLEANUP_DEADLINE_MS;
     const deadline = setTimeout(() => {
       deps.log(
-        `GBrain MCP server: cleanup deadline (${CLEANUP_DEADLINE_MS}ms) exceeded — forcing exit`,
+        `GBrain MCP server: cleanup deadline (${cleanupDeadlineMs}ms) exceeded — forcing exit`,
       );
       deps.exit(0);
-    }, CLEANUP_DEADLINE_MS);
-    deadline.unref?.();
+    }, cleanupDeadlineMs);
 
     Promise.resolve()
       .then(() => engine.disconnect())
@@ -386,7 +389,6 @@ function installStdioLifecycle(
         () => beginShutdown(`stdio-idle-timeout (${idleTimeoutSec}s)`),
         idleTimeoutSec * 1000,
       );
-      idleTimer.unref?.();
     };
     armIdle();
     // Reset on every chunk. We can't observe SDK-parsed messages from

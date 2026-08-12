@@ -1505,15 +1505,15 @@ describe('PGLiteEngine: v0.13.1 error-wrap on connect() (#223)', () => {
   test('pglite-engine.ts source contains the wrap with #223 hint and nested original error', async () => {
     const { readFileSync } = await import('fs');
     const src = readFileSync('src/core/pglite-engine.ts', 'utf-8');
-    // Structural: the try/catch block must wrap PGlite.create() (the actual
-    // abort site, NOT engine-factory.ts). The error message must name the
-    // issue and suggest gbrain doctor. Must NOT suggest "missing migrations"
-    // as a cause (that was conflating #218 and #223 — migrations run AFTER
-    // create()).
-    // #2084 wrapped the create call in preservingProcessExitCode (Emscripten
-    // exitCode containment); the try/catch + error wrap around it is unchanged.
-    expect(src).toContain('this._db = await preservingProcessExitCode(() =>');
-    expect(src).toContain('PGlite.create({');
+    // Structural: connect() must route PGlite.create() through the snapshot
+    // fallback while preserving the Emscripten exit-code containment, and its
+    // catch must still classify + wrap the final create error at this layer.
+    // The error message must name the issue and suggest gbrain doctor. It must
+    // NOT suggest "missing migrations" as a cause (that conflated #218 with
+    // #223 — migrations run only after create succeeds).
+    expect(src).toContain('this._db = await createPgliteWithSnapshotFallback(');
+    expect(src).toMatch(/\(options\)\s*=>\s*preservingProcessExitCode\(\(\)\s*=>\s*PGlite\.create\(options\)\)/);
+    expect(src).toContain('throw await this._wrapAndReleaseInitError(err);');
     expect(src).toContain('https://github.com/garrytan/gbrain/issues/223');
     expect(src).toContain('gbrain doctor');
     expect(src).toContain('Original error:');

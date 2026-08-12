@@ -31,7 +31,7 @@ import {
   DEFAULT_MAX_POINTERS,
   type PointerBlock,
 } from './retrieval-reflex.ts';
-import { resolveViaIpc, resolveSocketPath, IPC_UNAVAILABLE } from './resolve-ipc.ts';
+import { resolveViaIpc, resolveIpcEndpoint, IPC_UNAVAILABLE } from './resolve-ipc.ts';
 
 /** Per-turn resolver options shared by every rung of the ladder. */
 export interface ResolveEntitiesOpts {
@@ -168,10 +168,12 @@ async function resolve(
   if (params.resolveEntities) {
     return params.resolveEntities(candidates, opts);
   }
-  // 2. PGLite → serve resolve IPC.
+  // 2. PGLite → authenticated serve resolve IPC. Endpoint initialization can
+  // fail (missing/unwritable data directory); buildReflexAddition's outer
+  // fail-open boundary then leaves the live-context block unchanged.
   if (cfg?.engine === 'pglite' && cfg.database_path) {
-    const sock = resolveSocketPath(cfg.database_path);
-    const r = await resolveViaIpc(sock, { candidates, ...opts });
+    const endpoint = resolveIpcEndpoint(cfg.database_path);
+    const r = await resolveViaIpc(endpoint, { candidates, ...opts });
     return r === IPC_UNAVAILABLE ? null : r;
   }
   // 3. Postgres → cached direct connection.

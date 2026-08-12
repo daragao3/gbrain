@@ -17,7 +17,7 @@ import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, isRemoteReconcileEnabled, getExtraEntityDirs, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
+import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, isRemoteReconcileEnabled, getExtraEntityDirs, parseTimelineEntries, makeResolver, type LinkCandidate, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { logPutPagePostProcessing } from './audit/put-page-audit.ts';
 import { stripTakesFence } from './takes-fence.ts';
@@ -1172,7 +1172,7 @@ async function runPutPageSuccessHooks(
     // would surface higher in search. Local CLI users (ctx.remote=false) opt
     // into this behavior; MCP/remote writes do not.
     let autoLinks:
-      | { created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[]; mode?: 'wikilink-only' }
+      | { created: number; removed: number; errors: number; withheld: number; unresolved: UnresolvedFrontmatterRef[]; mode?: 'wikilink-only' }
       | { error: string }
       | { skipped: 'remote' }
       | undefined;
@@ -1364,7 +1364,7 @@ async function runPutPageSuccessHooks(
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content or any file-as-input workflow, use the CLI-only `gbrain put SLUG --file PATH` — it reads the file as a Buffer (binary-NUL guarded) and keeps the body out of argv, which matters because Bun\'s Windows binstub shim faults with an access violation once the command line passes ~16-20KB. `gbrain capture --file PATH --slug SLUG` remains an alternative, but it normalizes the text and returns a hash that will not match `pages.content_hash`.',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug' },
     content: { type: 'string', required: true, description: putPageContentDescription },
@@ -1448,7 +1448,20 @@ async function runAutoLink(
   slug: string,
   parsed: { type: PageType; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown> },
   opts?: { sourceId?: string; wikilinkOnly?: boolean },
-): Promise<{ created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[]; mode?: 'wikilink-only' }> {
+): Promise<{
+  created: number;
+  removed: number;
+  errors: number;
+  /**
+   * Stale-looking removals deliberately NOT performed because the body still
+   * carries an unresolvable reference to the target. Surfaced in the
+   * `auto_links` response so a withheld removal is visible rather than silent
+   * — the counterpart to reading `removed` on every local put.
+   */
+  withheld: number;
+  unresolved: UnresolvedFrontmatterRef[];
+  mode?: 'wikilink-only';
+}> {
   const fullContent = parsed.compiled_truth + '\n' + parsed.timeline;
   // v0.31.8 (codex OV-2): thread sourceId through every read + write inside
   // reconcileLinks. Without this the FS walker reads cross-source links/slugs
@@ -1478,8 +1491,14 @@ async function runAutoLink(
   // pages live under roots gbrain doesn't ship in DIR_PATTERN gets no typed
   // edges from its wikilinks at all — they fall to the generic pass and are
   // dropped unless global_basename is on.
+  //
+  // Declaring a dir here and the `unresolvableRefs` safety net below are
+  // complementary, not redundant: the net keeps an undeclared prefix from
+  // DELETING edges, while declaring the dir is what lets those edges keep
+  // being CREATED and MAINTAINED. A withheld edge survives but stops being
+  // reconciled, so it silently goes stale.
   const entityDirs = await getExtraEntityDirs(engine);
-  const { candidates, unresolved } = await extractPageLinks(
+  const { candidates, unresolved, unresolvableRefs } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,
     { globalBasename, entityDirs, wikilinkOnly: opts?.wikilinkOnly === true },
   );
@@ -1489,9 +1508,61 @@ async function runAutoLink(
   // v0.31.8 (D12): scoped to the source when opts.sourceId is set so wikilink
   // resolution doesn't span unrelated sources.
   const allSlugs = await engine.getAllSlugs(sourceOpts);
-  const valid = candidates.filter(c =>
-    allSlugs.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug))
+  const valid: LinkCandidate[] = [];
+  // Targets we recognized in the body but could not validate against the
+  // (source-scoped) slug set. Feeds the removal safety net below.
+  const unvalidatedTargets: string[] = [];
+  for (const c of candidates) {
+    if (allSlugs.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug))) {
+      valid.push(c);
+    } else {
+      unvalidatedTargets.push(c.targetSlug);
+    }
+  }
+
+  // ── Removal safety net (2026-08-10 data-loss incident) ──────────────────
+  //
+  // The removal loop below deletes any managed edge missing from the desired
+  // set, and `links` has NO tombstone column — a wrong delete is
+  // unrecoverable. But "missing from the desired set" conflates two cases:
+  //
+  //   (a) the author deleted the reference    → the edge IS stale, remove it
+  //   (b) the reference is still written on the page, and extraction could
+  //       not turn it into a candidate       → removing is silent data loss
+  //
+  // (b) is not hypothetical. `extractPageLinks`'s wikilink pass is gated on a
+  // hardcoded DIR_PATTERN prefix whitelist; a `[[systems/foo]]` or
+  // `[[sessions/bar]]` falls through to the generic pass and is dropped
+  // whenever `link_resolution.global_basename` is off (the default). On the
+  // live brain this emptied the desired set for a page whose body carried
+  // four such wikilinks, and every one of its `link_source='markdown'` edges
+  // was hard-deleted — on a byte-identical re-put, and again on the genuine
+  // rewrite that followed.
+  //
+  // So: protect any existing edge whose target is still referenced by an
+  // unresolvable body ref, or whose target we recognized but could not
+  // validate (the allSlugs filter above — a cross-source or FK-invisible
+  // target, never a reason to destroy an edge). Protection is deliberately
+  // NARROW: a ref that vanishes from the body leaves nothing to protect, so
+  // case (a) still reconciles exactly as before.
+  const protectedLiterals = new Set<string>([...unresolvableRefs, ...unvalidatedTargets]);
+  const protectedBasenames = new Set(
+    [...protectedLiterals].map(r => r.slice(r.lastIndexOf('/') + 1)),
   );
+  /**
+   * True when `toSlug` is still referenced by something the body carries but
+   * extraction could not resolve. Matches the full literal, a path suffix
+   * (`[[notes/x]]` → `vault/notes/x`), and the bare basename (`[[x]]` → any
+   * `dir/x`) — the same three shapes the basename resolver itself accepts.
+   */
+  const isProtectedTarget = (toSlug: string): boolean => {
+    if (protectedLiterals.has(toSlug)) return true;
+    for (const lit of protectedLiterals) {
+      if (toSlug.endsWith(`/${lit}`)) return true;
+    }
+    return protectedBasenames.has(toSlug.slice(toSlug.lastIndexOf('/') + 1));
+  };
+  const hasProtection = protectedLiterals.size > 0;
 
   // Split candidates by direction. Outgoing (fromSlug === slug or unset) are
   // this page's own edges, reconciled against getLinks(slug). Incoming
@@ -1549,7 +1620,7 @@ async function runAutoLink(
       `${c.fromSlug}\u0000${c.linkType}`
     ));
 
-    let created = 0, removed = 0, errors = 0;
+    let created = 0, removed = 0, errors = 0, withheld = 0;
 
     // Add outgoing edges.
     for (const c of out) {
@@ -1599,6 +1670,14 @@ async function runAutoLink(
     for (const l of opts?.wikilinkOnly ? [] : reconcilableOut) {
       const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
       if (!outKeys.has(key)) {
+        // Removal safety net (see the note above `protectedLiterals`): the
+        // body still references this target through a ref we could not
+        // resolve, so its absence from the desired set is an extraction gap,
+        // not an authoring change. Deleting here is unrecoverable.
+        if (hasProtection && isProtectedTarget(l.to_slug)) {
+          withheld++;
+          continue;
+        }
         try {
           await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOpts);
           removed++;
@@ -1623,7 +1702,7 @@ async function runAutoLink(
       }
     }
 
-    return { created, removed, errors };
+    return { created, removed, errors, withheld };
   });
 
   return {

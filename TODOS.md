@@ -1,5 +1,149 @@
 # TODOS
 
+## v0.42.83.0 follow-ups (machine-global config repoint guard)
+
+- [ ] **P2 — Identify the caller the audit log names, then fix it at the source.** The
+  guard in `src/core/config.ts` is a tripwire, not a cure: it stops the damage but leaves
+  the offending writer in place, still trying. The writer behind the observed incidents
+  was never identifiable by filesystem search, which is why `auditUnsafeConfigWrite`
+  records argv/cwd/stack to `<config-dir>/audit/config-repoint-refused.jsonl` from inside
+  the offending process. Once a row appears, read the stack, fix that caller to set
+  `GBRAIN_HOME`, and note whether it is in-repo at all. Until a row exists there is
+  nothing actionable, so this stays open pending evidence rather than being investigated
+  speculatively.
+- [ ] **P3 — The guard covers `tmpdir()` only; other silent-repoint shapes are not
+  covered.** A machine-global repoint at a durable-looking path that is nonetheless wrong
+  (a deleted checkout, a mount that will not exist next boot, a per-run directory outside
+  `tmpdir()`) produces the identical silent `page_not_found` failure with no refusal. The
+  narrow shape was chosen deliberately so a legitimate migration is never reverted, and
+  widening it needs a way to tell "durable but wrong" from "durable and intended" that
+  does not guess. Candidate direction: warn-and-confirm on any machine-global
+  `database_path` change to a path that does not already contain a brain, rather than
+  broadening the hard refusal. Files: `src/core/config.ts`.
+
+## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
+
+- [x] **P2 — `scripts/ci-local.sh` rebuilds the PGLite snapshot fixture only when it is
+  ABSENT, never when it is STALE.** Done. The staleness check moved INTO the builder as
+  `bun run scripts/build-pglite-snapshot.ts --if-stale`, which rebuilds when the fixture
+  is absent, when its `.version` sidecar is absent or unreadable, or when the recorded
+  hash no longer matches `computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto,
+  LEGACY_EMBEDDING_CONFIG.embedding_dimensions)` — and is a ~4s no-op otherwise. Keeping
+  the comparison in the builder rather than in shell means the 4-arg hash call is not
+  duplicated a third time (builder, serial test, and now CI would each have had their own
+  copy, and a drifting arg list reports a current fixture as stale). ci-local.sh's Tier 3
+  block is now that single line. Verified against a deliberately corrupted `.version`:
+  the old else-branch left it stale and the serial test died at module scope
+  (`0 pass / 1 fail`); `--if-stale` rebuilds and the test passes `1 pass / 0 fail`.
+  The original report follows. The guard was
+  `if [ ! -f test/fixtures/pglite-snapshot.tar ] || [ ! -f ...version ]; then build; else
+  "engine will validate hash at load time"; fi`. Hash validation at load time is the right
+  behavior for the ENGINE, which degrades to a normal cold init on a mismatch. It is not
+  enough for `test/pglite-snapshot-file-seeding.serial.test.ts`, which THROWS
+  `snapshot fixture stale; run bun run build:pglite-snapshot before this test` at module
+  scope rather than degrading. So a machine holding a cached fixture from before any
+  schema, migration, or embedding-width change fails that test on `bun run ci:local` until
+  the fixture is rebuilt by hand. v0.42.82.0 makes this more likely to fire, since folding
+  the width into the hash invalidates every previously built fixture. Fix: compare the
+  stored `.version` against `computeSnapshotSchemaHash(...)` in the `else` branch and
+  rebuild on mismatch, so a stale fixture is refreshed rather than reported as a test
+  failure. Where: `scripts/ci-local.sh` (the Tier 3 block, near the
+  `GBRAIN_PGLITE_SNAPSHOT` export).
+- [ ] **P3 — four `check-test-isolation` allowlist entries need an R3/R4 refactor before
+  they can be delisted.** v0.42.82.0 replaced the bare module-level
+  `delete process.env.GBRAIN_PGLITE_SNAPSHOT` in `test/bootstrap.test.ts`,
+  `test/destructive-guard.test.ts`, `test/pages-soft-delete.test.ts`, and
+  `test/schema-bootstrap-coverage.test.ts` with `useColdPglite()`, which removed their R1
+  (`process.env` mutation) violation. That is NOT enough to delist them, and this has
+  already been measured rather than assumed: all four were trial-delisted and the lint
+  re-run, which reported bootstrap (R3+R4), destructive-guard (R3), pages-soft-delete (R3),
+  schema-bootstrap-coverage (R3+R4). The allowlist is flat, one line per file, so an entry
+  exempts every rule at once. R3 is `new PGLiteEngine(` outside roughly 50 lines after a
+  `beforeAll`; R4 is a missing `afterAll` disconnect. Delisting therefore requires a real
+  per-file refactor (move engine creation into `beforeAll`, add `afterAll{disconnect}`),
+  not a blind delete. Do it one file at a time, re-running
+  `bash scripts/check-test-isolation.sh` after each.
+- [ ] **P3 — `scripts/check-test-isolation.sh` only scans `*.test.ts`.** Its file list is
+  `find "$TARGET_DIR" -name '*.test.ts'`, so shared helpers under `test/helpers/` are never
+  linted. `test/helpers/cold-pglite.ts` mutates `process.env` (correctly, with save and
+  restore), but the guard is structurally unable to say so, and a future helper that
+  mutates env WITHOUT restoring would pass silently while polluting every file that imports
+  it. Consider extending the scan to `test/helpers/*.ts` with a rule set that accepts the
+  bracketed save/restore shape.
+
+## v0.42.81.0 follow-ups (entity_dirs safety guard)
+
+- [ ] **P1 - the v0.42.80.0 removal safety net covers ONE of four reference shapes.**
+  `unresolvableRefs` is populated only in `extractPageLinks`'s `ref.needsResolution`
+  branch, which only the generic wikilink pass reaches. Probed against the merged
+  extractor with `entityDirs: []` and `globalBasename: false`, using a passing
+  control:
+  `[[sessions/foo]]` -> `unresolvableRefs: ["sessions/foo"]` (PROTECTED);
+  `[x](sessions/foo)`, bare `sessions/foo`, and `[[wiki:sessions/foo]]` -> all
+  `candidates=0` AND `unresolvableRefs=[]` (NOT protected, still hard-deleted).
+  Those three shapes miss the dir-gated regexes entirely, so they never become a
+  ref and never reach the net. v0.42.81.0's `entity_dirs_orphaned_edges` DETECTS
+  this, but detection is not protection. Fix candidates: emit a
+  `needsResolution` ref from the markdown-link and bare-slug passes when the
+  prefix looks like a slug dir but is undeclared, or key the net on a
+  body-substring check for `to_slug` rather than on extracted refs.
+  Where: `src/core/link-extraction.ts` (`extractEntityRefs` passes 1/2a/2c,
+  `extractPageLinks` unresolvableRefs pushes), `src/core/operations.ts`
+  (`runAutoLink` `isProtectedTarget`).
+
+## v0.42.80.0 follow-ups (auto-link removal safety net)
+
+- [ ] **P2 - decide whether `DIR_PATTERN` should stop being a hardcoded whitelist.**
+  The v0.42.80.0 data-loss defect was only reachable because
+  `src/core/link-extraction.ts`'s `DIR_PATTERN` recognizes a fixed set of top-level
+  slug directories, so a `[[<other-dir>/page]]` wikilink silently produces no link
+  candidate at all unless `link_resolution.global_basename` is on. The release stops
+  that from DELETING anything, but those wikilinks still never become links, so the
+  graph is quietly missing edges the author clearly intended. Options: widen the
+  whitelist, derive it from the source's actual top-level directories, or make
+  `global_basename` the default. Each changes edge counts brain-wide, which is why
+  it was deliberately not bundled into the data-loss fix.
+  Where: `src/core/link-extraction.ts` (`DIR_PATTERN`, `WIKILINK_RE`).
+- [ ] **P2 - frontmatter-derived edges have the same exposure and are NOT protected.**
+  `runAutoLink`'s safety net keys on `unresolvableRefs`, which only covers body
+  wikilinks. An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
+  a slug, so it cannot be matched against `to_slug` and was left out rather than
+  half-matched. A frontmatter field whose value stops resolving therefore still drops
+  its edge. Closing this needs the frontmatter resolver to report the slug it was
+  unable to confirm, not just the name it failed on.
+  Where: `src/core/link-extraction.ts` (`UnresolvedFrontmatterRef`,
+  `extractFrontmatterLinks`), `src/core/operations.ts` (`runAutoLink`).
+- [ ] **P3 - report the Bun Windows binstub shim crash upstream.**
+  `gbrain put <slug> --content <large body>` dies with an access violation
+  (`0xC0000005`, exit `3221225477`) with no output and no write. It is not gbrain
+  code: the installed `gbrain.exe` is Bun's ~15KB Windows binstub shim, and it faults
+  once the forwarded command line passes roughly 16-20KB. The same argument size runs
+  fine through `bun src/cli.ts` directly and through `bun --eval`, so the shim is the
+  faulting component. v0.42.80.0 routes around it with `put --file`; the shim bug
+  itself belongs in a Bun issue with the size threshold and the direct-invocation
+  control included.
+## v0.42.79.0 follow-ups (placeholder-truncation guard)
+
+- [ ] **P2 - nothing surfaces pages that were ALREADY truncated this way.** The
+  v0.42.79.0 guard stops new placeholder-shaped truncations at write time, but a brain
+  damaged before the upgrade carries the loss silently forever. The signature is cheap to
+  detect on stored content: a page whose compiled truth contains a standalone bracketed
+  line (`findPlaceholderLines` from `src/core/placeholder-truncation.ts`) and whose latest
+  `page_versions` row is substantially longer than the live body. That is the same two-part
+  test the write-time guard uses, evaluated against history instead of an incoming payload.
+  Wire it as a `lint` rule (sibling of `huge-page` / `scraper-junk`, which already reuse the
+  `content-sanity` assessor the same way) and surface the count in `gbrain doctor`. The
+  repair path already exists: `page_versions` holds the pre-write content.
+  Where: `src/commands/lint.ts`, `src/commands/doctor.ts`.
+- [ ] **P3 - the shrink thresholds are validated against one corpus only.**
+  `PLACEHOLDER_MIN_REMOVED_CHARS` (500) and `PLACEHOLDER_MAX_RETAINED_RATIO` (0.75) were
+  picked to clear the three observed incidents (which retained 0.24, 0.35, and 0.56) with
+  margin, and checked for false positives against a single 490-page brain where the
+  line-shape test matched 3 benign lines on 2 pages. They are exported constants, so tuning
+  them touches no call sites. If a second corpus shows the shape matching materially more
+  often, revisit before tightening anything else.
+  Where: `src/core/placeholder-truncation.ts`.
+
 ## v0.42.70.0 follow-ups (Windows verify dispatch)
 
 - [ ] **P2 — `scripts/run-verify-parallel.sh` has no concurrency cap.** It spawns every
@@ -3312,16 +3456,11 @@ verify Voyage adapter integration in `src/core/ai/recipes/voyage.ts`).
 ## OAuth/MCP hardening (v0.26.7 follow-up)
 
 ### F11 — `auth register-client --redirect-uri` flag
-**Priority:** P3
 
-**What:** `gbrain auth register-client` always passes `[]` for redirect URIs; there is no CLI flag to set them. Operators who want to register an `authorization_code` client without DCR have to hand-edit the database.
-
-**Why:** Operator UX gap, not a trust-boundary issue. Codex C11 correctly flagged it as scope creep on the v0.26.7 hardening pass — kept out of that PR but worth doing.
-
-**Pros:** Closes the operator-experience gap. Validates `https://` or loopback per RFC 6749 §3.1.2.1 at registration time. Repeatable flag.
-**Cons:** ~30 lines of argv parsing + URL validation. Adds one more flag to the `auth register-client` surface. Low value relative to the OAuth provider hardening that already shipped.
-**Context:** Eva-brain has the implementation under `src/commands/auth.ts:registerClient`. Lift verbatim — the `localhost`/`127.0.0.1`/`::1` exact-match validation is correct; codex spot-check confirmed it does NOT match `localhost.evil.com`. v0.27 candidate.
-**Depends on:** Nothing.
+**Status:** Shipped in v0.41.3.0. `gbrain auth register-client` now accepts
+repeatable `--redirect-uri` values, validates supported callback URLs, and
+supports the token-endpoint authentication methods needed to pre-register
+browser clients while DCR remains disabled.
 
 ### F13 — `gbrain serve --http` argv positive-int validator
 **Priority:** P3

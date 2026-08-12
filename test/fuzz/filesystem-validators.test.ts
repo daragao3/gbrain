@@ -19,8 +19,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { validateUploadPath } from '../../src/core/operations.ts';
+import { getFsCapabilities } from '../helpers/fs-capabilities.ts';
 
 const NUM_RUNS = 500;
+const FS_CAPABILITIES = getFsCapabilities();
 
 let baseTmpRoot: string;
 
@@ -89,29 +91,13 @@ describe('validateUploadPath fuzz (fs-backed)', () => {
     );
   });
 
-  // Symlink creation is platform / permission gated (Windows without dev mode,
-  // restricted CI runners). Detect upfront and skip the probe explicitly via
-  // `test.skipIf` so the result is reported as "skipped" — NOT silently green.
-  // The earlier early-return pattern hid a security-critical confinement test
-  // behind a fake pass on any platform that couldn't make symlinks.
-  // Probe via the OS tmpdir directly — baseTmpRoot isn't available until
-  // beforeAll runs, and this expression evaluates at module load time.
-  const symlinksAvailable = (() => {
-    const probeDir = mkdtempSync(join(tmpdir(), 'gbrain-symlink-probe-'));
-    try {
-      symlinkSync(tmpdir(), join(probeDir, 'probe-link'));
-      return true;
-    } catch {
-      return false;
-    } finally {
-      rmSync(probeDir, { recursive: true, force: true });
-    }
-  })();
-  test.skipIf(!symlinksAvailable)(
+  // Gate only this exact directory-symlink fixture. Unrelated confinement
+  // fuzz cases continue running when the host cannot create directory links.
+  test.skipIf(!FS_CAPABILITIES.directorySymlink)(
     'symlink-escape probe: symlinks pointing outside the box are rejected',
     () => {
       const linkPath = join(confinementDir, 'evil-link');
-      symlinkSync(tmpdir(), linkPath);
+      symlinkSync(tmpdir(), linkPath, 'dir');
       let threw = false;
       try {
         validateUploadPath(confinementDir, 'evil-link');

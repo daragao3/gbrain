@@ -156,7 +156,8 @@ function renderPostCommitHook(): string {
 ${HOOK_BANNER}
 # LOCAL + untracked — NEVER commit this file. Best-effort background auto-push so
 # agent writes don't sit local-only. The real guarantee is ${HELPER_REL}.
-# Bypass: git commit --no-verify.
+# Internal scaffolding commits use -c core.hooksPath=/dev/null: --no-verify skips
+# pre-commit and commit-msg hooks, but it does not skip post-commit hooks.
 set -euo pipefail
 
 _branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
@@ -167,8 +168,14 @@ fi
 
 ${PUSH_RETRY}
 
-# Detach so the commit returns instantly; all output goes to the log.
-( brain_push "$_branch" ) </dev/null >/dev/null 2>&1 &
+# Detach so the commit returns instantly; all output goes to the log. The
+# fixture-owned active marker lets cleanup wait for this exact invocation
+# without enumerating or killing unrelated git processes.
+_active_dir="\${GBRAIN_HOME:-$HOME/.gbrain}/push-active"
+mkdir -p "$_active_dir" 2>/dev/null || true
+_active="$_active_dir/$(date +%s)-$$-$RANDOM"
+: >"$_active"
+( trap 'rm -f "$_active"' EXIT; brain_push "$_branch" ) </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || true
 exit 0
 `;
@@ -729,7 +736,11 @@ function commitScaffolding(repoPath: string, branch: string, redact: (s: string)
       stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
     }).toString().trim();
     if (!staged) return { status: 'ok', detail: 'scaffolding already committed' };
-    execFileSync('git', ['-C', repoPath, 'commit', '-m', 'chore(gbrain): install brain durability scaffolding'], {
+    execFileSync('git', [
+      '-C', repoPath,
+      '-c', 'core.hooksPath=/dev/null',
+      'commit', '-m', 'chore(gbrain): install brain durability scaffolding',
+    ], {
       stdio: 'ignore', timeout: 30_000, env: { ...process.env, ...GIT_ENV },
     });
     execFileSync('git', ['-C', repoPath, ...['-c', 'http.followRedirects=false'], 'push', 'origin', `HEAD:${branch}`], {

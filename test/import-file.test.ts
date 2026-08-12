@@ -10,8 +10,10 @@ import {
 import type { ImportFileResult, ImportResult } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 const TMP = join(import.meta.dir, '.tmp-import-test');
+const FS_CAPABILITIES = getFsCapabilities(import.meta.dir);
 
 // Minimal mock engine that tracks calls and supports transaction()
 //
@@ -241,7 +243,7 @@ Content.
     expect(result.slug).toBe('concepts/from-path');
   });
 
-  test('skips symlinks in importFromFile (defense-in-depth)', async () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('skips symlinks in importFromFile (defense-in-depth)', async () => {
     // Even if the walker somehow passes a symlink through, importFromFile
     // should catch it and return skipped.
     const realFile = join(TMP, 'real-target.md');
@@ -255,7 +257,9 @@ Content.
     const linkPath = join(TMP, 'symlink-file.md');
     try { rmSync(linkPath); } catch { /* may not exist */ }
     try {
-      symlinkSync(realFile, linkPath);
+      // The explicit 'file' type is required on Windows; without the symlink
+      // privilege the call still throws EPERM, which skips the test there.
+      symlinkSync(realFile, linkPath, 'file');
     } catch (error: any) {
       if (error?.code === 'EPERM') return;
       throw error;

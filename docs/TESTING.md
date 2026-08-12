@@ -11,7 +11,7 @@ Seven test command tiers, each with a clear scope:
 
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
-| `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
+| `bun run test` | Parallel unit-test fast loop via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Defaults to one shard on Windows and up to four elsewhere. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
 | `bun run verify` | CI's authoritative pre-test gate, fanned out by `scripts/run-verify-parallel.sh`. It runs every entry in that script's `CHECKS` array: the complete `check:*` battery plus typecheck. CI calls `bun run verify` in a dedicated job. | ~16s on a Mac dev box (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
@@ -86,24 +86,22 @@ When `bun run test` finds any failure, the wrapper:
 3. Writes a one-line-per-shard summary to `.context/test-summary.txt` (`shard N/M: pass=X fail=Y skip=Z rc=W`).
 4. Exits non-zero. Empty failure log + non-zero exit = infrastructure problem (wedged shard, killed child); the banner says so.
 
-If a shard wedges (per-shard `GBRAIN_TEST_SHARD_TIMEOUT` cap, default 600s), the wrapper writes `--- shard N: WEDGED after ${SHARD_TIMEOUT}s ---` to the failure log, includes the last 50 lines of the shard log, and proceeds with other shards' results.
+The outer wrapper has two independent bounds. `GBRAIN_TEST_SHARD_TIMEOUT` is the whole-shard wallclock cap: it remains 1,500 seconds on POSIX and on explicit shard-count runs. A default Windows run uses one shard and derives the cap as 30 seconds per discovered unit file, with a 1,500-second floor; an explicit environment override remains authoritative. `GBRAIN_TEST_SHARD_STALL_SECONDS` is a no-log-growth watchdog (default 600 seconds, `0` disables it). `run-unit-shard.sh` keeps its natural-completion marker path private from descendants, and the wrapper requires that attestation before accepting rc 0 with zero reported failures. Helper `STALLED`/`WEDGED` evidence remains fail-closed even if marker creation raced helper termination; rc 0 without a marker is reported as `UNATTESTED`. A genuine outer wallclock expiry is reported as `WEDGED`; a no-log expiry is reported as `STALLED`.
 
 ### Chunking a shard's file list (`GBRAIN_TEST_CHUNK_SIZE`)
 
-`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for **every file in that invocation** are lost, so a 253-file shard reports `pass=0 fail=0 rc=127` and the run cannot gate anything.
+`bun test` can die mid-run *before* printing its summary block — on Windows this shows up as error 127 (`ERROR_PROC_NOT_FOUND`, a WASM/native load failure, not shell "command not found"). When that happens the pass/fail totals for every file in that invocation are lost. The Windows defaults therefore use one shard for bounded aggregate memory, split its files into groups of four, and wrap each Bun process in a 300-second chunk cap. POSIX keeps chunking and the chunk cap disabled by default.
 
-`scripts/run-unit-shard.sh` therefore splits its file list into bounded chunks and runs one `bun test` per chunk, so a crash costs one chunk instead of the shard. A chunk that exits non-zero is reported with its file list named on stderr rather than silently under-reporting, and the shard exits with the worst chunk's code. `run-unit-parallel.sh`'s `bun_summary_count()` already sums Bun's summary block across multiple invocations per shard, so chunking needs no aggregator change.
+| Platform | `GBRAIN_TEST_CHUNK_SIZE` default | `GBRAIN_TEST_CHUNK_TIMEOUT` default |
+|---|---:|---:|
+| POSIX Bun (Linux, macOS) | `0` (off) | `0` (off) |
+| Windows Bun, including when hosted by WSL/MSYS/MINGW/CYGWIN | `4` | `300` seconds |
 
-| Platform | Default | Why |
-|---|---|---|
-| POSIX (Linux, macOS) | `0` (off) | One invocation per shard, byte-identical to prior CI behavior. |
-| MSYS / MINGW / CYGWIN | `25` | Bounds the blast radius of the crash above. |
-
-`GBRAIN_TEST_CHUNK_SIZE=N` overrides on any platform; `0` disables chunking. Chunking bounds the damage but is not the cure — the underlying crash has triggers beyond the one fixed in `mergeOntologyFact`.
+Both overrides accept bounded non-negative Bash integers; `0` disables that bound. Each chunk runs as a separate `bun test`, and `run-unit-parallel.sh` sums all emitted Bun summaries. The chunk cap first sends TERM and then, after a fixed five-second grace, force-kills the exact owned chunk command; this keeps TERM-resistant Bun/native work within a real wallclock bound without enumerating or targeting unrelated processes. An rc 124 chunk is reported as `CHUNK N STALLED`, an rc 137 chunk as `CHUNK N FORCE-KILLED`, and an rc 127 chunk as `CHUNK N CRASHED`; all diagnostics name every file in the affected chunk. These inner diagnoses remain distinct from the outer whole-shard `STALLED`/`WEDGED` sentinels. `GBRAIN_TEST_SHARD_COMPLETED_FILE` is the supervisor-only natural-completion marker and is touched only after a clean shard run.
 
 ### File taxonomy
 
-- `*.test.ts` → fast loop (parallel 8-shard fan-out).
+- `*.test.ts` → fast loop (one shard on Windows; up to four elsewhere).
 - `*.slow.test.ts` → run via `bun run test:slow` only (intentional cold-path tests; would dominate the fast loop's wallclock).
 - `*.serial.test.ts` → run via `bun run test:serial` after the parallel pass completes; one bun process per file (`--max-concurrency=1` within a shared process is not enough — the module registry still leaks `mock.module`). Quarantine for tests that share file-wide state and race when run alongside other files in the same `bun test` process. Several dozen files, discovered by the `*.serial.test.ts` glob — no list to maintain. Typical residents: `mock.module(...)` users (top-level mocks leak across files in a shard process, e.g. `test/embed.serial.test.ts`), env-coupled files (e.g. `test/brain-registry.serial.test.ts`), and process-lifecycle suites that assert on `process.exitCode` (e.g. `test/pglite-engine-disconnect.serial.test.ts`). **Do not put the parallelism back on a serial file unless you've fixed the contention root cause** (it just re-introduces the flake). `scripts/run-serial-tests.sh` passes `--timeout=60000` to every file, but a per-test third argument (`test('...', async () => {...}, 300_000)`) OVERRIDES that CLI budget — which is how a file whose tests legitimately run past 60s stays green without loosening the runner's default for everyone. Set the per-test budget in the file; don't raise the runner-wide number.
 - `test/e2e/*.test.ts` → real-Postgres E2E. Skipped when `DATABASE_URL` is unset.
@@ -154,6 +152,14 @@ Why this exact shape: `beforeAll` creates a single engine per file (PGLite WASM 
 
 `scripts/ci-local.sh` exports `GBRAIN_PGLITE_SNAPSHOT` for all four unit shards, so
 every PGLite file restores a pre-migrated fixture instead of replaying ~120 migrations.
+It builds that fixture with `bun run scripts/build-pglite-snapshot.ts --if-stale`, which
+rebuilds when the fixture is absent *or* when its `.version` sidecar no longer matches the
+current schema/migration/embedding-width hash, and is a no-op otherwise. An exists-only
+check is not enough: the engine degrades to a cold init on a hash mismatch, but
+`test/pglite-snapshot-file-seeding.serial.test.ts` throws `snapshot fixture stale` at
+module scope, so a cached fixture from before a schema change would fail the run until
+someone rebuilt it by hand.
+
 A file that genuinely asserts on the cold path (bootstrap behaviour, migration ledgers,
 fresh-install state) opts out with `useColdPglite()` from `test/helpers/cold-pglite.ts`,
 registered at the top of the file, above its own `beforeAll`:
@@ -199,6 +205,8 @@ await withEnv({ A: '1', B: '2', C: undefined }, fn);
 ```
 
 `withEnv` saves the prior value of every key it touches and restores via try/finally — including when the callback throws. **It is cross-test safe but NOT intra-file concurrent-safe.** `process.env` is process-global; two `test.concurrent()` calls in the same file both touching the same key will race. Files using `withEnv` stay outside the `test.concurrent()` codemod's eligibility filter.
+
+**Unsetting `GBRAIN_HOME` makes a `saveConfig` call machine-global.** `configDir()` re-reads the var at call time and falls back to `homedir()`, so a test that clears it is writing the developer's real `~/.gbrain/config.json`, not a sandbox. `saveConfig` fails closed on the one shape that silently destroys a brain — no `GBRAIN_HOME` plus a `database_path` inside `tmpdir()` — and throws instead of writing. Keep `GBRAIN_HOME` pointed at a temp dir for anything that saves config; clear it only to assert the fallback itself, and redirect `USERPROFILE`/`HOME` to a temp dir when you do, so a regression cannot reach the real config. `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out where a test genuinely needs the pre-guard behavior.
 
 #### When to quarantine instead of fix
 
@@ -317,6 +325,8 @@ Unit tests and what they cover:
 - `test/extract-db.test.ts` — `gbrain extract --source db`: typed link inference, idempotency, `--type` filter, `--dry-run` JSON output.
 - `test/extract-fs.test.ts` — `gbrain extract --source fs`: first-run inserts + second-run reports zero, dry-run dedups candidates across files, second-run perf regression guard for the N+1 dedup bug.
 - `test/link-extraction.test.ts` — canonical `extractEntityRefs` both formats, `extractPageLinks` dedup, `inferLinkType` heuristics, `parseTimelineEntries` date variants, `isAutoLinkEnabled` config.
+- `test/e2e/put-page-autolink-unresolvable-refs-pglite.test.ts` — the auto-link removal safety net. A no-op (`skipped`) save and a genuine rewrite both leave links untouched when the body still carries wikilinks the extractor cannot resolve; `auto_links.withheld` reports the held-back count. Two CONTRA cases pin that a wikilink actually removed from the body still reconciles its edge away (all of them, or just the one dropped), and one pins that `link_source='manual'` edges are never touched.
+- `test/put-page-file-flag.test.ts` — `gbrain put <slug> --file PATH` boundaries: the flag stays OFF `put_page.params` (so remote callers gain no file read), `parseOpArgs` carries the undeclared flag through, and the empty-content refusal routes to `--file`.
 - `test/graph-query.test.ts` — direction in/out/both, type filter, indented tree output.
 - `test/features.test.ts` — feature scanning, brain_score calculation, CLI routing, persistence.
 - `test/file-upload-security.test.ts` — symlink traversal, cwd confinement, slug + filename allowlists, remote vs local trust.

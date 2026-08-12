@@ -16,6 +16,7 @@ import { join, sep } from 'path';
 import { tmpdir } from 'os';
 
 import { CopyError, copyArtifacts, walkSourceDir } from '../src/core/skillpack/copy.ts';
+import { getFsCapabilities } from './helpers/fs-capabilities.ts';
 
 // walkSourceDir mirrors targets with join(), which emits native separators —
 // correct, since `target` is fed straight to mkdirSync/writeFileSync. A shared
@@ -26,7 +27,7 @@ import { CopyError, copyArtifacts, walkSourceDir } from '../src/core/skillpack/c
 const WIN = process.platform === 'win32';
 const DST = WIN ? 'C:\\some\\dst' : '/some/dst';
 const DST2 = WIN ? 'C:\\dst' : '/dst';
-
+const FS_CAPABILITIES = getFsCapabilities();
 const created: string[] = [];
 afterEach(() => {
   while (created.length) {
@@ -156,14 +157,14 @@ describe('copyArtifacts — dry-run', () => {
 });
 
 describe('copyArtifacts — symlink rejection (harvest path)', () => {
-  it('rejectSymlinks=true throws CopyError before any write', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('rejectSymlinks=true throws CopyError before any write', () => {
     const src = scratch('copy-src-');
     const dst = scratch('copy-dst-');
     const realFile = scratch('copy-secret-');
     writeFileSync(join(realFile, 'secret.txt'), 'PRIVATE');
 
     writeFileSync(join(src, 'safe.txt'), 'safe');
-    symlinkSync(join(realFile, 'secret.txt'), join(src, 'evil.txt'));
+    symlinkSync(join(realFile, 'secret.txt'), join(src, 'evil.txt'), 'file');
 
     expect(() => copyArtifacts(walkSourceDir(src, dst), { rejectSymlinks: true })).toThrow(
       CopyError,
@@ -174,13 +175,13 @@ describe('copyArtifacts — symlink rejection (harvest path)', () => {
     expect(existsSync(join(dst, 'evil.txt'))).toBe(false);
   });
 
-  it('rejectSymlinks=false (default) treats symlinks like regular files', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('rejectSymlinks=false (default) treats symlinks like regular files', () => {
     const src = scratch('copy-src-');
     const dst = scratch('copy-dst-');
     const realFile = scratch('copy-target-');
     writeFileSync(join(realFile, 'data.txt'), 'real data');
 
-    symlinkSync(join(realFile, 'data.txt'), join(src, 'link.txt'));
+    symlinkSync(join(realFile, 'data.txt'), join(src, 'link.txt'), 'file');
 
     const result = copyArtifacts(walkSourceDir(src, dst)); // no rejectSymlinks
     expect(result.summary.wroteNew).toBe(1);
@@ -189,7 +190,7 @@ describe('copyArtifacts — symlink rejection (harvest path)', () => {
 });
 
 describe('copyArtifacts — canonical-path containment (harvest path)', () => {
-  it('symlink that points outside confineRealpath is rejected as path_traversal', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('symlink that points outside confineRealpath is rejected as path_traversal', () => {
     const harvestRoot = scratch('copy-harvest-');
     const skillDir = join(harvestRoot, 'skills', 'foo');
     mkdirSync(skillDir, { recursive: true });
@@ -198,7 +199,7 @@ describe('copyArtifacts — canonical-path containment (harvest path)', () => {
     writeFileSync(join(outside, 'leaked-secret.txt'), 'STOLEN');
 
     // Symlink inside the skill dir points at an outside file.
-    symlinkSync(join(outside, 'leaked-secret.txt'), join(skillDir, 'innocent.txt'));
+    symlinkSync(join(outside, 'leaked-secret.txt'), join(skillDir, 'innocent.txt'), 'file');
 
     const dst = scratch('copy-dst-');
     const items = walkSourceDir(skillDir, dst);
@@ -278,7 +279,7 @@ describe('copyArtifacts — atomic-refusal contract', () => {
     expect(existsSync(join(dst, 'real.txt'))).toBe(false); // safe item also blocked
   });
 
-  it('rejectSymlinks aborts the whole batch even when the violation is the last item', () => {
+  it.skipIf(!FS_CAPABILITIES.fileSymlink)('rejectSymlinks aborts the whole batch even when the violation is the last item', () => {
     const src = scratch('copy-src-');
     const dst = scratch('copy-dst-');
     writeFileSync(join(src, 'one.txt'), '1');
@@ -288,7 +289,7 @@ describe('copyArtifacts — atomic-refusal contract', () => {
     // Add a real file outside src for the symlink target.
     const outside = scratch('copy-outside-');
     writeFileSync(join(outside, 'target.txt'), 'outside');
-    symlinkSync(join(outside, 'target.txt'), join(src, 'four.txt'));
+    symlinkSync(join(outside, 'target.txt'), join(src, 'four.txt'), 'file');
 
     expect(() => copyArtifacts(walkSourceDir(src, dst), { rejectSymlinks: true })).toThrow(
       CopyError,

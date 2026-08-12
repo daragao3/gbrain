@@ -9,11 +9,20 @@ import { dispatchToolCall, validateParams, buildOperationContext } from './dispa
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import {
-  resolveSocketPath,
+  resolveIpcEndpoint,
   startResolveIpcServer,
-  cleanupStaleSocket,
+  type ResolveIpcServer,
 } from '../core/context/resolve-ipc.ts';
 import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
+
+/** Close resolve IPC before releasing the engine it serves. Best-effort at exit. */
+export async function closeMcpResources(
+  resolveServer: ResolveIpcServer | null,
+  engine: BrainEngine,
+): Promise<void> {
+  try { await resolveServer?.close(); } catch { /* best-effort IPC */ }
+  try { await engine.disconnect?.(); } catch { /* process is shutting down */ }
+}
 
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
@@ -78,17 +87,18 @@ export async function startMcpServer(engine: BrainEngine) {
 
   // Retrieval Reflex (#1981, D9=C): on a PGLite brain, serve owns the single
   // connection, so the context engine resolves salient entities THROUGH us over
-  // a local unix socket rather than opening a second (impossible) connection.
-  // Best-effort; failure to bind never blocks the MCP server.
-  let resolveServer: import('node:net').Server | null = null;
-  let resolveSocket: string | null = null;
+  // local IPC rather than opening a second (impossible) connection. POSIX uses
+  // a mode-0600 Unix socket; Windows uses a per-data-directory-secret-derived
+  // named pipe. Requests and responses are authenticated. Best-effort: failure
+  // to initialize or bind never blocks the MCP server.
+  let resolveServer: ResolveIpcServer | null = null;
   try {
     const cfg = loadConfig();
     if (cfg?.engine === 'pglite' && cfg.database_path) {
-      resolveSocket = resolveSocketPath(cfg.database_path);
+      const endpoint = resolveIpcEndpoint(cfg.database_path);
       const defaultSource = process.env.GBRAIN_SOURCE || 'default';
       resolveServer = await startResolveIpcServer(
-        resolveSocket,
+        endpoint,
         (req) =>
           resolveEntitiesToPointers(
             engine,
@@ -114,16 +124,15 @@ export async function startMcpServer(engine: BrainEngine) {
   // Exit cleanly when MCP client disconnects (stdin EOF) or on signals.
   // Without this, orphaned serve processes accumulate and contend for the
   // PGLite write lock, causing ingest jobs (email-sync) to time out.
-  let shuttingDown = false;
-  const shutdown = (reason: string, code = 0) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (reason: string, code = 0): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
     process.stderr.write(`[gbrain-serve] shutdown: ${reason}\n`);
-    try { resolveServer?.close(); } catch { /* noop */ }
-    if (resolveSocket) cleanupStaleSocket(resolveSocket);
-    Promise.resolve(engine.disconnect?.())
-      .catch(() => {})
-      .finally(() => process.exit(code));
+    shutdownPromise = (async () => {
+      await closeMcpResources(resolveServer, engine);
+      process.exit(code);
+    })();
+    return shutdownPromise;
   };
   // v0.34.1 (#870): when MCP_STDIO=1, the wrapping gateway (OpenClaw's
   // bundle-mcp layer, others) often pipes the JSON-RPC handshake then

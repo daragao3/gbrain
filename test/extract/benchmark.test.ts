@@ -17,6 +17,9 @@ import {
   validateFixturePath,
   parseBenchmarkFixtures,
 } from '../../src/commands/extract-benchmark.ts';
+import { getFsCapabilities } from '../helpers/fs-capabilities.ts';
+
+const FS_CAPABILITIES = getFsCapabilities();
 
 describe('validateFixturePath — D-EXTRACT-21 strict validation', () => {
   let packRoot: string;
@@ -65,7 +68,7 @@ describe('validateFixturePath — D-EXTRACT-21 strict validation', () => {
     }
   });
 
-  test('symlink pointing inside pack root → REJECTED', () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('symlink pointing inside pack root → REJECTED', () => {
     setup();
     try {
       // Create a real file + a symlink to it inside the pack
@@ -73,14 +76,14 @@ describe('validateFixturePath — D-EXTRACT-21 strict validation', () => {
       const real = join(packRoot, 'fixtures/extract/real.jsonl');
       writeFileSync(real, '{}\n');
       const link = join(packRoot, 'fixtures/extract/link.jsonl');
-      symlinkSync(real, link);
+      symlinkSync(real, link, 'file');
       expect(() => validateFixturePath(packRoot, 'fixtures/extract/link.jsonl')).toThrow(/symbolic link/);
     } finally {
       cleanup();
     }
   });
 
-  test('symlink pointing outside pack root → REJECTED at lstat check', () => {
+  test.skipIf(!FS_CAPABILITIES.fileSymlink)('symlink pointing outside pack root → REJECTED at lstat check', () => {
     setup();
     try {
       // Create a real file OUTSIDE the pack root, symlink from inside
@@ -90,7 +93,7 @@ describe('validateFixturePath — D-EXTRACT-21 strict validation', () => {
         writeFileSync(outside, '{}\n');
         mkdirSync(join(packRoot, 'fixtures/extract'), { recursive: true });
         const link = join(packRoot, 'fixtures/extract/escape.jsonl');
-        symlinkSync(outside, link);
+        symlinkSync(outside, link, 'file');
         // lstat catches the symlink directly — the real-path check is
         // belt + suspenders for cases where an INTERMEDIATE dir is a
         // symlink (lstat on a regular file inside a symlinked dir

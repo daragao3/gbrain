@@ -449,6 +449,23 @@ describe('runServe stdio lifecycle', () => {
     expect(h.logs.some(l => l.includes('cleanup error: synthetic disconnect failure'))).toBe(true);
   });
 
+  test('cleanup deadline forces exit when engine.disconnect never settles', async () => {
+    const h = makeHarness();
+    h.engine.disconnect = () => {
+      h.engine.disconnectCalls += 1;
+      return new Promise<void>(() => {});
+    };
+    h.opts.cleanupDeadlineMs = 20;
+    await startInBackground(h.engine, [], h.opts);
+
+    h.signals.emit('SIGTERM');
+    const code = await h.exited;
+
+    expect(code).toBe(0);
+    expect(h.engine.disconnectCalls).toBe(1);
+    expect(h.logs.some(l => l.includes('cleanup deadline (20ms) exceeded'))).toBe(true);
+  });
+
   // v0.34.1 (#870): OpenClaw gateway / bundle-mcp wrappers pipe the
   // JSON-RPC handshake on stdin then close their stdin half. Without
   // MCP_STDIO=1 the server treats that as a permanent disconnect and
@@ -573,6 +590,24 @@ describe('boot-readiness deadline (#3273)', () => {
     void runServe(h.engine as unknown as BrainEngine, [], h.opts);
 
     const code = await h.exited;
+    expect(code).toBe(1);
+    expect(h.engine.disconnectCalls).toBe(1);
+    expect(h.logs.some(l => l.includes('boot did not complete'))).toBe(true);
+  });
+
+  test('boot cleanup deadline forces exit when engine.disconnect never settles', async () => {
+    const h = makeHarness();
+    h.engine.disconnect = () => {
+      h.engine.disconnectCalls += 1;
+      return new Promise<void>(() => {});
+    };
+    h.opts.startMcpServer = () => new Promise<void>(() => {});
+    h.opts.bootTimeoutMs = 10;
+    h.opts.cleanupDeadlineMs = 20;
+    void runServe(h.engine as unknown as BrainEngine, [], h.opts);
+
+    const code = await h.exited;
+
     expect(code).toBe(1);
     expect(h.engine.disconnectCalls).toBe(1);
     expect(h.logs.some(l => l.includes('boot did not complete'))).toBe(true);
