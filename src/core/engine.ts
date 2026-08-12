@@ -1,5 +1,5 @@
 import type {
-  Page, PageInput, PageFilters, GetPageOpts,
+  Page, PageInput, PageFilters, GetPageOpts, ConditionalPageWriteResult,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath, RelationalFanoutRow, RelationalFanoutOpts,
@@ -698,6 +698,34 @@ export interface BrainEngine {
    * duplicate at (default, slug). Multi-source brains MUST pass sourceId.
    */
   putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page>;
+  /**
+   * Atomically insert only when the exact `(source_id, slug)` key is absent.
+   * `sourceId` is explicit and tombstones conflict. Expected conflicts are
+   * returned as typed values rather than thrown errors.
+   */
+  createPageOnly(
+    slug: string,
+    page: PageInput,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult>;
+  /**
+   * Lock the exact source-qualified row for conditional-write validation.
+   * Includes tombstones and must be called inside `transaction()`.
+   */
+  lockPageForConditionalWrite(
+    slug: string,
+    opts: { sourceId: string },
+  ): Promise<Page | null>;
+  /**
+   * Update the exact active row only at `expectedRevision`. Never retries a
+   * stale revision; expected conflicts are typed return values.
+   */
+  compareAndSwapPage(
+    slug: string,
+    page: PageInput,
+    expectedRevision: number,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult>;
   /**
    * v0.41.13 (#1309) — identity-based dedup pre-check for the import pipeline.
    *

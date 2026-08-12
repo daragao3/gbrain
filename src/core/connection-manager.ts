@@ -37,7 +37,14 @@
  */
 
 import postgres from 'postgres';
-import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize, endPoolBounded } from './db.ts';
+import {
+  resolvePrepare,
+  resolveSessionTimeouts,
+  resolvePoolSize,
+  endPoolBounded,
+  POOL_IDLE_TIMEOUT_S,
+  POOL_CONNECT_TIMEOUT_S,
+} from './db.ts';
 import { redactPgUrl } from './url-redact.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 
@@ -301,8 +308,8 @@ export class ConnectionManager {
     }
     const opts: Record<string, unknown> = {
       max: resolvePoolSize(this.opts.readPoolSize),
-      idle_timeout: 20,
-      connect_timeout: 10,
+      idle_timeout: POOL_IDLE_TIMEOUT_S,
+      connect_timeout: POOL_CONNECT_TIMEOUT_S,
       types: { bigint: postgres.BigInt },
     };
     const timeouts = resolveSessionTimeouts();
@@ -404,8 +411,8 @@ export class ConnectionManager {
     const size = resolveDirectPoolSize(this.opts.directPoolSize);
     const opts: Record<string, unknown> = {
       max: size,
-      idle_timeout: 20,
-      connect_timeout: 10,
+      idle_timeout: POOL_IDLE_TIMEOUT_S,
+      connect_timeout: POOL_CONNECT_TIMEOUT_S,
       types: { bigint: postgres.BigInt },
       // Always use prepared statements on the direct pool — no PgBouncer
       // here, so the prepare-cache invalidation issue doesn't apply.

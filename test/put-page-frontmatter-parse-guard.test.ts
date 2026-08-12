@@ -22,6 +22,10 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { operations, type OperationContext } from '../src/core/operations.ts';
+
+const conditionalOp = operations.find(o => o.name === 'put_page_conditional');
+if (!conditionalOp) throw new Error('put_page_conditional missing');
 
 const F = '---';
 
@@ -141,5 +145,29 @@ describe('importFromContent refuses writes with unparseable frontmatter', () => 
     expect(result.status).toBe('imported');
     const page = await engine.getPage(slug, { sourceId: 'default' });
     expect(page!.title).toBe('Fine Page');
+  });
+
+  test('conditional operation preserves the explicit non-mutating parse-error shape', async () => {
+    const slug = 'markets/themes/conditional-broken';
+    const ctx: OperationContext = {
+      engine,
+      config: { engine: 'pglite' as const },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      dryRun: false,
+      remote: false,
+      sourceId: 'default',
+    };
+    const result = await conditionalOp.handler(ctx, {
+      slug,
+      content: LEADING_SPACE,
+      mode: 'create_only',
+    });
+    expect(result).toMatchObject({
+      slug,
+      status: 'error',
+      chunks: 0,
+      frontmatter: { error: 'unparseable', page_unchanged: true },
+    });
+    expect(await engine.getPage(slug, { sourceId: 'default' })).toBeNull();
   });
 });

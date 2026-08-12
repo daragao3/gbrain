@@ -1,7 +1,13 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { writeFileSync, mkdirSync, rmSync, symlinkSync, readdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { importFile, importFromContent } from '../src/core/import-file.ts';
+import {
+  importCodeFile,
+  importFile,
+  importFromContent,
+  importFromFile,
+} from '../src/core/import-file.ts';
+import type { ImportFileResult, ImportResult } from '../src/core/import-file.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
 import { getFsCapabilities } from './helpers/fs-capabilities.ts';
@@ -90,6 +96,39 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
+
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends
+  (<T>() => T extends B ? 1 : 2)
+    ? true
+    : false;
+type Expect<T extends true> = T;
+type StatusOfPromise<T extends (...args: any[]) => Promise<unknown>> =
+  Awaited<ReturnType<T>> extends { status: infer Status } ? Status : never;
+
+type LegacyStatus = 'imported' | 'skipped' | 'error';
+type ConditionalStatus = LegacyStatus | 'created' | 'updated' | 'unchanged' | 'conflict';
+
+type _ImportFileResultIsLegacy = Expect<Equal<ImportFileResult['status'], LegacyStatus>>;
+type _ImportFromFileIsLegacy = Expect<Equal<StatusOfPromise<typeof importFromFile>, LegacyStatus>>;
+type _ImportCodeFileIsLegacy = Expect<Equal<StatusOfPromise<typeof importCodeFile>, LegacyStatus>>;
+type _ConditionalImportResultIsExpanded = Expect<Equal<ImportResult['status'], ConditionalStatus>>;
+
+function assertImportFromContentOverloads(): void {
+  const legacyContentImport = importFromContent({} as BrainEngine, 'notes/type-check', 'body');
+  type _LegacyContentImportIsNarrow = Expect<
+    Equal<Awaited<typeof legacyContentImport>['status'], LegacyStatus>
+  >;
+  const conditionalContentImport = importFromContent({} as BrainEngine, 'notes/type-check', 'body', {
+    writePrecondition: { mode: 'create_only' },
+  });
+  type _ConditionalContentImportIsExpanded = Expect<
+    Equal<Awaited<typeof conditionalContentImport>['status'], ConditionalStatus>
+  >;
+  void legacyContentImport;
+  void conditionalContentImport;
+}
+void assertImportFromContentOverloads;
 
 describe('importFile', () => {
   test('imports a valid markdown file', async () => {
@@ -217,7 +256,14 @@ Content.
 `);
     const linkPath = join(TMP, 'symlink-file.md');
     try { rmSync(linkPath); } catch { /* may not exist */ }
-    symlinkSync(realFile, linkPath, 'file');
+    try {
+      // The explicit 'file' type is required on Windows; without the symlink
+      // privilege the call still throws EPERM, which skips the test there.
+      symlinkSync(realFile, linkPath, 'file');
+    } catch (error: any) {
+      if (error?.code === 'EPERM') return;
+      throw error;
+    }
 
     const engine = mockEngine();
     const result = await importFile(engine, linkPath, 'symlink-file.md', { noEmbed: true });
@@ -467,6 +513,141 @@ ${longText}
         expect(chunks[i].chunk_index).toBe(i);
       }
     }
+  });
+});
+
+describe('importFromContent — conditional writes', () => {
+  test('conditional same hash still evaluates CAS and returns unchanged', async () => {
+    const content = `---
+type: note
+title: Same
+---
+
+same body
+`;
+    const { createHash } = await import('crypto');
+    const { parseMarkdown } = await import('../src/core/markdown.ts');
+    const parsed = parseMarkdown(content, 'notes/same.md');
+    const knownHash = createHash('sha256')
+      .update(JSON.stringify({
+        title: parsed.title,
+        type: parsed.type,
+        compiled_truth: parsed.compiled_truth,
+        timeline: parsed.timeline,
+        frontmatter: parsed.frontmatter,
+        tags: parsed.tags.sort(),
+      }))
+      .digest('hex');
+    const existing = {
+      id: 1,
+      source_id: 'default',
+      slug: 'notes/same',
+      type: 'note',
+      title: 'Same',
+      compiled_truth: 'same body',
+      timeline: '',
+      frontmatter: {},
+      content_hash: knownHash,
+      revision: 7,
+      created_at: new Date('2026-01-01T00:00:00Z'),
+      updated_at: new Date('2026-01-01T00:00:00Z'),
+      deleted_at: null,
+    };
+    const engine = mockEngine({
+      getPage: async () => existing,
+      lockPageForConditionalWrite: async () => existing,
+    });
+
+    const result = await importFromContent(engine, 'notes/same', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'compare_and_swap', expected_revision: 7 },
+    });
+
+    expect(result.status).toBe('unchanged');
+    expect(result.revision).toBe(7);
+    expect((engine as any)._calls.some((c: any) => c.method === 'putPage')).toBe(false);
+    expect((engine as any)._calls.some((c: any) => c.method === 'upsertChunks')).toBe(false);
+  });
+
+  test('conditional external-id duplicate does not redirect away from exact slug', async () => {
+    const content = `---
+type: note
+title: Exact
+id: same-id
+---
+
+exact body
+`;
+    const otherPage = {
+      id: 1,
+      source_id: 'default',
+      slug: 'notes/other',
+      type: 'note',
+      title: 'Other',
+      compiled_truth: 'other body',
+      timeline: '',
+      frontmatter: { id: 'same-id' },
+      content_hash: 'other-hash',
+      revision: 3,
+      created_at: new Date('2026-01-01T00:00:00Z'),
+      updated_at: new Date('2026-01-01T00:00:00Z'),
+      deleted_at: null,
+    };
+    // importFromContent read-back-verifies every successful write, so the mock
+    // has to make the created page readable afterwards or verifyPageReadable
+    // throws the silent-desync error. It compares content_hash too, so the
+    // read-back has to carry the hash importFromContent actually computed —
+    // derived here the same way the sibling conditional test derives it.
+    const { createHash } = await import('crypto');
+    const { parseMarkdown } = await import('../src/core/markdown.ts');
+    const parsedExact = parseMarkdown(content, 'notes/exact.md');
+    const exactHash = createHash('sha256')
+      .update(JSON.stringify({
+        title: parsedExact.title,
+        type: parsedExact.type,
+        compiled_truth: parsedExact.compiled_truth,
+        timeline: parsedExact.timeline,
+        frontmatter: parsedExact.frontmatter,
+        tags: parsedExact.tags.sort(),
+      }))
+      .digest('hex');
+
+    let createdExact: Record<string, unknown> | null = null;
+    const engine = mockEngine({
+      findDuplicatePage: async () => ({ slug: 'notes/other', id: 1 }),
+      getPage: async (candidateSlug: string) => {
+        if (candidateSlug === 'notes/other') return otherPage;
+        // Absent before the create, readable after it — which is exactly the
+        // property the create_only precondition and the read-back each need.
+        if (candidateSlug === 'notes/exact') return createdExact;
+        return null;
+      },
+      createPageOnly: async (createdSlug: string) => {
+        createdExact = {
+          ...otherPage,
+          id: 2,
+          slug: createdSlug,
+          title: 'Exact',
+          compiled_truth: parsedExact.compiled_truth,
+          content_hash: exactHash,
+          revision: 1,
+        };
+        return { status: 'created', page: createdExact };
+      },
+    });
+
+    const result = await importFromContent(engine, 'notes/exact', content, {
+      noEmbed: true,
+      writePrecondition: { mode: 'create_only' },
+    });
+
+    expect(result.slug).toBe('notes/exact');
+    expect(result.status).toBe('created');
+    // The point of the test: the duplicate external id must NOT redirect the
+    // write onto notes/other.
+    const createCalls = (engine as any)._calls.filter((c: any) => c.method === 'createPageOnly');
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0].args[0]).toBe('notes/exact');
   });
 });
 

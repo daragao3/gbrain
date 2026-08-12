@@ -38,6 +38,10 @@ export interface PostWriteLintOpts {
   force?: boolean;
   /** Skip file writes; used by tests. */
   noLog?: boolean;
+  /** Source-scoped read context for multi-source page identity. */
+  sourceId?: string;
+  /** Federated source scope; takes precedence over sourceId in callers. */
+  sourceIds?: string[];
 }
 
 export interface PostWriteLintResult {
@@ -80,7 +84,10 @@ export async function runPostWriteLint(
     return { ran: false, slug, findings: [], skippedReason: 'flag_disabled' };
   }
 
-  const page = await engine.getPage(slug);
+  const page = await engine.getPage(slug, {
+    ...(opts.sourceIds ? { sourceIds: opts.sourceIds } : {}),
+    ...(!opts.sourceIds && opts.sourceId ? { sourceId: opts.sourceId } : {}),
+  });
   if (!page) {
     return { ran: false, slug, findings: [], skippedReason: 'page_not_found' };
   }
@@ -97,6 +104,8 @@ export async function runPostWriteLint(
     timeline: page.timeline,
     frontmatter: page.frontmatter ?? {},
     engine,
+    sourceId: opts.sourceId,
+    sourceIds: opts.sourceIds,
   };
 
   const findings: ValidationFinding[] = [];
@@ -112,7 +121,7 @@ export async function runPostWriteLint(
 
   if (findings.length > 0 && !opts.noLog) {
     writeLocalLintLog(slug, findings);
-    await writeIngestLog(engine, slug, findings);
+    await writeIngestLog(engine, slug, findings, opts.sourceId);
   }
 
   return { ran: true, slug, findings };
@@ -140,13 +149,19 @@ function writeLocalLintLog(slug: string, findings: ValidationFinding[]): void {
   }
 }
 
-async function writeIngestLog(engine: BrainEngine, slug: string, findings: ValidationFinding[]): Promise<void> {
+async function writeIngestLog(
+  engine: BrainEngine,
+  slug: string,
+  findings: ValidationFinding[],
+  sourceId?: string,
+): Promise<void> {
   try {
     const errorCount = findings.filter(f => f.severity === 'error').length;
     const warningCount = findings.filter(f => f.severity === 'warning').length;
     const summary = `post-write lint: ${errorCount} error, ${warningCount} warning` +
       (errorCount > 0 ? ` (top: ${findings.find(f => f.severity === 'error')!.message.slice(0, 80)})` : '');
     await engine.logIngest({
+      source_id: sourceId,
       source_type: 'writer_lint',
       source_ref: slug,
       pages_updated: [slug],

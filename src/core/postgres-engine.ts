@@ -41,7 +41,7 @@ import {
 import { getFtsLanguage } from './fts-language.ts';
 import { MARKDOWN_CHUNKER_VERSION } from './chunkers/recursive.ts';
 import type {
-  Page, PageInput, PageFilters, PageType,
+  Page, PageInput, PageFilters, PageType, ConditionalPageWriteResult,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
   SearchResult, SearchOpts,
   Link, GraphNode, GraphPath,
@@ -78,6 +78,41 @@ import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+interface NormalizedPageWrite {
+  hash: string;
+  frontmatter: Record<string, unknown>;
+  pageKind: NonNullable<PageInput['page_kind']>;
+  effectiveDate: NonNullable<PageInput['effective_date']> | null;
+  effectiveDateSource: NonNullable<PageInput['effective_date_source']> | null;
+  importFilename: string | null;
+  chunkerVersion: number | null;
+  sourcePath: string | null;
+  sourceKind: string | null;
+  sourceUri: string | null;
+  ingestedVia: string | null;
+  ingestedAt: Date | null;
+}
+
+function normalizePageWrite(page: PageInput): NormalizedPageWrite {
+  const sourceKind = page.source_kind ?? null;
+  const sourceUri = page.source_uri ?? null;
+  const ingestedVia = page.ingested_via ?? null;
+  return {
+    hash: page.content_hash || contentHash(page),
+    frontmatter: page.frontmatter || {},
+    pageKind: page.page_kind || 'markdown',
+    effectiveDate: page.effective_date ?? null,
+    effectiveDateSource: page.effective_date_source ?? null,
+    importFilename: page.import_filename ?? null,
+    chunkerVersion: page.chunker_version ?? null,
+    sourcePath: page.source_path ?? null,
+    sourceKind,
+    sourceUri,
+    ingestedVia,
+    ingestedAt: (sourceKind || sourceUri || ingestedVia) ? new Date() : null,
+  };
 }
 
 export function getPostgresSchema(
@@ -275,8 +310,8 @@ export class PostgresEngine implements BrainEngine {
       const timeouts = db.resolveSessionTimeouts();
       const opts: Record<string, unknown> = {
         max: size,
-        idle_timeout: 20,
-        connect_timeout: 10,
+        idle_timeout: db.POOL_IDLE_TIMEOUT_S,
+        connect_timeout: db.POOL_CONNECT_TIMEOUT_S,
         types: { bigint: postgres.BigInt },
         // Silence postgres NOTICE-level messages by default. See db.ts for
         // rationale (stdout-parsing callers like jobs-submit --json break when
@@ -493,6 +528,7 @@ export class PostgresEngine implements BrainEngine {
     // which matches schema-embedded.ts's `public.` references.
     const probeRows = await conn<{
       pages_exists: boolean;
+      pages_revision_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
       effective_date_exists: boolean;
@@ -524,6 +560,8 @@ export class PostgresEngine implements BrainEngine {
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'pages') AS pages_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'revision') AS pages_revision_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -610,6 +648,7 @@ export class PostgresEngine implements BrainEngine {
     const probe = probeRows[0]!;
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
+    const needsPagesRevision = probe.pages_exists && !probe.pages_revision_exists;
     const needsLinksBootstrap = probe.links_exists
       && (!probe.link_source_exists || !probe.origin_page_id_exists);
     const needsChunksBootstrap = probe.chunks_exists
@@ -707,7 +746,8 @@ export class PostgresEngine implements BrainEngine {
     const needsTimelineEventPageId = probeCr.timeline_entries_exists === true
       && !probeCr.timeline_event_page_id_exists;
 
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+    if (!needsPagesBootstrap && !needsPagesRevision
+        && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsChunksEmbeddingImage && !needsPagesRecency
         && !needsIngestLogSourceId && !needsFilesBootstrap
@@ -746,6 +786,13 @@ export class PostgresEngine implements BrainEngine {
           ON CONFLICT (id) DO NOTHING;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
           NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
+      `);
+    }
+
+    if (needsPagesRevision) {
+      await conn.unsafe(`
+        ALTER TABLE pages
+          ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
       `);
     }
 
@@ -1035,7 +1082,7 @@ export class PostgresEngine implements BrainEngine {
             : tx``;
       const deletedCondition = includeDeleted ? tx`` : tx`AND deleted_at IS NULL`;
       const rows = await tx`
-        SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+        SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
                effective_date, effective_date_source,
                source_kind, source_uri, ingested_via, ingested_at,
                contextual_retrieval_mode
@@ -1076,8 +1123,12 @@ export class PostgresEngine implements BrainEngine {
   async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
     slug = validateSlug(slug);
     const sql = this.sql;
-    const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
+    const normalized = normalizePageWrite(page);
+    const {
+      hash, frontmatter, pageKind, effectiveDate, effectiveDateSource,
+      importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri,
+      ingestedVia, ingestedAt,
+    } = normalized;
     const sourceId = opts?.sourceId ?? 'default';
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
@@ -1087,27 +1138,8 @@ export class PostgresEngine implements BrainEngine {
     // at (default, slug); subsequent bare-slug subqueries (getTags, deleteChunks,
     // etc.) then matched 2 rows and blew up with Postgres 21000.
     // ON CONFLICT target is (source_id, slug); global UNIQUE(slug) dropped in v17.
-    const pageKind = page.page_kind || 'markdown';
-    // v0.29.1 — effective_date / effective_date_source / import_filename are
-    // additive opt-in inputs from the importer (computeEffectiveDate). When
-    // omitted, the ON CONFLICT path preserves any existing value via
-    // COALESCE(EXCLUDED.x, pages.x) so a putPage that doesn't know about
-    // these columns (auto-link, code reindex, etc.) doesn't blank them out.
-    const effectiveDate = page.effective_date ?? null;
-    const effectiveDateSource = page.effective_date_source ?? null;
-    const importFilename = page.import_filename ?? null;
-    // v0.32.7 CJK wave: chunker_version + source_path columns.
-    const chunkerVersion = page.chunker_version ?? null;
-    const sourcePath = page.source_path ?? null;
-    // v0.39.3.0 provenance write-through (WARN-8 + CV12). Server stamps
-    // `ingested_at = now()` ONLY when any provenance is being written —
-    // null `source_kind` / `source_uri` / `ingested_via` means no provenance
-    // write fired this call, and COALESCE-preserve UPDATE keeps the prior
-    // first-write timestamp intact (audit trail survives routine edits).
-    const sourceKind = page.source_kind ?? null;
-    const sourceUri = page.source_uri ?? null;
-    const ingestedVia = page.ingested_via ?? null;
-    const ingestedAt = (sourceKind || sourceUri || ingestedVia) ? new Date() : null;
+    // Normalization is shared with createPageOnly and compareAndSwapPage so
+    // all page-write primitives retain the legacy defaults/hash/provenance rules.
     const rows = await sql`
       INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
       VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, COALESCE(${chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt})
@@ -1116,7 +1148,11 @@ export class PostgresEngine implements BrainEngine {
         page_kind = EXCLUDED.page_kind,
         title = EXCLUDED.title,
         compiled_truth = EXCLUDED.compiled_truth,
-        timeline = EXCLUDED.timeline,
+        -- Preserve-on-empty, like the provenance columns below. A body with no
+        -- timeline sentinel parses to '', which previously erased a stored
+        -- timeline on every unrelated edit. Callers that pass '' mean "not
+        -- applicable", not "clear it"; a non-empty value still replaces.
+        timeline = COALESCE(NULLIF(EXCLUDED.timeline, ''), pages.timeline),
         frontmatter = EXCLUDED.frontmatter,
         content_hash = EXCLUDED.content_hash,
         updated_at = now(),
@@ -1130,9 +1166,120 @@ export class PostgresEngine implements BrainEngine {
         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
         ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
-      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
+      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
     `;
     return rowToPage(rows[0]);
+  }
+
+  async createPageOnly(
+    slug: string,
+    page: PageInput,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult> {
+    slug = validateSlug(slug);
+    const sql = this.sql;
+    const normalized = normalizePageWrite(page);
+    const rows = await sql`
+      INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
+      VALUES (${opts.sourceId}, ${slug}, ${page.type}, ${normalized.pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(normalized.frontmatter as Parameters<typeof sql.json>[0])}, ${normalized.hash}, now(), ${normalized.effectiveDate}, ${normalized.effectiveDateSource}, ${normalized.importFilename}, COALESCE(${normalized.chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${normalized.sourcePath}, ${normalized.sourceKind}, ${normalized.sourceUri}, ${normalized.ingestedVia}, ${normalized.ingestedAt})
+      ON CONFLICT (source_id, slug) DO NOTHING
+      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
+    `;
+    if (rows.length > 0) {
+      return { status: 'created', page: rowToPage(rows[0]) };
+    }
+
+    const existing = await sql`
+      SELECT revision, deleted_at
+      FROM pages
+      WHERE source_id = ${opts.sourceId} AND slug = ${slug}
+      LIMIT 1
+    `;
+    if (existing.length === 0) {
+      return { status: 'conflict', slug, reason: 'already_exists' };
+    }
+    const row = existing[0] as { revision: number | string; deleted_at: Date | string | null };
+    return {
+      status: 'conflict',
+      slug,
+      reason: row.deleted_at == null ? 'already_exists' : 'soft_deleted',
+      current_revision: Number(row.revision),
+    };
+  }
+
+  async lockPageForConditionalWrite(
+    slug: string,
+    opts: { sourceId: string },
+  ): Promise<Page | null> {
+    slug = validateSlug(slug);
+    const rows = await this.sql`
+      SELECT id, source_id, slug, type, title, compiled_truth, timeline,
+             frontmatter, content_hash, revision, created_at, updated_at, deleted_at,
+             source_kind, source_uri, ingested_via, ingested_at
+      FROM pages
+      WHERE source_id = ${opts.sourceId} AND slug = ${slug}
+      FOR UPDATE
+    `;
+    return rows.length === 0 ? null : rowToPage(rows[0]);
+  }
+
+  async compareAndSwapPage(
+    slug: string,
+    page: PageInput,
+    expectedRevision: number,
+    opts: { sourceId: string },
+  ): Promise<ConditionalPageWriteResult> {
+    slug = validateSlug(slug);
+    const sql = this.sql;
+    const normalized = normalizePageWrite(page);
+    const rows = await sql`
+      UPDATE pages
+      SET type = ${page.type},
+          page_kind = ${normalized.pageKind},
+          title = ${page.title},
+          compiled_truth = ${page.compiled_truth},
+          -- Preserve-on-empty — see putPage.
+          timeline = COALESCE(NULLIF(${page.timeline || ''}::text, ''), pages.timeline),
+          frontmatter = ${sql.json(normalized.frontmatter as Parameters<typeof sql.json>[0])},
+          content_hash = ${normalized.hash},
+          updated_at = now(),
+          effective_date = COALESCE(${normalized.effectiveDate}, pages.effective_date),
+          effective_date_source = COALESCE(${normalized.effectiveDateSource}, pages.effective_date_source),
+          import_filename = COALESCE(${normalized.importFilename}, pages.import_filename),
+          chunker_version = COALESCE(${normalized.chunkerVersion}::smallint, pages.chunker_version),
+          source_path = COALESCE(${normalized.sourcePath}, pages.source_path),
+          source_kind = COALESCE(${normalized.sourceKind}, pages.source_kind),
+          source_uri = COALESCE(${normalized.sourceUri}, pages.source_uri),
+          ingested_via = COALESCE(${normalized.ingestedVia}, pages.ingested_via),
+          ingested_at = COALESCE(${normalized.ingestedAt}, pages.ingested_at)
+      WHERE source_id = ${opts.sourceId}
+        AND slug = ${slug}
+        AND deleted_at IS NULL
+        AND revision = ${expectedRevision}
+      RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, revision, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
+    `;
+    if (rows.length > 0) {
+      return { status: 'updated', page: rowToPage(rows[0]) };
+    }
+
+    const existing = await sql`
+      SELECT revision, deleted_at
+      FROM pages
+      WHERE source_id = ${opts.sourceId} AND slug = ${slug}
+      LIMIT 1
+    `;
+    if (existing.length === 0) {
+      return { status: 'conflict', slug, reason: 'not_found', expected_revision: expectedRevision };
+    }
+    const row = existing[0] as { revision: number | string; deleted_at: Date | string | null };
+    const currentRevision = Number(row.revision);
+    return {
+      status: 'conflict',
+      slug,
+      reason: row.deleted_at == null ? 'revision_mismatch' : 'soft_deleted',
+      expected_revision: expectedRevision,
+      current_revision: currentRevision,
+    };
   }
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
@@ -1244,7 +1391,8 @@ export class PostgresEngine implements BrainEngine {
     await sql`
       UPDATE pages
       SET compiled_truth = ${compiledTruth},
-          timeline = ${timeline},
+          -- Preserve-on-empty — see putPage.
+          timeline = COALESCE(NULLIF(${timeline}::text, ''), pages.timeline),
           content_hash = ${contentHash},
           updated_at = now()
       WHERE source_id = ${sourceId}

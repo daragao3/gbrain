@@ -21,7 +21,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { LATEST_VERSION } from '../src/core/migrate.ts';
+import { hasPendingMigrations, LATEST_VERSION } from '../src/core/migrate.ts';
 import { useColdPglite } from './helpers/cold-pglite.ts';
 
 // Tier 3 opt-out: this file tests the cold init / bootstrap path explicitly.
@@ -221,6 +221,43 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
         WHERE table_name = 'timeline_entries' AND column_name = 'event_page_id'
       `);
       expect(rows).toHaveLength(1);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
+  test('brain stamped at the collided v125 still applies page revision state', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      const db = (engine as any).db;
+      await db.exec(`
+        DROP TRIGGER IF EXISTS bump_page_revision_trg ON pages;
+        DROP FUNCTION IF EXISTS bump_page_revision_fn;
+        ALTER TABLE pages DROP COLUMN IF EXISTS revision;
+      `);
+      await engine.setConfig('version', '125');
+
+      expect(await hasPendingMigrations(engine)).toBe(true);
+      await engine.initSchema();
+      await engine.initSchema();
+
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+      const page = await engine.putPage('test/upgraded-revision', {
+        type: 'concept',
+        title: 'v1',
+        compiled_truth: '',
+        timeline: '',
+      });
+      expect(page.revision).toBe(1);
+      const updated = await engine.putPage('test/upgraded-revision', {
+        type: 'concept',
+        title: 'v2',
+        compiled_truth: '',
+        timeline: '',
+      });
+      expect(updated.revision).toBe(2);
     } finally {
       await engine.disconnect();
     }

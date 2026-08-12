@@ -91,6 +91,8 @@ export interface Page {
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
+  /** Page-local optimistic concurrency token. Starts at 1 and advances on client-observable page-state changes. */
+  revision: number;
   /** v0.29 — deterministic 0..1 score; populated by the recompute_emotional_weight cycle phase. */
   emotional_weight?: number;
   created_at: Date;
@@ -207,6 +209,22 @@ export type CRMode = typeof CR_MODES[number];
 export function isCRMode(value: unknown): value is CRMode {
   return typeof value === 'string' && (CR_MODES as readonly string[]).includes(value);
 }
+
+export type ConditionalPageConflictReason =
+  | 'already_exists'
+  | 'not_found'
+  | 'soft_deleted'
+  | 'revision_mismatch';
+
+export type ConditionalPageWriteResult =
+  | { status: 'created' | 'updated'; page: Page }
+  | {
+      status: 'conflict';
+      slug: string;
+      reason: ConditionalPageConflictReason;
+      expected_revision?: number;
+      current_revision?: number;
+    };
 
 export interface PageInput {
   type: PageType;

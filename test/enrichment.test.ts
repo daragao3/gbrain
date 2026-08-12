@@ -246,7 +246,7 @@ describe('scorePage — person', () => {
       compiled_truth: '', timeline: '',
       frontmatter: {},
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.score).toBeLessThan(0.3);
@@ -265,7 +265,7 @@ See also: [Acme](companies/acme.md), [Bob](people/bob.md), [Charlie](people/char
         last_verified: new Date().toISOString(),
       },
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.score).toBeGreaterThan(0.8);
@@ -278,7 +278,7 @@ See also: [Acme](companies/acme.md), [Bob](people/bob.md), [Charlie](people/char
       timeline: '',
       frontmatter: {},
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(Object.keys(s.dimensionScores)).toHaveLength(7);
@@ -290,7 +290,7 @@ See also: [Acme](companies/acme.md), [Bob](people/bob.md), [Charlie](people/char
       compiled_truth: '', timeline: '',
       frontmatter: { role: 'Engineer' },
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.dimensionScores.has_role_and_company).toBe(1);
@@ -305,7 +305,7 @@ describe('scorePage — company / concept / source / media defaults', () => {
       timeline: '',
       frontmatter: { founders: ['Alice'], funding: '$5M' },
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.rubric).toBe('company');
@@ -319,7 +319,7 @@ describe('scorePage — company / concept / source / media defaults', () => {
       compiled_truth: 'body content',
       timeline: '', frontmatter: {},
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.rubric).toBe('default');
@@ -330,13 +330,13 @@ describe('scorePage — company / concept / source / media defaults', () => {
       id: 1, slug: 'people/old', type: 'person', title: 'x',
       compiled_truth: '', timeline: '', frontmatter: {},
       created_at: new Date(2020, 0, 1), updated_at: new Date(2020, 0, 1),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const fresh: Page = {
       id: 2, slug: 'people/fresh', type: 'person', title: 'y',
       compiled_truth: '', timeline: '', frontmatter: {},
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const oldScore = scorePage(old);
     const freshScore = scorePage(fresh);
@@ -349,7 +349,7 @@ describe('scorePage — company / concept / source / media defaults', () => {
       id: 1, slug: 'people/repetitive', type: 'person', title: 'x',
       compiled_truth: repeated, timeline: '', frontmatter: {},
       created_at: new Date(), updated_at: new Date(),
-      source_id: 'default',
+      source_id: 'default', revision: 1,
     };
     const s = scorePage(page);
     expect(s.dimensionScores.non_redundancy).toBeLessThan(0.2);

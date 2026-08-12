@@ -16,6 +16,8 @@ import type { BrainEngine } from '../src/core/engine.ts';
 
 const put_page = operations.find(o => o.name === 'put_page') as Operation;
 if (!put_page) throw new Error('put_page op missing');
+const conditionalOp = operations.find(o => o.name === 'put_page_conditional');
+if (!conditionalOp) throw new Error('put_page_conditional missing');
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
   const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
@@ -110,6 +112,15 @@ describe('put_page namespace (v0.15 subagent rule)', () => {
         expect(e).toBeInstanceOf(OperationError);
         expect((e as OperationError).code).toBe('permission_denied');
       }
+    });
+
+    test('conditional operation rejects out-of-prefix writes before dry-run', async () => {
+      const ctx = makeCtx({ viaSubagent: true, subagentId: 42, dryRun: true });
+      const p = conditionalOp.handler(ctx, {
+        slug: 'people/alice', content: 'stub', mode: 'create_only',
+      });
+      await expect(p).rejects.toMatchObject({ code: 'permission_denied' });
+      await expect(p).rejects.toThrow(/put_page_conditional/);
     });
   });
 });
