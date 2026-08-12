@@ -62,16 +62,47 @@
   the offending process. Once a row appears, read the stack, fix that caller to set
   `GBRAIN_HOME`, and note whether it is in-repo at all. Until a row exists there is
   nothing actionable, so this stays open pending evidence rather than being investigated
-  speculatively.
-- [ ] **P3 — The guard covers `tmpdir()` only; other silent-repoint shapes are not
+  speculatively. v0.42.88.0 widened the evidence net: `auditUnsafeConfigWrite` is exported
+  and the withheld-flip path in `runMigrateEngine` writes the same JSONL, so a refusal
+  that never reaches `saveConfig` still names its process.
+- [ ] **P3 — Silent-repoint shapes outside the throwaway predicate are still not
   covered.** A machine-global repoint at a durable-looking path that is nonetheless wrong
-  (a deleted checkout, a mount that will not exist next boot, a per-run directory outside
-  `tmpdir()`) produces the identical silent `page_not_found` failure with no refusal. The
-  narrow shape was chosen deliberately so a legitimate migration is never reverted, and
-  widening it needs a way to tell "durable but wrong" from "durable and intended" that
-  does not guess. Candidate direction: warn-and-confirm on any machine-global
-  `database_path` change to a path that does not already contain a brain, rather than
-  broadening the hard refusal. Files: `src/core/config.ts`.
+  (a deleted checkout, a mount that will not exist next boot) produces the identical
+  silent `page_not_found` failure with no refusal. The narrow shape was chosen
+  deliberately so a legitimate migration is never reverted, and widening it needs a way to
+  tell "durable but wrong" from "durable and intended" that does not guess. Candidate
+  direction: warn-and-confirm on any machine-global `database_path` change to a path that
+  does not already contain a brain, rather than broadening the hard refusal. Files:
+  `src/core/config.ts`. Narrowed by v0.42.88.0, which closed two escapes rather than the
+  general case: paths are canonicalized before the `tmpdir()` containment test (a Windows
+  8.3 short name no longer reads as an unrelated tree), and a `gbrain-migrate-target-`
+  scratch directory is refused by NAME, which covers the "per-run directory outside
+  `tmpdir()`" instance for migrate's own scratch space.
+
+## v0.42.88.0 follow-ups (config-flip guard)
+
+- [ ] **P2 — `buildRetrievalReflexCheck` swallows the real error, so a CI failure names
+  nothing.** The whole body sits in one `try`, and the `catch` returns
+  `{name, status:'warn', message}` with NO `details`. A test asserting
+  `details.policy_skill_installed` therefore fails with `Received: undefined` and the
+  actual thrown error never appears anywhere — not in the assertion, not in the log. A
+  shard-1 failure on this check cost hours of bisection to characterize precisely because
+  the cause was invisible. Fix: include the error (and ideally its stack) in `details` on
+  the catch path, so the check reports WHY it could not run. Files:
+  `src/commands/doctor.ts` (`buildRetrievalReflexCheck`), pinned by
+  `test/doctor-retrieval-reflex.test.ts`.
+- [ ] **P3 — Adding one test file re-packs every shard, so unrelated latent pollution
+  surfaces as a red CI on the PR that added the file.** `scripts/test-shard.sh` partitions
+  by weight-aware LPT, and bun then runs each shard's files ALPHABETICALLY, not in the
+  argv order the script emits. Adding a single test file moved ~53 files in and out of
+  shard 1 and changed the alphabetical predecessor set of
+  `test/doctor-retrieval-reflex.test.ts` by 9 files, turning it red; a later merge
+  re-packed again and it went green with no fix. The test passes in isolation on both
+  platforms, so the pollution is real but currently unowned. Fix direction: make the
+  partition stable against single-file additions (bucket by a hash of the path rather than
+  LPT position), or find and fix the polluter. Note for whoever picks this up: the argv
+  order from `--dry-run-list` is NOT the execution order — reason about the alphabetical
+  set. Files: `scripts/test-shard.sh`, `scripts/sharding.ts`.
 
 ## v0.42.82.0 follow-ups (PGLite snapshot embedding width)
 
