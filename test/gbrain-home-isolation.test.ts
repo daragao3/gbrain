@@ -15,9 +15,9 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, existsSync, readdirSync, statSync, rmSync } from 'fs';
+import { mkdtempSync, existsSync, readdirSync, readFileSync, statSync, rmSync } from 'fs';
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve, sep } from 'path';
 
 // Save original env so we don't leak between tests. #2823: GBRAIN_AUDIT_DIR
 // must be captured too — the shared test bootstrap (test/helpers/audit-dir-preload.ts)
@@ -127,6 +127,157 @@ describe('GBRAIN_HOME write-side isolation', () => {
       process.env.GBRAIN_HOME = ORIG_GBRAIN_HOME;
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  // --- fail-closed backstop -------------------------------------------------
+  //
+  // GBRAIN_HOME is ambient process state, so honoring it is ADVISORY: every
+  // test above proves the override works when a caller remembers to set it,
+  // and none of them can stop a caller that forgets. A `migrate --to pglite`
+  // that completes without GBRAIN_HOME rewrites the MACHINE-GLOBAL config
+  // (`migrate-engine.ts` ends with `saveConfig`), repointing the shared brain
+  // at a throwaway mkdtemp target. Every later CLI read then returns
+  // `page_not_found` / "No timeline entries." against an empty brain — a
+  // SILENT FALSE NEGATIVE indistinguishable from a genuinely deleted page.
+  //
+  // These tests pin the backstop that makes the dangerous shape fail closed
+  // regardless of which caller forgot. They fake `homedir()` so the assertion
+  // can never reach the developer's real `~/.gbrain/config.json`, before OR
+  // after the guard exists.
+  describe('saveConfig fail-closed: no machine-global repoint at a temp brain', () => {
+    function withFakeHome<T>(fn: (fakeHome: string) => T): T {
+      const fakeHome = fresh();
+      const prev = {
+        gbrainHome: process.env.GBRAIN_HOME,
+        userProfile: process.env.USERPROFILE,
+        home: process.env.HOME,
+        allow: process.env.GBRAIN_ALLOW_TEMP_BRAIN,
+      };
+      // No GBRAIN_HOME => this is a machine-global write...
+      delete process.env.GBRAIN_HOME;
+      // ...but against a FAKE machine, so a missing guard cannot damage the
+      // developer's real brain config while this test is red.
+      process.env.USERPROFILE = fakeHome;
+      process.env.HOME = fakeHome;
+      try {
+        return fn(fakeHome);
+      } finally {
+        if (prev.gbrainHome !== undefined) process.env.GBRAIN_HOME = prev.gbrainHome; else delete process.env.GBRAIN_HOME;
+        if (prev.userProfile !== undefined) process.env.USERPROFILE = prev.userProfile; else delete process.env.USERPROFILE;
+        if (prev.home !== undefined) process.env.HOME = prev.home; else delete process.env.HOME;
+        if (prev.allow !== undefined) process.env.GBRAIN_ALLOW_TEMP_BRAIN = prev.allow; else delete process.env.GBRAIN_ALLOW_TEMP_BRAIN;
+        rmSync(fakeHome, { recursive: true, force: true });
+      }
+    }
+
+    test('refuses to repoint the machine-global brain at a temp-dir target', async () => {
+      const { saveConfig } = await import('../src/core/config.ts');
+      const target = join(mkdtempSync(join(tmpdir(), 'gbrain-guard-target-')), 'brain.pglite');
+      try {
+        withFakeHome((fakeHome) => {
+          expect(() => saveConfig({ engine: 'pglite', database_path: target })).toThrow(/temporary directory/i);
+          // Fail CLOSED: the refusal must happen before any bytes land.
+          expect(existsSync(join(fakeHome, '.gbrain', 'config.json'))).toBe(false);
+        });
+      } finally {
+        rmSync(join(target, '..'), { recursive: true, force: true });
+      }
+    });
+
+    test('a refusal appends a JSONL row naming the offending process', async () => {
+      // The refusal alone tells you SOMETHING tried to repoint the brain; the
+      // audit row is what tells you WHAT did. That is the whole point of the
+      // forensic path — the caller behind the observed incidents was an
+      // untracked script that a repo-wide search could not find, so the stack
+      // recorded from inside its own process is the only thing that names it.
+      const { saveConfig } = await import('../src/core/config.ts');
+      const auditDir = fresh();
+      const target = join(mkdtempSync(join(tmpdir(), 'gbrain-guard-target-')), 'brain.pglite');
+      const prevAudit = process.env.GBRAIN_AUDIT_DIR;
+      // Pin the audit dir explicitly: the shared bootstrap sets it
+      // process-globally, so asserting the default location would be reading
+      // another test's scratch dir.
+      process.env.GBRAIN_AUDIT_DIR = auditDir;
+      try {
+        withFakeHome(() => {
+          expect(() => saveConfig({ engine: 'pglite', database_path: target })).toThrow();
+        });
+
+        const rowsPath = join(auditDir, 'config-repoint-refused.jsonl');
+        expect(existsSync(rowsPath)).toBe(true);
+        const lines = readFileSync(rowsPath, 'utf8').trim().split('\n').filter(Boolean);
+        expect(lines.length).toBe(1);
+
+        const row = JSON.parse(lines[0]!);
+        expect(row.event).toBe('refused_global_config_repoint');
+        expect(row.pid).toBe(process.pid);
+        expect(row.database_path).toBe(target);
+        expect(row.engine).toBe('pglite');
+        expect(row.cwd).toBe(process.cwd());
+        expect(Array.isArray(row.argv)).toBe(true);
+        // The stack is the actual answer to "which code did this?".
+        expect(typeof row.stack).toBe('string');
+        expect(row.reason).toMatch(/temporary directory/i);
+        // Timestamp must be a real ISO instant, not a placeholder.
+        expect(Number.isNaN(Date.parse(row.ts))).toBe(false);
+      } finally {
+        if (prevAudit !== undefined) process.env.GBRAIN_AUDIT_DIR = prevAudit;
+        else delete process.env.GBRAIN_AUDIT_DIR;
+        rmSync(auditDir, { recursive: true, force: true });
+        rmSync(join(target, '..'), { recursive: true, force: true });
+      }
+    });
+
+    test('allows the identical write when GBRAIN_HOME sandboxes it', async () => {
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      const sandbox = fresh();
+      const target = join(mkdtempSync(join(tmpdir(), 'gbrain-guard-target-')), 'brain.pglite');
+      const prev = process.env.GBRAIN_HOME;
+      process.env.GBRAIN_HOME = sandbox;
+      try {
+        // A temp target is the NORMAL shape for a sandboxed test — the guard
+        // must not break hermetic callers that did the right thing.
+        expect(() => saveConfig({ engine: 'pglite', database_path: target })).not.toThrow();
+        expect(loadConfigFileOnly()?.database_path).toBe(target);
+      } finally {
+        if (prev !== undefined) process.env.GBRAIN_HOME = prev; else delete process.env.GBRAIN_HOME;
+        rmSync(sandbox, { recursive: true, force: true });
+        rmSync(join(target, '..'), { recursive: true, force: true });
+      }
+    });
+
+    test('allows a machine-global repoint at a PERMANENT pglite brain', async () => {
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      // Deliberately narrow: migrating the real brain to a PGLite file in a
+      // durable location is a legitimate configuration, not the bug.
+      const permanent = resolve(sep, 'gbrain-permanent-brain', 'brain.pglite');
+      withFakeHome(() => {
+        expect(() => saveConfig({ engine: 'pglite', database_path: permanent })).not.toThrow();
+        expect(loadConfigFileOnly()?.database_path).toBe(permanent);
+      });
+    });
+
+    test('GBRAIN_ALLOW_TEMP_BRAIN=1 is the documented escape hatch', async () => {
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      const target = join(mkdtempSync(join(tmpdir(), 'gbrain-guard-target-')), 'brain.pglite');
+      try {
+        withFakeHome(() => {
+          process.env.GBRAIN_ALLOW_TEMP_BRAIN = '1';
+          expect(() => saveConfig({ engine: 'pglite', database_path: target })).not.toThrow();
+          expect(loadConfigFileOnly()?.database_path).toBe(target);
+        });
+      } finally {
+        rmSync(join(target, '..'), { recursive: true, force: true });
+      }
+    });
+
+    test('a postgres config is never affected', async () => {
+      const { saveConfig, loadConfigFileOnly } = await import('../src/core/config.ts');
+      withFakeHome(() => {
+        expect(() => saveConfig({ engine: 'postgres', database_url: 'postgres://u:p@127.0.0.1:5432/db' })).not.toThrow();
+        expect(loadConfigFileOnly()?.engine).toBe('postgres');
+      });
+    });
   });
 
   test('GBRAIN_AUDIT_DIR override still wins over GBRAIN_HOME', async () => {
