@@ -2,6 +2,76 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.91.0] - 2026-08-12
+
+**GBrain now works out which repository your work belongs to before it pushes, instead of always pushing to the one named "origin".**
+
+If you started a repository by copying someone else's and then made your own copy to push to, your checkout has two remotes. The one named "origin" is usually still the original project, and your own copy sits under a different name. Git handles this: it reads your settings to decide where a push should go. GBrain did not read them. It always pushed to "origin".
+
+Three places push on your behalf: keeping a brain repo in sync after a write, proving that push access works before declaring a repo ready, and recording an endorsement in a skillpack registry. All three sent your commits to whichever repository "origin" named, which in a copied checkout is not yours. If you cannot write there, the push fails and the work sits local only. If you can write there, which is the case for anyone maintaining the original or working in a shared team repository, it lands in the wrong place quietly.
+
+GBrain now follows the same order Git does when deciding where a push belongs, and checks the answer against the remotes your repository actually has, because those settings are allowed to hold an address rather than a name. When nothing names a remote, it stops and says so instead of guessing.
+
+This matters more than it sounds, because the repository holding your brain is usually your own working copy, not something GBrain created. `gbrain sources add --path` takes any folder you already have, and `gbrain sources harden --all` then sweeps every one of them.
+
+### How to use it
+
+Nothing to configure if your checkout is already set up the ordinary way. GBrain reads the same settings Git does, so if `git push` already goes to the right place, so does GBrain.
+
+To point a checkout at your own copy, name it once:
+
+```bash
+git config remote.pushDefault your-remote-name
+```
+
+Or per branch, which is what a copied checkout usually already has:
+
+```bash
+git config branch.main.remote your-remote-name
+```
+
+To see what GBrain will use, ask Git the same question:
+
+```bash
+git remote
+```
+
+### Things to watch
+
+A repository whose settings name no remote at all still falls back to "origin" when it exists, so an ordinary single-remote checkout behaves exactly as before. A repository with no remotes now reports that plainly instead of failing partway through a push.
+
+`gbrain sources harden` reports which remote it confirmed access against, and its closing line now says "clean against push remote" rather than naming one remote it may not have used.
+
+Fetching is unchanged. This release covers where commits go, not where updates are read from.
+
+### Itemized changes
+
+#### Fixed
+- **One push-remote resolver, used everywhere.** `src/core/git-remote.ts` gains `resolveConfiguredRemote`, `resolvePushRemote`, `listRemotes` and `noPushRemoteMessage`. The order is `branch.<branch>.pushRemote`, then `remote.pushDefault`, then `branch.<branch>.remote`, then the trunk's remote, then a sole remote, then `origin` only when the repository actually has one. Every settings value is checked against `git remote` output, since a value may be an address rather than a name; a repository with no remotes therefore resolves to nothing and the caller refuses instead of guessing.
+- **`pushProbe` targets the resolved remote** and gains a `no_remote` outcome, so "no push access" and "no remote to push to" are no longer the same report.
+- **Brain repo durability pushes where the repo belongs.** In `src/core/brain-repo-durability.ts` the generated push-retry carries a `brain_remote` function mirroring the same order, used for the push and for the rebase-pull it pairs with, so a rejected push no longer rebases your work onto the original project. The scaffolding push takes the resolved remote, and `headMatchesOrigin` becomes `headMatchesRemote` so the cleanliness check compares against the remote that was actually pushed to. `hardenBrainRepo` resolves once and threads the same answer through all three.
+- **`gbrain skillpack endorse --push` resolves its remote** from the clone it is run in, which defaults to the current folder, and reports it as `push_remote`. An unresolvable remote raises instead of pushing.
+
+#### Tests
+- **`test/git-push-remote.serial.test.ts`** drives real bare "upstream" and "fork" repositories through hardening, the generated helper, and an endorsement. A regression shows up as commits landing in the wrong repository, not as an argument-shape assertion. It also pins the resolution order, the address-not-a-name case, the sole-remote case, and the refusal.
+
+## To take advantage of v0.42.91.0
+
+Nothing to run. The resolver applies on upgrade.
+
+If a brain repo was hardened before this release, its generated helper and hook still carry the old wording. Re-run hardening to regenerate them:
+
+```bash
+gbrain sources harden <id>
+```
+
+If you keep a brain repo in a checkout copied from another project, confirm the remote your work belongs to is the one your settings name:
+
+```bash
+git -C /path/to/brain/repo remote
+git -C /path/to/brain/repo config --get branch.main.remote
+```
+
 ## [0.42.90.0] - 2026-08-12
 
 **A database connection that runs out of time while the machine is busy is now retried, instead of taking the whole server down with it.**
