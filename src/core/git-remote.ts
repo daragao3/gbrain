@@ -505,7 +505,12 @@ export function resolveConfiguredRemote(
     if (name && remotes.includes(name)) return name;
   }
   if (remotes.length === 1) return remotes[0];
-  return remotes.includes('origin') ? 'origin' : null;
+  // NO last-resort fallback to `origin`. Falling back IS the defect this
+  // function exists to prevent: in a fork-shaped checkout `origin` is the
+  // upstream project the operator does not own, so "origin because it exists"
+  // is precisely the wrong guess in the only case that matters. Refusing
+  // leaves a commit local (recoverable); guessing publishes it to a stranger.
+  return null;
 }
 
 /** The remote a push of `branch` should target, or null when unresolvable. */

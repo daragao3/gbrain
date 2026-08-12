@@ -149,8 +149,9 @@ describe('resolvePushRemote', () => {
     // `branch.main.remote` may legitimately hold a URL; it names no remote.
     git(work, 'config', 'branch.main.remote', upstream);
     expect(listRemotes(work)).toEqual(['fork', 'origin']);
-    // Nothing resolvable → origin only because it exists (last resort).
-    expect(resolvePushRemote(work, 'main')).toBe('origin');
+    // Nothing resolvable → REFUSE. `origin` exists, but in a fork-shaped repo
+    // it is the upstream project, so "it exists" is not a reason to push there.
+    expect(resolvePushRemote(work, 'main')).toBeNull();
   });
 
   test('uses a sole remote whatever it is called', () => {
