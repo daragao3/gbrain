@@ -1,19 +1,17 @@
 # TODOS
 
-## v0.42.84.0 follow-ups (Tier 3 fixture staleness)
+## v0.42.85.0 follow-ups (Tier 3 fixture staleness)
 
-- [ ] **P3 — `scripts/run-serial-tests.sh` silently ignores a file path passed on argv.**
-  Its list is a hardcoded `find test -name '*.serial.test.ts' -not -path 'test/e2e/*' | sort`,
-  and the only argument it recognizes is `--dry-run-list`. So
-  `bash scripts/run-serial-tests.sh test/pglite-snapshot-file-seeding.serial.test.ts`
-  discards the path and runs all 95 files, one bun process each. That is easy to mistake
-  for a hang: the intended single file takes about 2 minutes, the full sweep takes roughly
-  an hour on a loaded machine. The tell is the script's own first line,
-  `[serial-tests] running 95 file(s), one bun process per file`. Fix: accept an optional
-  argv file list the way `scripts/run-e2e.sh` already does, falling back to the `find` when
-  invoked with no args, and reject unknown flags rather than treating them as paths.
-  Where: `scripts/run-serial-tests.sh` (the file-list block and the arg parse near
-  `--dry-run-list`).
+- [x] **P3 — `scripts/run-serial-tests.sh` silently ignored a file path passed on argv.**
+  Fixed independently in v0.42.84.0 (`26502f77`, "let run-serial-tests.sh run the files you
+  name"), which landed while this release was in flight. The script now accepts positional
+  file arguments, strips a leading `./` so the per-file snapshot special case still matches,
+  accepts them before or after `--dry-run-list`, and exits 2 naming the path on a file that
+  does not exist, is not a `*.serial.test.ts`, or is an unknown flag. Before that, the list
+  was a hardcoded `find` and the only recognized argument was `--dry-run-list`, so a named
+  path was discarded and all 95 files ran, one bun process each. That read as a hang: the
+  intended single file takes about 2 minutes, the full sweep roughly an hour on a loaded
+  machine, and the only tell was the script's own `running 95 file(s)` banner.
 - [x] **P3 — exercise the full 95-file serial suite against the `--if-stale` change.** Done
   by CI. The `serial-tests` job in `.github/workflows/test.yml` runs `bun run test:serial`
   (`bash scripts/run-serial-tests.sh`, the whole 95-file sweep) on ubuntu-latest with a
@@ -22,6 +20,38 @@
   run impossible without editing the script, so `test/pglite-snapshot-file-seeding.serial.test.ts`
   was verified directly instead (1 pass / 0 fail, 115.44s). Linux CI is the gate for the
   full sweep.
+## v0.42.84.0 follow-ups (four-shape removal protection)
+
+- [ ] **P2 - undeclared-prefix protection over-reports, so an edge can now go
+  stale instead of being reconciled.** Follow-up from v0.42.84.0.
+  `extractUndeclaredPrefixRefs` is deliberately permissive (its own doc says so:
+  callers are expected to intersect against real edges), and `isProtectedTarget`
+  additionally matches on bare basename. So prose mentioning an unrelated
+  `foo/bar` path can pin an existing edge to `*/bar` that the author really did
+  stop referencing. This errs in the safe direction — a stale edge is
+  re-reconcilable by `gbrain extract`, a hard delete is not, and `links` still
+  has no tombstone column — but it is a real behavior change worth measuring on
+  a large brain before tightening. Options: require the protected literal to
+  match `to_slug`'s full path rather than its basename, or scope basename
+  matching to refs that came from the generic wikilink pass (where the basename
+  IS the resolution key) and use exact/suffix matching for undeclared-prefix
+  refs. Needs a before/after `withheld` count on a real corpus, not a guess.
+  Where: `src/core/operations.ts` (`runAutoLink` `isProtectedTarget`,
+  `protectedBasenames`).
+
+- [ ] **P2 - `src/core/link-extraction.ts` contains a raw NUL byte, so ripgrep
+  treats it as binary and every ripgrep-based guard silently skips it.**
+  Byte offset 17046 (in `extractUndeclaredPrefixRefs`) is a literal `0x00` used
+  as a separator inside a template literal — `` `${dir}<NUL>${slug}` `` — where
+  every other separator key in the file spells it `\u0000`. Compiles and behaves
+  identically, which is why it went unnoticed. The cost is tooling, not runtime:
+  `grep`/`rg` report `Binary file ... matches` and emit NO line hits, so Claude
+  Code's Grep tool returns "no matches" for this file, and the repo's own
+  ripgrep-backed CI guards (`scripts/check-*.sh`) cannot see its contents. One
+  character to fix (replace the raw byte with the `\u0000` escape); left out of
+  the v0.42.84.0 change so a data-loss fix stays reviewable on its own.
+  Where: `src/core/link-extraction.ts` (`extractUndeclaredPrefixRefs`, the
+  `seen` key).
 ## v0.42.83.0 follow-ups (machine-global config repoint guard)
 
 - [ ] **P2 — Identify the caller the audit log names, then fix it at the source.** The
@@ -95,23 +125,33 @@
 
 ## v0.42.81.0 follow-ups (entity_dirs safety guard)
 
-- [ ] **P1 - the v0.42.80.0 removal safety net covers ONE of four reference shapes.**
-  `unresolvableRefs` is populated only in `extractPageLinks`'s `ref.needsResolution`
-  branch, which only the generic wikilink pass reaches. Probed against the merged
-  extractor with `entityDirs: []` and `globalBasename: false`, using a passing
-  control:
+- [x] **P1 - the v0.42.80.0 removal safety net covers ONE of four reference shapes.**
+  DONE. `unresolvableRefs` was populated only in `extractPageLinks`'s
+  `ref.needsResolution` branch, which only the generic wikilink pass reaches.
+  Probed against the merged extractor with `entityDirs: []` and
+  `globalBasename: false`, using a passing control:
   `[[sessions/foo]]` -> `unresolvableRefs: ["sessions/foo"]` (PROTECTED);
   `[x](sessions/foo)`, bare `sessions/foo`, and `[[wiki:sessions/foo]]` -> all
   `candidates=0` AND `unresolvableRefs=[]` (NOT protected, still hard-deleted).
   Those three shapes miss the dir-gated regexes entirely, so they never become a
   ref and never reach the net. v0.42.81.0's `entity_dirs_orphaned_edges` DETECTS
-  this, but detection is not protection. Fix candidates: emit a
-  `needsResolution` ref from the markdown-link and bare-slug passes when the
-  prefix looks like a slug dir but is undeclared, or key the net on a
-  body-substring check for `to_slug` rather than on extracted refs.
-  Where: `src/core/link-extraction.ts` (`extractEntityRefs` passes 1/2a/2c,
-  `extractPageLinks` unresolvableRefs pushes), `src/core/operations.ts`
-  (`runAutoLink` `isProtectedTarget`).
+  this, but detection is not protection.
+  Fixed by taking the third option rather than either candidate listed here:
+  `extractPageLinks` now folds `extractUndeclaredPrefixRefs(content,
+  opts.entityDirs)` into `unresolvableRefs`. That function already matched all
+  four shapes with a wildcard prefix and already carried the
+  `URL_CONTEXT_CHAR_RE` guard the bare-slug arm needs, so the detector and the
+  protection share ONE matcher and cannot drift on what counts as a reference —
+  which the "emit a `needsResolution` ref from each pass" candidate would not
+  have given, and which the "body-substring check on `to_slug`" candidate would
+  have matched far too loosely (no code-span stripping, no URL guard).
+  Pinned by `test/e2e/put-page-autolink-unresolvable-ref-shapes-pglite.test.ts`:
+  5 tests per shape (present -> withheld; CONTRA gone -> removed; CONTRA partial
+  -> only that edge), plus URL-guard, code-span, and manual-edge cases. Verified
+  discriminating — reverting the one-loop fix turns 12 of the 23 red, exactly the
+  three exposed shapes, while the generic-wikilink control group stays green.
+  Where: `src/core/link-extraction.ts` (`extractPageLinks` tail,
+  `PageLinksResult.unresolvableRefs` doc).
 
 ## v0.42.80.0 follow-ups (auto-link removal safety net)
 
@@ -127,8 +167,9 @@
   it was deliberately not bundled into the data-loss fix.
   Where: `src/core/link-extraction.ts` (`DIR_PATTERN`, `WIKILINK_RE`).
 - [ ] **P2 - frontmatter-derived edges have the same exposure and are NOT protected.**
-  `runAutoLink`'s safety net keys on `unresolvableRefs`, which only covers body
-  wikilinks. An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
+  `runAutoLink`'s safety net keys on `unresolvableRefs`, which covers body
+  references only (all four shapes as of v0.42.84.0, but nothing from
+  frontmatter). An `UnresolvedFrontmatterRef` carries a display `name` ("A Person"), not
   a slug, so it cannot be matched against `to_slug` and was left out rather than
   half-matched. A frontmatter field whose value stops resolving therefore still drops
   its edge. Closing this needs the frontmatter resolver to report the slug it was

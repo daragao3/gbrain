@@ -695,10 +695,16 @@ export interface PageLinksResult {
   candidates: LinkCandidate[];
   unresolved: UnresolvedFrontmatterRef[];
   /**
-   * Literal `[[...]]` texts the body DOES carry but that produced no
-   * candidate — the generic (non-DIR_PATTERN) wikilink pass dropped them
-   * because `link_resolution.global_basename` is off, or because the
-   * resolver matched nothing.
+   * Reference texts the body DOES carry but that produced no candidate.
+   * Two populating paths, covering all four reference shapes:
+   *
+   *   1. The generic (non-DIR_PATTERN) `[[bare-name]]` wikilink pass, when
+   *      `link_resolution.global_basename` is off or the resolver matched
+   *      nothing.
+   *   2. `extractUndeclaredPrefixRefs` over the whole body, which adds the
+   *      other three shapes — `[label](dir/slug)`, bare `dir/slug`, and
+   *      qualified `[[source:dir/slug]]` — whenever `dir` is outside the
+   *      effective entity-dir set and so invisible to the dir-gated passes.
    *
    * Load-bearing for reconciliation, NOT diagnostics. An empty `candidates`
    * set has two very different causes: the body genuinely stopped
@@ -706,6 +712,10 @@ export interface PageLinksResult {
    * extractor being unable to resolve refs that are still written on the
    * page (removal would be silent, unrecoverable data loss — `links` has no
    * tombstone column). Callers reconcile against this to tell them apart.
+   *
+   * Entries are literals lifted from the body, NOT validated slugs — path 2
+   * over-reports by design. A consumer must intersect them against edges that
+   * already exist and must never create an edge from one.
    */
   unresolvableRefs: string[];
 }
@@ -892,6 +902,41 @@ export async function extractPageLinks(
     seen.add(key);
     result.push(c);
   }
+  // The other three reference shapes. Everything above reaches
+  // `unresolvableRefs` only through the `ref.needsResolution` branch, and only
+  // the generic `[[bare-name]]` pass ever sets that flag. So a body carrying
+  // `[x](sessions/foo)`, a bare `sessions/foo`, or `[[wiki:sessions/foo]]`
+  // under an undeclared prefix produced `candidates=0` AND
+  // `unresolvableRefs=[]` — indistinguishable, to a reconciling caller, from
+  // "the author deleted the reference" — so its `link_source='markdown'` edges
+  // were hard-deleted on the next local put_page.
+  //
+  // `extractUndeclaredPrefixRefs` already matches all four shapes with a
+  // wildcard prefix, and already carries the URL guard the bare-slug arm needs
+  // (`https://example.com/sessions/x` must not read as a `com/sessions/x`
+  // ref). Reusing it keeps ONE matcher for "reference under an undeclared
+  // prefix", so the v0.42.81.0 detector (`entity_dirs_orphaned_edges`) and this
+  // protection cannot drift apart about what counts as a reference.
+  //
+  // Only UNDECLARED prefixes are added, which is exactly the exposed set: a
+  // declared prefix goes through the dir-gated passes and yields a real
+  // candidate, and a declared prefix pointing at a missing page is already
+  // covered by `runAutoLink`'s `unvalidatedTargets`.
+  //
+  // Over-reporting is deliberate and safe in both directions. These refs never
+  // CREATE an edge — `runAutoLink` intersects them against edges that already
+  // exist, so a spurious literal with no backing edge is discarded. The failure
+  // mode this trades into is a stale edge outliving its reference, which a
+  // later `gbrain extract` re-reconciles; the failure mode it removes is an
+  // unrecoverable delete, because `links` has no tombstone column.
+  //
+  // This cannot weaken the deletion contract: a reference that is GONE from the
+  // body matches none of the four patterns, contributes nothing here, and its
+  // stale edge is still removed.
+  for (const ref of extractUndeclaredPrefixRefs(content, opts.entityDirs)) {
+    unresolvableRefs.push(ref.slug);
+  }
+
   return {
     candidates: result,
     unresolved: fmUnresolved,
