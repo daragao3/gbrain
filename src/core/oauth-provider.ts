@@ -216,6 +216,13 @@ interface GBrainOAuthProviderOptions {
    * enough on its own.
    */
   authCacheTtlMs?: number;
+
+  /**
+   * Lifetime (ms) of a memoized DEFINITIVE not-found. Defaults to
+   * resolveAuthNegativeCacheTtlMs(GBRAIN_AUTH_NEGATIVE_CACHE_TTL_MS) → 2000.
+   * `0` disables negative memoization.
+   */
+  authNegativeCacheTtlMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +438,38 @@ export function resolveAuthDbTimeoutMs(env: string | undefined): number {
 export const DEFAULT_AUTH_CACHE_TTL_MS = 30_000;
 
 /**
+ * Lifetime of a memoized FAILED verification.
+ *
+ * Deliberately orders of magnitude below DEFAULT_AUTH_CACHE_TTL_MS: a negative
+ * entry denies service, so it earns far less trust than a positive one. The
+ * bound that matters is the mint race called out in setCachedAuth's docstring —
+ * a token created between a client's 401 and its retry is rejected for at most
+ * this long.
+ *
+ * Why cache failures at all, when the original design explicitly did not:
+ * measured 2026-08-12, the 401 path was the SLOWEST request the :7483 server
+ * served (9.07 / 13.40 / 22.17 / 27.21s, against a static no-DB route at
+ * 0.09-0.79s in the same window), because it is the only path that always
+ * reaches Postgres. A client holding a stale token therefore amplifies its own
+ * failures — each 401 pays a cold pool open and leaves the server busier for
+ * the next one. Two seconds is enough to collapse that and short enough that
+ * the mint race stays invisible.
+ *
+ * Only a DEFINITIVE not-found is cached — never an AuthDbTimeoutError or a
+ * column-probe failure. Caching a transient infrastructure fault as "invalid"
+ * would convert a blip into a guaranteed window of hard 401s.
+ * Regression: test/auth-negative-cache.test.ts.
+ */
+export const DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS = 2_000;
+
+/** Parse GBRAIN_AUTH_NEGATIVE_CACHE_TTL_MS; `0` disables negative memoization. */
+export function resolveAuthNegativeCacheTtlMs(env: string | undefined): number {
+  if (env === undefined || env === '') return DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS;
+  const n = Number(env);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS;
+}
+
+/**
  * Parse GBRAIN_AUTH_CACHE_TTL_MS; fall back to the default on unset/invalid.
  *
  * Unlike resolveAuthDbTimeoutMs, an explicit `0` is HONORED rather than
@@ -534,6 +573,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
    * processes-in-one and tests.
    */
   private readonly tokenCache = new Map<string, AuthCacheEntry>();
+  /**
+   * Memoized DEFINITIVE not-found verifications, hash → expiry (epoch ms).
+   * Separate from tokenCache so the two lifetimes can never be confused and a
+   * negative entry can never be mistaken for an AuthInfo.
+   */
+  private readonly negativeCache = new Map<string, number>();
+  private readonly authNegativeCacheTtlMs: number;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -545,6 +591,40 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       ?? resolveAuthDbTimeoutMs(process.env.GBRAIN_AUTH_DB_TIMEOUT_MS);
     this.authCacheTtlMs = options.authCacheTtlMs
       ?? resolveAuthCacheTtlMs(process.env.GBRAIN_AUTH_CACHE_TTL_MS);
+    this.authNegativeCacheTtlMs = options.authNegativeCacheTtlMs
+      ?? resolveAuthNegativeCacheTtlMs(process.env.GBRAIN_AUTH_NEGATIVE_CACHE_TTL_MS);
+  }
+
+  /** True while this hash is inside its negative-memo window. */
+  private isNegativeCached(tokenHash: string): boolean {
+    if (this.authNegativeCacheTtlMs <= 0) return false;
+    const notAfterMs = this.negativeCache.get(tokenHash);
+    if (notAfterMs === undefined) return false;
+    if (Date.now() >= notAfterMs) {
+      this.negativeCache.delete(tokenHash);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Memoize a DEFINITIVE not-found. Callers must not route transient failures
+   * (AuthDbTimeoutError, column probes) here — see
+   * DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS.
+   */
+  private setNegativeCached(tokenHash: string): void {
+    if (this.authNegativeCacheTtlMs <= 0) return;
+    if (this.negativeCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+      const nowMs = Date.now();
+      for (const [k, v] of this.negativeCache) {
+        if (nowMs >= v) this.negativeCache.delete(k);
+      }
+      if (this.negativeCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+        const oldest = this.negativeCache.keys().next();
+        if (!oldest.done) this.negativeCache.delete(oldest.value);
+      }
+    }
+    this.negativeCache.set(tokenHash, Date.now() + this.authNegativeCacheTtlMs);
   }
 
   /**
@@ -558,11 +638,16 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
    */
   clearTokenCache(): void {
     this.tokenCache.clear();
+    // Clear negatives too. A blanket clear is also the operator's "I just
+    // changed the token table, re-read everything" lever, and leaving stale
+    // 401s behind would make a freshly minted key look broken.
+    this.negativeCache.clear();
   }
 
   /** Evict one token's memoized verification (used on targeted revocation). */
   private invalidateTokenHash(tokenHash: string): void {
     this.tokenCache.delete(tokenHash);
+    this.negativeCache.delete(tokenHash);
   }
 
   /**
@@ -606,6 +691,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
    * extend a token's life by even a second.
    */
   private setCachedAuth(tokenHash: string, info: CoreAuthInfo): void {
+    // A hash that just verified is not a not-found any more. Drop the negative
+    // entry unconditionally — before the TTL guard below, so this still holds
+    // when the positive memo is disabled.
+    this.negativeCache.delete(tokenHash);
     if (this.authCacheTtlMs <= 0) return;
     let notAfterMs = Date.now() + this.authCacheTtlMs;
     if (typeof info.expiresAt === 'number') {
@@ -835,6 +924,15 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
 
+    // Negative fast path. A token we just proved does not exist gets the same
+    // answer without another pool read — the 401 path was measured as the
+    // server's most expensive request precisely because it always hit Postgres.
+    // Bounded by DEFAULT_AUTH_NEGATIVE_CACHE_TTL_MS so a token minted moments
+    // ago is rejected for seconds, not for the positive memo's lifetime.
+    if (this.isNegativeCached(tokenHash)) {
+      throw new InvalidTokenError('Invalid token');
+    }
+
     // Memo fast path (2026-07-27). The shared loopback token is a static
     // secret backed by ONE legacy access_tokens row, so every POST /mcp —
     // including the `initialize` handshake — was re-reading the same two rows.
@@ -1030,6 +1128,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       return info as SdkAuthInfo;
     }
 
+    // Reached ONLY when both reads succeeded and returned no rows — a
+    // definitive not-found. Every transient failure (AuthDbTimeoutError, the
+    // undefined-column probes) throws before here, so nothing infrastructural
+    // can be memoized as "invalid".
+    this.setNegativeCached(tokenHash);
     throw new InvalidTokenError('Invalid token');
   }
 

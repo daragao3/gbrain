@@ -124,6 +124,59 @@ export function resolvePrepare(url: string): boolean | undefined {
 export const POOL_IDLE_TIMEOUT_S = 20;
 export const POOL_CONNECT_TIMEOUT_S = 10;
 
+/**
+ * How often a long-lived server pings the pool to keep one backend warm.
+ *
+ * DERIVED from POOL_IDLE_TIMEOUT_S, not pinned independently, for the same
+ * reason the health deadlines above are: the keepalive is only worth anything
+ * while it fires strictly more often than the pool closes idle backends, and a
+ * literal here would drift silently the moment that budget is retuned. Half the
+ * idle budget leaves room for a tick that is itself late because the event loop
+ * was busy.
+ *
+ * Why a keepalive exists at all: opening a fresh backend is ~1000x the cost of
+ * the query it carries. Measured 2026-08-12 through the Docker port-forward,
+ * from an idle process: 0.15-2.14s to open, versus 0.008-0.23s to query an open
+ * one, against an auth SELECT whose own `EXPLAIN ANALYZE` is 0.069ms. Every
+ * client quiet for longer than idle_timeout pays that — including, by
+ * construction, every session doing first-contact tool registration, which is
+ * how a healthy backend still leaves a session with ZERO gbrain tools.
+ * Regression: test/pool-keepalive.test.ts.
+ */
+export const POOL_KEEPALIVE_S = Math.max(1, Math.floor(POOL_IDLE_TIMEOUT_S / 2));
+
+/**
+ * Start pinging `probe` on POOL_KEEPALIVE_S. Returns a stop function.
+ *
+ * Takes the probe as a parameter rather than reaching for the module `sql`
+ * singleton so the timing/error contract is testable without a database —
+ * matching how the health helpers in serve-http.ts are structured.
+ *
+ * The probe runs UNAWAITED on a timer, so its rejection would otherwise be an
+ * unhandled rejection and take the process down. That failure mode is not
+ * hypothetical here: the pool being briefly unreachable is the exact condition
+ * this function exists to paper over, so it must be swallowed, not propagated.
+ */
+export function startPoolKeepalive(
+  probe: () => Promise<unknown>,
+  opts: { intervalMs?: number; onError?: (err: unknown) => void } = {},
+): () => void {
+  const intervalMs = opts.intervalMs ?? POOL_KEEPALIVE_S * 1000;
+  const timer = setInterval(() => {
+    // Promise.resolve().then(probe) so a probe that throws SYNCHRONOUSLY is
+    // caught by the same .catch as one that rejects.
+    void Promise.resolve().then(probe).catch((err: unknown) => {
+      try {
+        opts.onError?.(err);
+      } catch { /* an onError that throws must not escape the timer either */ }
+    });
+  }, intervalMs);
+  // Never hold the process open: `gbrain serve` should still exit on signal,
+  // and a test importing this must not hang the runner.
+  (timer as unknown as { unref?: () => void }).unref?.();
+  return () => clearInterval(timer);
+}
+
 export function resolvePoolSize(explicit?: number): number {
   if (typeof explicit === 'number' && explicit > 0) return explicit;
   const raw = process.env.GBRAIN_POOL_SIZE;

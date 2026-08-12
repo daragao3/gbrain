@@ -189,6 +189,40 @@ export type ProbeHealthResult =
   | { ok: true; status: 200; body: { status: 'ok' | 'degraded'; version: string; engine: string; [k: string]: unknown } }
   | { ok: false; status: 503; body: { error: 'service_unavailable'; status: 'unavailable'; error_description: string } };
 
+/** Where the pre-auth arrival stamp lives on the request object. */
+const REQ_START_MS = Symbol.for('gbrain.requestStartMs');
+
+/**
+ * Stamp request arrival BEFORE the auth middleware runs.
+ *
+ * `mcp_request_log.latency_ms` used to be measured from the top of the POST
+ * handler — i.e. AFTER `requireBearerAuthRetryable` had already returned — so
+ * it excluded the single most expensive thing a request does. Measured
+ * 2026-08-12 on :7483, that blind spot was the whole story: client-side
+ * 19.0 / 1.1 / 5.4 / 6.7 / 4.0 / 7.5 s were logged as 2 / 2 / 2 / 4 / 12 / 5 ms,
+ * and across 223 calls in 3h the table averaged 59ms while sessions were timing
+ * out. /admin showed a healthy server the entire time.
+ *
+ * A metric that cannot see the cost it is meant to police is worse than no
+ * metric — it actively argues the server is fine. Stamping here puts the auth
+ * gate inside the number.
+ */
+export function stampRequestStart(req: Request, _res: Response, next: NextFunction): void {
+  (req as unknown as Record<symbol, number>)[REQ_START_MS] = Date.now();
+  next();
+}
+
+/**
+ * Read the pre-auth arrival stamp, falling back to `now` when the stamping
+ * middleware did not run (direct handler unit tests, and any future route that
+ * forgets to mount it — a missing stamp must degrade to the OLD behaviour, not
+ * throw or report a nonsense negative latency).
+ */
+export function requestStartMs(req: Request, now: number = Date.now()): number {
+  const v = (req as unknown as Record<symbol, unknown>)[REQ_START_MS];
+  return typeof v === 'number' ? v : now;
+}
+
 /**
  * Pure async health probe. Races `engine.getStats()` against a timeout,
  * returns a tagged result. No Express coupling — easy to unit-test with a
@@ -1984,8 +2018,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', requireBearerAuthRetryable({ verifier: oauthProvider, resourceMetadataUrl }), async (req: Request, res: Response) => {
-    const startTime = Date.now();
+  app.post('/mcp', stampRequestStart, requireBearerAuthRetryable({ verifier: oauthProvider, resourceMetadataUrl }), async (req: Request, res: Response) => {
+    // Arrival, not post-auth entry — the auth gate is the dominant cost and
+    // must be inside every latency this handler records. See stampRequestStart.
+    const startTime = requestStartMs(req);
     const authInfo = (req as any).auth as AuthInfo;
 
     // Human-readable agent name is now threaded through AuthInfo by
@@ -2001,6 +2037,24 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // Build the payload BEFORE stamping latency. The stamp used to sit at the
+      // top of this handler, which put both DB touchpoints outside the number:
+      // the auth gate before it (now covered by stampRequestStart) and this
+      // construction after it. Measured cheap — ~1ms for 97 tools / 66,606
+      // bytes — but "measured cheap" is a claim the metric should be able to
+      // make, not one a reader has to take on faith.
+      const tools = mcpOperations.map(op => ({
+        name: op.name,
+        description: op.description,
+        inputSchema: {
+          type: 'object' as const,
+          properties: Object.fromEntries(
+            Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
+          ),
+          required: Object.entries(op.params).filter(([, v]) => v.required).map(([k]) => k),
+        },
+      }));
+
       // v0.28.10: log every JSON-RPC method, not just successful tools/call.
       // Pre-fix, /admin/api/requests showed nothing for clients that only
       // ever called tools/list, and the v0.26.3 persistence regression test
@@ -2023,19 +2077,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         status: 'success',
         timestamp: new Date().toISOString(),
       });
-      return {
-        tools: mcpOperations.map(op => ({
-          name: op.name,
-          description: op.description,
-          inputSchema: {
-            type: 'object' as const,
-            properties: Object.fromEntries(
-              Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
-            ),
-            required: Object.entries(op.params).filter(([, v]) => v.required).map(([k]) => k),
-          },
-        })),
-      };
+      return { tools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -2686,6 +2728,32 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Start server
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
+
+  // Keep one pooled backend warm for the life of the server.
+  //
+  // `idle_timeout` closes idle backends, and reopening one costs ~1000x the
+  // query it carries (measured 2026-08-12 through the Docker port-forward:
+  // 0.15-2.14s to open vs 0.008-0.23s to query an open one, for an auth SELECT
+  // whose EXPLAIN ANALYZE is 0.069ms). Every client quiet longer than that
+  // budget pays it — including, by construction, every session doing
+  // first-contact tool registration, which is how `tools/list` outran a 60s
+  // MCP_TIMEOUT and left sessions with ZERO gbrain tools against a perfectly
+  // healthy backend.
+  //
+  // pglite is embedded and has no pool to keep warm, so this is postgres-only.
+  // Best-effort by contract: a failing probe is the very condition it exists
+  // for and must never surface as an unhandled rejection (see
+  // db.startPoolKeepalive). Opt out with GBRAIN_POOL_KEEPALIVE=0.
+  if (config.engine === 'postgres' && process.env.GBRAIN_POOL_KEEPALIVE !== '0') {
+    db.startPoolKeepalive(() => sql`SELECT 1`, {
+      onError: (err: unknown) => {
+        if (process.env.GBRAIN_POOL_KEEPALIVE_DEBUG === '1') {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[gbrain] pool keepalive probe failed: ${msg}`);
+        }
+      },
+    });
+  }
 
   app.listen(port, bind, () => {
     console.error(`
