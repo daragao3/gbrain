@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, chmodSync, existsSync } from 'fs';
 import { isAbsolute, join } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
+import { isPathInside } from './path-confine.ts';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 
 /**
@@ -1122,7 +1123,97 @@ export function isConfigTruthy(raw: unknown): boolean {
     && ['true', '1', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+/**
+ * Reason string when `config` would repoint the MACHINE-GLOBAL brain at a
+ * throwaway directory, or `null` when the write is safe.
+ *
+ * WHY THIS EXISTS. `configDir()` resolves the write target from `GBRAIN_HOME`,
+ * read fresh on every call and falling back to `homedir()`. That makes the
+ * sandbox ADVISORY: honoring it is the caller's job, and any caller that
+ * forgets silently rewrites the user's real `~/.gbrain/config.json`. The
+ * dangerous caller is `migrate-engine.ts`, which ends a successful migration
+ * with `saveConfig(newConfig)` — so a `migrate --to pglite --path <mkdtemp>`
+ * run without `GBRAIN_HOME` repoints the shared brain at a temp directory that
+ * is empty (and, once the temp dir is reaped, gone).
+ *
+ * The failure is silent and reads as data loss: every subsequent `gbrain`
+ * read resolves against the empty brain and returns `page_not_found` /
+ * "No timeline entries." with no error and no warning — indistinguishable
+ * from a genuinely deleted page. An agent can conclude a page is gone and
+ * recreate it, forking the subject. Meanwhile the MCP server (which holds its
+ * own connection) stays healthy, so nothing else looks wrong.
+ *
+ * Deliberately NARROW — a tripwire, not a policy:
+ *   - a sandboxed write (`GBRAIN_HOME` set) is always allowed, including to a
+ *     temp target, because that is the correct hermetic shape;
+ *   - migrating the real brain to a PGLite file in a DURABLE location is a
+ *     legitimate configuration and is left alone;
+ *   - only "machine-global config + brain inside the OS temp dir" is refused.
+ *
+ * `GBRAIN_ALLOW_TEMP_BRAIN=1` opts out for the rare deliberate case.
+ */
+export function unsafeGlobalConfigWrite(config: GBrainConfig): string | null {
+  if (process.env.GBRAIN_ALLOW_TEMP_BRAIN === '1') return null;
+
+  // A sandboxed write never reaches the shared config — nothing to protect.
+  const override = process.env.GBRAIN_HOME;
+  if (override && override.trim()) return null;
+
+  const dbPath = config.database_path;
+  if (!dbPath) return null;
+
+  // Lexical containment via the shared helper. NEVER hand-roll this as
+  // `dbPath.startsWith(tmpdir() + '/')` — see `path-confine.ts` for why that
+  // spelling is invisible to POSIX-only CI and dead on Windows.
+  if (!isPathInside(dbPath, tmpdir())) return null;
+
+  return (
+    `refusing to repoint the machine-global brain at a temporary directory.\n` +
+    `  config: ${configPath()}\n` +
+    `  target: ${dbPath}\n` +
+    `  temp:   ${tmpdir()}\n` +
+    `This would make every later 'gbrain' read return page_not_found against an ` +
+    `empty brain, with no error. If this process is a test or a throwaway repro, ` +
+    `set GBRAIN_HOME=<tmpdir> so it writes its own config. If the repoint is ` +
+    `deliberate, set GBRAIN_ALLOW_TEMP_BRAIN=1.`
+  );
+}
+
+/**
+ * Append one JSONL row naming the process that attempted an unsafe write, so
+ * the offender is identified even if it swallows the thrown error. Best-effort:
+ * never throws, never blocks the refusal.
+ */
+function auditUnsafeConfigWrite(config: GBrainConfig, reason: string): void {
+  try {
+    const dir = process.env.GBRAIN_AUDIT_DIR || join(configDir(), 'audit');
+    mkdirSync(dir, { recursive: true });
+    const row = {
+      ts: new Date().toISOString(),
+      event: 'refused_global_config_repoint',
+      pid: process.pid,
+      ppid: typeof process.ppid === 'number' ? process.ppid : null,
+      argv: process.argv,
+      cwd: process.cwd(),
+      engine: config.engine,
+      database_path: config.database_path ?? null,
+      // The stack is the actual answer to "which code did this?" — it names
+      // the calling file:line even for an untracked script or a `bun -e` blob.
+      stack: new Error('unsafe config write').stack ?? null,
+      reason,
+    };
+    appendFileSync(join(dir, 'config-repoint-refused.jsonl'), JSON.stringify(row) + '\n');
+  } catch {
+    // Identification is a nice-to-have; the refusal itself is the guarantee.
+  }
+}
+
 export function saveConfig(config: GBrainConfig): void {
+  const unsafe = unsafeGlobalConfigWrite(config);
+  if (unsafe) {
+    auditUnsafeConfigWrite(config, unsafe);
+    throw new Error(`[gbrain] ${unsafe}`);
+  }
   mkdirSync(getConfigDir(), { recursive: true });
   writeFileSync(getConfigPath(), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   try {
