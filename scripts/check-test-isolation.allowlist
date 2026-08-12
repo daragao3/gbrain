@@ -68,5 +68,4 @@ test/storage-sync.test.ts
 test/subagent-audit.test.ts
 test/supervisor.test.ts
 test/sync-failures.test.ts
-test/sync-parallel.test.ts
 test/transcription.test.ts
