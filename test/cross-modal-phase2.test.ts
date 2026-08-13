@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   ImageLoadError,
   loadImageInput,
@@ -102,6 +103,39 @@ describe('loadImageInput — local path', () => {
     const err = await loadImageInput(join(tmpRoot, 'missing.png')).catch(e => e);
     expect(err).toBeInstanceOf(ImageLoadError);
     expect(err.code).toBe('NOT_FOUND');
+  });
+});
+
+describe('loadImageInput — file:// URI', () => {
+  test('loads a PNG through a file:// URI', async () => {
+    const path = join(tmpRoot, 'via-uri.png');
+    writeFileSync(path, PNG_BYTES);
+    const result = await loadImageInput(pathToFileURL(path).href);
+    expect(result.contentType).toBe('image/png');
+    expect(result.bytes.length).toBe(PNG_BYTES.length);
+  });
+
+  test('loads a PNG whose path contains percent-encoded characters', async () => {
+    // A space encodes to %20. The previous `input.slice(7)` decoder passed the
+    // escape through verbatim, so the open failed with NOT_FOUND — on POSIX as
+    // well as win32. This is the case that makes the reader fix observable in
+    // ubuntu-only CI.
+    const dir = join(tmpRoot, 'My Docs');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'a b.png');
+    writeFileSync(path, PNG_BYTES);
+    const uri = pathToFileURL(path).href;
+    expect(uri).toContain('%20');
+    const result = await loadImageInput(uri);
+    expect(result.contentType).toBe('image/png');
+  });
+
+  test('INVALID_URL on a malformed file:// URI', async () => {
+    // Two slashes + a bare drive/host is exactly what string concatenation
+    // used to emit on win32; it is not a resolvable file URL.
+    const err = await loadImageInput('file://C:relative\\x.png').catch(e => e);
+    expect(err).toBeInstanceOf(ImageLoadError);
+    expect(err.code).toBe('INVALID_URL');
   });
 });
 
