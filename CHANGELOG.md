@@ -2,6 +2,67 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.94.0] - 2026-08-13
+
+**Searching by an image stored under a folder name with a space in it now finds the file, and the file locations GBrain hands you are real URLs on Windows.**
+
+GBrain records where each piece of content came from, and it can hand you a link to a file it has stored. Both of those were built by gluing the text `file://` onto the front of a path. That is not how a file URL is written, and the shortcut broke in two separate ways.
+
+The first way affects every platform. A path is not a URL, so a space in a folder name has to be written as `%20`. Nothing was doing that conversion, and the code that read these values back removed the first seven characters instead of decoding them. Searching by an image kept under a name like `My Photos` reported that the file did not exist, on Linux and macOS just as much as on Windows.
+
+The second way affects Windows only. A path there looks like `C:\photos\chart.png`, so gluing produces `file://C:\photos\chart.png`. That names `C:` as a website host and leaves the separators as backslashes. Anything that then tried to parse it got a hostname where it expected a drive letter.
+
+Both jobs now go through the platform's own converters, which know the rules for each operating system.
+
+### How to use it
+
+Nothing changes about how you call it. The paths that used to fail now work:
+
+```bash
+gbrain search-by-image --image-path "/home/you/My Photos/chart.png"
+```
+
+A `file://` URI works too, including one that is already encoded:
+
+```bash
+gbrain search-by-image --image-path "file:///home/you/My%20Photos/chart.png"
+```
+
+### Numbers that matter
+
+| Input | Before | After |
+|---|---|---|
+| `/home/you/My Photos/a.png` on Linux | `file:///home/you/My Photos/a.png`, not a valid URL | `file:///home/you/My%20Photos/a.png` |
+| `C:\photos\a.png` on Windows | `file://C:\photos\a.png`, host reads as `C:` | `file:///C:/photos/a.png` |
+| Reading `file:///a/My%20Photos/x.png` | opened `/a/My%20Photos/x.png`, reported missing | opens `/a/My Photos/x.png` |
+| Ordinary path with no spaces on Linux | `file:///home/you/a.png` | unchanged |
+
+### Things to watch
+
+A `file://` URI that cannot be resolved now comes back as `INVALID_URL` with the underlying reason, instead of being reported as a missing file. The new message names the real problem.
+
+Recorded content locations written by earlier versions keep their old spelling. Nothing matches, joins, or deduplicates on that field, so there is no migration and no cleanup step. Ingestion has always deduplicated on content, not on the recorded location.
+
+On ordinary paths with no spaces, Linux and macOS output is byte for byte what it was before.
+
+### Itemized changes
+
+- `src/core/storage/local.ts`: `getUrl()` builds its result with `pathToFileURL()`. This is the value `gbrain files signed-url` prints.
+- `src/core/ingestion/sources/markdown-greenfield.ts`: the recorded `source_uri` for a walked file uses `pathToFileURL()`.
+- `src/commands/capture.ts`: the recorded `source_uri` for `gbrain capture --file` uses `pathToFileURL()`.
+- `src/core/search/image-loader.ts`: reads a `file://` input with `fileURLToPath()` rather than removing the first seven characters, and reports `INVALID_URL` with the underlying reason when the URI cannot be resolved.
+- `test/storage.test.ts`: the `getUrl` check now requires an empty URL host, no backslashes, and a round trip back to the exact path on disk. The previous check accepted the malformed form.
+- `test/cross-modal-phase2.test.ts`: three cases covering a `file://` URI, a percent encoded path, and a malformed URI.
+- `test/ingestion/markdown-greenfield.test.ts`: adds structural checks on the recorded location alongside the existing literal.
+
+## To take advantage of v0.42.94.0
+
+Nothing to do. If an image search under a path containing a space came back empty before, retry it:
+
+```bash
+gbrain search-by-image --image-path "/path/with a space/image.png"
+```
+
 ## [0.42.93.0] - 2026-08-12
 
 **The local test suite can now finish on Windows without someone sitting there killing processes.**
