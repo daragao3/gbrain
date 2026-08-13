@@ -67,9 +67,14 @@ async function plantInvalidIndex(indexName: string, createSQL: string): Promise<
 
 describeE2E('migration invalid-remnant recovery (#1178)', () => {
   beforeAll(async () => {
+    // 30s was unreachable: setupDB() TRUNCATEs `config` (dropping the `version`
+    // row), so the engine.initSchema() inside it replays the FULL migration
+    // chain — 121 migrations, measured at 60–140s on a developer box. A hook
+    // timeout does not cancel the in-flight work, so the old budget left the
+    // replay running underneath the first test.
     await setupDB();
     await runMigrationsUpTo(getEngine(), LATEST_VERSION);
-  }, 30_000);
+  }, 300_000);
 
   afterAll(async () => {
     await teardownDB();
@@ -86,7 +91,17 @@ describeE2E('migration invalid-remnant recovery (#1178)', () => {
     expect(v66?.handler).toBeDefined();
 
     // Pre-fix, this threw "DROP INDEX CONCURRENTLY cannot be executed from a function".
-    await expect(v66!.handler!(getEngine())).resolves.toBeUndefined();
+    //
+    // IRON RULE for this file: `await <promise>`, never
+    // `await expect(<promise>).resolves.…`. Under bun 1.3.11 the `.resolves`
+    // form can leave the awaited promise permanently pending when the promise
+    // runs `CREATE INDEX CONCURRENTLY` — the statement COMPLETES on the server
+    // (the backend goes `idle`) but the client-side promise never settles, so
+    // the test hangs until its timeout with no error. Proven A/B on one
+    // connection in one process: plain await 60ms ✓ / `.resolves` 30s hang ✗ /
+    // plain await again 90ms ✓. The plain-await form asserts exactly the same
+    // thing (a rejection propagates and fails the test).
+    expect(await v66!.handler!(getEngine())).toBeUndefined();
 
     expect(await isIndexValid('idx_chunks_embedding_null')).toBe(true);
   });

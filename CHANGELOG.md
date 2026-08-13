@@ -2,6 +2,139 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.94.0] - 2026-08-13
+
+**Searching by an image stored under a folder name with a space in it now finds the file, and the file locations GBrain hands you are real URLs on Windows.**
+
+GBrain records where each piece of content came from, and it can hand you a link to a file it has stored. Both of those were built by gluing the text `file://` onto the front of a path. That is not how a file URL is written, and the shortcut broke in two separate ways.
+
+The first way affects every platform. A path is not a URL, so a space in a folder name has to be written as `%20`. Nothing was doing that conversion, and the code that read these values back removed the first seven characters instead of decoding them. Searching by an image kept under a name like `My Photos` reported that the file did not exist, on Linux and macOS just as much as on Windows.
+
+The second way affects Windows only. A path there looks like `C:\photos\chart.png`, so gluing produces `file://C:\photos\chart.png`. That names `C:` as a website host and leaves the separators as backslashes. Anything that then tried to parse it got a hostname where it expected a drive letter.
+
+Both jobs now go through the platform's own converters, which know the rules for each operating system.
+
+### How to use it
+
+Nothing changes about how you call it. The paths that used to fail now work:
+
+```bash
+gbrain search-by-image --image-path "/home/you/My Photos/chart.png"
+```
+
+A `file://` URI works too, including one that is already encoded:
+
+```bash
+gbrain search-by-image --image-path "file:///home/you/My%20Photos/chart.png"
+```
+
+### Numbers that matter
+
+| Input | Before | After |
+|---|---|---|
+| `/home/you/My Photos/a.png` on Linux | `file:///home/you/My Photos/a.png`, not a valid URL | `file:///home/you/My%20Photos/a.png` |
+| `C:\photos\a.png` on Windows | `file://C:\photos\a.png`, host reads as `C:` | `file:///C:/photos/a.png` |
+| Reading `file:///a/My%20Photos/x.png` | opened `/a/My%20Photos/x.png`, reported missing | opens `/a/My Photos/x.png` |
+| Ordinary path with no spaces on Linux | `file:///home/you/a.png` | unchanged |
+
+### Things to watch
+
+A `file://` URI that cannot be resolved now comes back as `INVALID_URL` with the underlying reason, instead of being reported as a missing file. The new message names the real problem.
+
+Recorded content locations written by earlier versions keep their old spelling. Nothing matches, joins, or deduplicates on that field, so there is no migration and no cleanup step. Ingestion has always deduplicated on content, not on the recorded location.
+
+On ordinary paths with no spaces, Linux and macOS output is byte for byte what it was before.
+
+### Itemized changes
+
+- `src/core/storage/local.ts`: `getUrl()` builds its result with `pathToFileURL()`. This is the value `gbrain files signed-url` prints.
+- `src/core/ingestion/sources/markdown-greenfield.ts`: the recorded `source_uri` for a walked file uses `pathToFileURL()`.
+- `src/commands/capture.ts`: the recorded `source_uri` for `gbrain capture --file` uses `pathToFileURL()`.
+- `src/core/search/image-loader.ts`: reads a `file://` input with `fileURLToPath()` rather than removing the first seven characters, and reports `INVALID_URL` with the underlying reason when the URI cannot be resolved.
+- `test/storage.test.ts`: the `getUrl` check now requires an empty URL host, no backslashes, and a round trip back to the exact path on disk. The previous check accepted the malformed form.
+- `test/cross-modal-phase2.test.ts`: three cases covering a `file://` URI, a percent encoded path, and a malformed URI.
+- `test/ingestion/markdown-greenfield.test.ts`: adds structural checks on the recorded location alongside the existing literal.
+
+## To take advantage of v0.42.94.0
+
+Nothing to do. If an image search under a path containing a space came back empty before, retry it:
+
+```bash
+gbrain search-by-image --image-path "/path/with a space/image.png"
+```
+
+## [0.42.93.0] - 2026-08-12
+
+**The local test suite can now finish on Windows without someone sitting there killing processes.**
+
+Running the full unit suite on Windows used to end one of two ways. Either a batch of tests announced that its pass and fail counts were lost, or a whole shard was declared wedged. Both read like a test had hung, so the usual rescue was to find the right process by hand and kill it. Neither diagnosis was true. The runner was cutting healthy work short and then reporting it as a hang.
+
+The cause is that the runner's limits were fixed numbers chosen on a fast machine. On Windows, a single test file that starts a local database spends about 65 seconds building it before it checks anything, and the limits assumed roughly six seconds per file. Ten files had been written down as hanging or spinning forever. Measured one at a time on an idle machine, none of them hangs. They take 19 to 389 seconds and all of them finish.
+
+Every limit is now worked out from the thing it bounds. The per shard time budget is built from how many files that shard actually owns, for any number of shards rather than only the single shard Windows picks by default. The per batch budget is built from how many files are in the batch, so asking for bigger batches gives them proportionally more time. The no output watchdog is sized against the batch budget, because the test reporter prints nothing at all until it exits, so a healthy batch of quiet tests looks identical to a dead one.
+
+Four test files also had real problems that the old limits were hiding, including one that gave up on a subprocess while it was still running and left it burning CPU against everything else in the shard.
+
+### How to use it
+
+Nothing changes about how you run the suite:
+
+```bash
+bash scripts/run-unit-parallel.sh --shards 4
+```
+
+The banner now shows how each limit was derived, so a killed shard is actionable instead of mysterious:
+
+```
+[unit-parallel] N=4 shards | --max-concurrency=4 | timeout=8250s (275 files/shard × 30s) | stall=2700s
+```
+
+If a batch does get cut off, the message names every file in it.
+
+Three environment variables tune the budgets when your machine is slower or faster:
+
+```bash
+GBRAIN_TEST_SECONDS_PER_FILE=45 bash scripts/run-unit-parallel.sh --shards 4
+GBRAIN_TEST_CHUNK_SECONDS_PER_FILE=900 bash scripts/run-unit-parallel.sh
+GBRAIN_TEST_SHARD_STALL_SECONDS=3600 bash scripts/run-unit-parallel.sh
+```
+
+### Numbers that matter
+
+| Limit | Before | After |
+|---|---|---|
+| Per shard budget at `--shards 4` | 1500s flat, 5.5s per file | 8250s, 275 files per shard at 30s |
+| Per batch budget, 4 file batch | 300s flat, 75s per file | 2400s, 4 files at 600s |
+| No output watchdog on Windows | 600s | batch budget plus 300s |
+| `test/chunk-grain-fts.test.ts` | 192s | 40s, same 11 checks |
+| Slowest single unit file measured | `test/sync-monorepo.test.ts`, 389s | unchanged, now inside its budget |
+
+### Things to watch
+
+The budgets are deliberately generous, because a limit that is too low makes the suite unusable while one that is too high only delays the report of a real hang. If you want a genuine hang surfaced faster, lower the no output watchdog rather than the time budgets.
+
+A batch cut short still loses its pass and fail counts. That is unchanged, and it is why the message lists the files.
+
+### Itemized changes
+
+- `scripts/run-unit-parallel.sh`: derives the per shard wallclock cap on Windows for every shard count instead of only the defaulted one, using ceiling division over the discovered file count; adds `GBRAIN_TEST_SECONDS_PER_FILE`; sizes the stall window from the shard runner's own effective batch cap; removes a variable that no longer had a reader.
+- `scripts/run-unit-shard.sh`: derives the batch cap from the effective batch size rather than the default one; adds `GBRAIN_TEST_CHUNK_SECONDS_PER_FILE` and a `--print-chunk-cap` flag that answers without listing the test tree; drops `--preserve-status` from the `timeout` call, which had been reporting a cut off batch as 143 or 137 where the reporting code only recognized 124 and 137; accepts 143 in that reporting code as well; accepts a handed down platform so the extra query costs no runtime startup.
+- `test/scripts/run-unit-shard.test.ts`: asserts the batch cap tracks the batch size rather than pinning a constant, and adds two cases covering the derived cap and `--print-chunk-cap`.
+- `test/timeout.test.ts`: bounds the clear on settle check at half the deadline instead of at 200ms, which was measuring machine speed and returned 477ms on a loaded box.
+- `test/cli-dispatch-thin-client.test.ts`: gives the two cases that seed a local database config a budget that covers the subprocess's cold setup, so the test stops abandoning a live child process.
+- `test/chunk-grain-fts.test.ts`: one shared engine plus a data reset per section instead of three separate engines.
+- `test/sync-parallel.test.ts`: one shared engine plus a data reset per test instead of one engine per test, and comes off `scripts/check-test-isolation.allowlist`.
+- `docs/TESTING.md`: documents the derivations, the new variables, and why the reporter's silence forced the watchdog change.
+
+## To take advantage of v0.42.93.0
+
+Nothing to do. The new defaults apply the next time you run the suite. If you had pinned `GBRAIN_TEST_SHARD_TIMEOUT` to a large number to work around the false wedge reports, you can unset it and let the derived value take over:
+
+```bash
+unset GBRAIN_TEST_SHARD_TIMEOUT
+bash scripts/run-unit-parallel.sh --shards 4
+```
+
 ## [0.42.92.0] - 2026-08-12
 
 **Ten database upgrade steps could not recover from a half-built index, and they failed at exactly the moment they were written to help.**

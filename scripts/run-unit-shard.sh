@@ -20,14 +20,70 @@ cd "$(dirname "$0")/.."
 # run-unit-parallel.sh; safe to call without (defaults to bun's default cap).
 MAX_CONC=""
 DRY_RUN=0
+PRINT_CHUNK_CAP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-concurrency) MAX_CONC="$2"; shift 2 ;;
     --max-concurrency=*) MAX_CONC="${1#*=}"; shift ;;
     --dry-run-list) DRY_RUN=1; shift ;;
+    --print-chunk-cap) PRINT_CHUNK_CAP=1; shift ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Resolve the chunk size + per-chunk wallclock cap. Defined here (rather than
+# inline at the call site) so `--print-chunk-cap` can answer without globbing
+# the test tree: run-unit-parallel.sh asks THIS script for the effective cap
+# so the two bounds it owns can be sized against it, instead of duplicating
+# the constants and letting them drift.
+#
+# The cap is derived from the chunk SIZE, never fixed. It was a flat 300s for
+# a 4-file chunk — a 75s-per-file budget. On Windows a single unit file that
+# constructs one PGLite engine pays ~65s of cold initSchema() replay before
+# its first assertion, and test/sync-monorepo.test.ts measures 389s alone on
+# an idle box. So the flat cap killed healthy chunks: every chunk containing
+# that file lost the pass/fail totals for all four of its files, every run,
+# which reads exactly like the hang the cap exists to catch. 600s/file keeps
+# a real hang bounded while clearing the slowest measured file with headroom
+# for a loaded box. Override with GBRAIN_TEST_CHUNK_TIMEOUT.
+compute_chunk_bounds() {
+  default_chunk=0
+  is_windows_bun=0
+  windows_chunk_seconds_per_file="${GBRAIN_TEST_CHUNK_SECONDS_PER_FILE:-600}"
+  # run-unit-parallel.sh hands this down (it already ran the probe), so the
+  # extra --print-chunk-cap call it makes costs a bash spawn and not a Bun
+  # startup. Unset — a direct invocation — falls back to probing.
+  bun_platform="${GBRAIN_TEST_BUN_PLATFORM:-}"
+  [ -n "$bun_platform" ] || \
+    bun_platform=$(bun -e 'process.stdout.write(process.platform)' 2>/dev/null || true)
+  case "$bun_platform:$(uname -s 2>/dev/null)" in
+    win32:*|*:MINGW*|*:MSYS*|*:CYGWIN*) default_chunk=4; is_windows_bun=1 ;;
+  esac
+  CHUNK="${GBRAIN_TEST_CHUNK_SIZE:-$default_chunk}"
+  if ! printf '%s' "$CHUNK" | grep -qE '^[0-9]{1,9}$'; then
+    echo "ERROR: invalid GBRAIN_TEST_CHUNK_SIZE: $CHUNK" >&2; exit 2
+  fi
+  if ! printf '%s' "$windows_chunk_seconds_per_file" | grep -qE '^[0-9]{1,9}$'; then
+    echo "ERROR: invalid GBRAIN_TEST_CHUNK_SECONDS_PER_FILE: $windows_chunk_seconds_per_file" >&2; exit 2
+  fi
+  # Derive from the EFFECTIVE chunk size, not the default one: raising
+  # GBRAIN_TEST_CHUNK_SIZE without also raising the cap is what turns the cap
+  # into a guaranteed kill.
+  default_chunk_timeout=0
+  if [ "$is_windows_bun" = "1" ]; then
+    default_chunk_timeout=$((CHUNK * windows_chunk_seconds_per_file))
+  fi
+  CHUNK_TIMEOUT="${GBRAIN_TEST_CHUNK_TIMEOUT:-$default_chunk_timeout}"
+  if ! printf '%s' "$CHUNK_TIMEOUT" | grep -qE '^[0-9]{1,9}$'; then
+    echo "ERROR: invalid GBRAIN_TEST_CHUNK_TIMEOUT: $CHUNK_TIMEOUT" >&2; exit 2
+  fi
+}
+
+if [ "$PRINT_CHUNK_CAP" = "1" ]; then
+  compute_chunk_bounds
+  printf '%s\n' "$CHUNK_TIMEOUT"
+  exit 0
+fi
 
 # All non-E2E test files, sorted for deterministic shard splits.
 # Tier 4: *.slow.test.ts is "always-slow" (cold-path correctness checks);
@@ -106,20 +162,17 @@ echo "[unit-shard ${SHARD:-(unsharded)}] running ${#files[@]} files"
 # Windows Bun. Detect the runtime, not the shell: WSL bash reports Linux even
 # when `bun run` is executing bun.exe, which would otherwise disable chunking.
 # Override with GBRAIN_TEST_CHUNK_SIZE=N (0 disables).
-default_chunk=0
-default_chunk_timeout=0
-bun_platform=$(bun -e 'process.stdout.write(process.platform)' 2>/dev/null || true)
-case "$bun_platform:$(uname -s 2>/dev/null)" in
-  win32:*|*:MINGW*|*:MSYS*|*:CYGWIN*) default_chunk=4; default_chunk_timeout=300 ;;
-esac
-CHUNK="${GBRAIN_TEST_CHUNK_SIZE:-$default_chunk}"
-CHUNK_TIMEOUT="${GBRAIN_TEST_CHUNK_TIMEOUT:-$default_chunk_timeout}"
-if ! printf '%s' "$CHUNK" | grep -qE '^[0-9]{1,9}$'; then
-  echo "ERROR: invalid GBRAIN_TEST_CHUNK_SIZE: $CHUNK" >&2; exit 2
-fi
-if ! printf '%s' "$CHUNK_TIMEOUT" | grep -qE '^[0-9]{1,9}$'; then
-  echo "ERROR: invalid GBRAIN_TEST_CHUNK_TIMEOUT: $CHUNK_TIMEOUT" >&2; exit 2
-fi
+#
+# The chunk CAP is derived from the chunk SIZE, never fixed. It was a flat
+# 300s for a 4-file chunk — a 75s-per-file budget. On Windows a single unit
+# file that constructs one PGLite engine pays ~65s of cold initSchema()
+# replay before its first assertion, and test/sync-monorepo.test.ts measures
+# 389s alone on an idle box. So the flat cap killed healthy chunks: every
+# chunk containing that file lost the pass/fail totals for all four of its
+# files, every run, which reads exactly like the hang it was meant to catch.
+# 600s/file keeps a real hang bounded while clearing the slowest measured
+# file with headroom for a loaded box. Override with GBRAIN_TEST_CHUNK_TIMEOUT.
+compute_chunk_bounds
 
 TIMEOUT_BIN=""
 if [ "$CHUNK_TIMEOUT" -gt 0 ]; then
@@ -138,7 +191,18 @@ run_bun() {
     # GNU timeout first sends TERM, then force-kills the exact child command
     # after a bounded grace. Without --kill-after, a TERM-resistant Bun/native
     # descendant can outlive the advertised chunk cap indefinitely.
-    "$TIMEOUT_BIN" --preserve-status --kill-after=5s "${CHUNK_TIMEOUT}s" bun "${bun_args[@]}" "$@"
+    #
+    # NOT --preserve-status. That flag makes timeout exit with the *command's*
+    # status instead of 124, so a capped chunk surfaced as 143 (bun died on
+    # TERM — the spinning case) or 137 (bun needed the KILL — the blocked
+    # case). report_chunk_failure below keys on 124/137, so the 143 shape
+    # scored as an anonymous non-zero rc: the shard failed with no
+    # "CHUNK N STALLED" line naming the files that ate the cap. Measured on
+    # Windows Bun 1.3.11 against a synthetic spinner and a synthetic blocked
+    # await: with the flag 143/137, without it 124 for both. Dropping it
+    # loses nothing — timeout still passes a non-timed-out command's own
+    # status through, so the rc=127 WASM-crash signal below still arrives.
+    "$TIMEOUT_BIN" --kill-after=5s "${CHUNK_TIMEOUT}s" bun "${bun_args[@]}" "$@"
   else
     bun "${bun_args[@]}" "$@"
   fi
@@ -153,8 +217,12 @@ report_chunk_failure() {
   elif [ "$rc" -eq 124 ]; then
     echo "[unit-shard ${SHARD:-(unsharded)}] CHUNK $chunk_no STALLED after ${CHUNK_TIMEOUT}s (rc=124, totals lost) files:" >&2
     printf '    %s\n' "$@" >&2
-  elif [ "$rc" -eq 137 ]; then
-    echo "[unit-shard ${SHARD:-(unsharded)}] CHUNK $chunk_no FORCE-KILLED after ${CHUNK_TIMEOUT}s + 5s grace (rc=137, totals lost) files:" >&2
+  elif [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; then
+    # 137 = KILL, 143 = TERM. Both mean the chunk was stopped at the cap
+    # rather than finishing. 143 is unreachable with the timeout invocation
+    # above, but stays handled so a future --preserve-status (or a TERM from
+    # the outer shard watchdog) can never go back to reporting anonymously.
+    echo "[unit-shard ${SHARD:-(unsharded)}] CHUNK $chunk_no FORCE-KILLED after ${CHUNK_TIMEOUT}s + 5s grace (rc=$rc, totals lost) files:" >&2
     printf '    %s\n' "$@" >&2
   fi
 }

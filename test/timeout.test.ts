@@ -47,7 +47,12 @@ describe('withTimeout', () => {
     const result = await withTimeout(sleep(40).then(() => 'ok'), 2000, 'short-with-long-deadline');
     expect(result).toBe('ok');
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(200); // far less than 2000ms deadline
+    // Bound at half the deadline, not at "sleep(40) plus a little". What this
+    // assertion can actually distinguish is settle-on-resolve (~40ms) from
+    // waiting out the 2000ms deadline; anything under 1000ms proves the
+    // former. The old 200ms bound was measuring host speed instead, and a
+    // contended Windows box returned 477ms — a red test with nothing wrong.
+    expect(elapsed).toBeLessThan(1000);
   });
 
   test('Infinity deadline passes through unchanged', async () => {

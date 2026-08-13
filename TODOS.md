@@ -1,5 +1,61 @@
 # TODOS
 
+## v0.42.94.0 follow-ups (file URL normalization)
+
+- [ ] **P1 — CLAUDE.md is 77 bytes under its hard cap.** Follow-up from v0.42.94.0.
+  `scripts/check-key-files-current-state.sh` gate 2 fails when CLAUDE.md exceeds
+  `GBRAIN_CLAUDE_MD_MAX_BYTES` (default 60000). It currently measures 59923, so the
+  next person who adds a single sentence to it breaks CI, and the failure will look
+  unrelated to whatever they were shipping. This release wanted one clause on the
+  file-URL construction rule and could not take it; the detail went to
+  `docs/architecture/KEY_FILES.md` instead, which is the routing the guard's own
+  failure message recommends. Two honest options: compress an existing section (the
+  Search Mode and Pace Mode tables are the largest blocks that duplicate content
+  already living under `docs/`), or raise the cap deliberately with a note saying
+  why. Raising it silently to make room for one edit is the failure mode the gate
+  exists to prevent, so this wants a decision rather than a drive-by bump.
+- [ ] **P3 — the `markdown-greenfield` `source_uri` assertions never run on
+  win32.** Follow-up from v0.42.94.0. `test/ingestion/markdown-greenfield.test.ts`
+  gained structural checks on the recorded location, but the test carrying them is
+  one of 11 in that file already failing on Windows for an unrelated reason: the
+  fixture uses a synthetic POSIX repo root (`/fake/brain`) and the walk builds
+  native paths from it. The assertions gate in ubuntu CI only. Fixing the fixture is
+  the same POSIX-path-assertion class tracked elsewhere and is worth doing as one
+  pass over the whole file rather than for this one case.
+
+## v0.42.93.0 follow-ups (Windows test-runner cap derivation)
+
+- [ ] **P1 — wire the PGLite snapshot into the local unit loop.** Follow-up from
+  v0.42.93.0. `scripts/ci-local.sh` is still the only thing that sets
+  `GBRAIN_PGLITE_SNAPSHOT`; `bun run test` → `run-unit-parallel.sh` →
+  `run-unit-shard.sh` never does, so every PGLite-using unit file replays the whole
+  migration chain. Measured on Windows that is about 65 seconds per engine
+  construction, which is what made v0.42.93.0's caps necessary in the first place:
+  the suite is roughly 1100 files and a large share of them build an engine. A
+  `bunfig.toml` `[test] preload` that sets the variable only when both fixture files
+  exist is the lever (precedent: `test/helpers/audit-dir-preload.ts`), and it was
+  already prototyped once. The catch is that the snapshot restores a fully-migrated
+  directory, so genuinely cold-path files need an opt-out and several of them have
+  per-test budgets sized for a cold init. Wants its own pass, not a flag flip.
+- [ ] **P2 — `test/scripts/run-unit-parallel.test.ts` cannot gate anything on
+  Windows.** Follow-up from v0.42.93.0. Identical unmodified code measured 0 fails
+  in 362s and 4 fails in 611s within one session on the same box. The failures are
+  its own wallclock-helper and process-tree termination cases, and one run logged
+  `taskkill.exe ... Segmentation fault` from `kill_process_tree`. So the file is
+  reporting a real Windows weakness in the termination path rather than pure noise,
+  but it reports it non-deterministically, which makes it useless as a local gate
+  and a trap for anyone attributing a red run to their own change. Either make the
+  termination path deterministic on Windows or move the affected cases behind an
+  `it.skipIf(process.platform === 'win32')` with the reason recorded. Until then a
+  paired A/B is the only honest way to read that file locally.
+- [ ] **P3 — `test/sync-monorepo.test.ts` is the slowest unit-loop resident at
+  389s.** Follow-up from v0.42.93.0. It already uses the canonical single-engine
+  block, so the remaining cost is 12 tests each running five `git` subprocesses in
+  `beforeEach` plus a `performSync`. Either seed one repository per describe and
+  reset it, or accept the cost and move the file to `*.slow.test.ts`. It sets the
+  floor for the per-chunk budget, so shrinking it is what would let that budget come
+  back down.
+
 ## v0.42.91.0 follow-ups (push remote resolved from config)
 
 - [ ] **P2 — fetch paths still name `origin`, so a fork-shaped brain repo pulls the
