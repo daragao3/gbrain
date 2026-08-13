@@ -893,7 +893,8 @@ import {
   chmodSync,
   appendFileSync as fsAppendFileSync,
 } from 'node:fs';
-import { resolve as pathResolve, dirname as pathDirname } from 'node:path';
+import { resolve as pathResolve, dirname as pathDirname, isAbsolute } from 'node:path';
+import { isPathWithin } from '../core/path-confine.ts';
 
 interface ManifestFileEntry {
   src: string;
@@ -940,7 +941,7 @@ function sha256OfFile(path: string): string {
  *   - Paths that escape via symlink (resolved real path leaves target root)
  */
 function validateManifestTarget(target: string): string | null {
-  if (target.startsWith('/')) return `absolute path not allowed: ${target}`;
+  if (isAbsolute(target)) return `absolute path not allowed: ${target}`;
   if (target.includes('..')) return `parent-dir escape not allowed: ${target}`;
   if (target.includes('\0')) return `null byte in path: ${target}`;
   return null;
@@ -980,7 +981,7 @@ function validateTargetRepo(
   } catch {
     // ignore — non-fatal
   }
-  if (gbrainRoot && (resolvedTarget === gbrainRoot || gbrainRoot.startsWith(resolvedTarget + '/'))) {
+  if (gbrainRoot && isPathWithin(gbrainRoot, resolvedTarget)) {
     return `refusing to install into gbrain itself (or a parent dir): ${resolvedTarget}`;
   }
 

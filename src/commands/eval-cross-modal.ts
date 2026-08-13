@@ -17,7 +17,7 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { createHash } from 'crypto';
 
@@ -792,7 +792,7 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
     // Ensure receipts dir exists (the inline ad-hoc default path bypasses
     // the per-cycle runEval mkdir).
     try {
-      const summaryDir = summaryPath.substring(0, summaryPath.lastIndexOf('/'));
+      const summaryDir = dirname(summaryPath);
       if (summaryDir && !existsSync(summaryDir)) {
         mkdirSync(summaryDir, { recursive: true });
       }

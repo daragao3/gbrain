@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'fs';
-import { join } from 'path';
+import { join, relative, isAbsolute } from 'path';
 import { tmpdir } from 'os';
 import {
   autoFixFrontmatter,
@@ -174,7 +174,10 @@ describe('writeBrainPage', () => {
       expect(backupPath).toBeDefined();
       // Centralized — under the test-injected backupRoot, NOT a sibling .bak.
       expect(existsSync(file + '.bak')).toBe(false);
-      expect(backupPath!.startsWith(backupRoot + '/')).toBe(true);
+      const relToBackupRoot = relative(backupRoot, backupPath!);
+      expect(relToBackupRoot).not.toBe('');
+      expect(relToBackupRoot.startsWith('..')).toBe(false);
+      expect(isAbsolute(relToBackupRoot)).toBe(false);
       expect(backupPath!.endsWith('.bak')).toBe(true);
       expect(existsSync(backupPath!)).toBe(true);
       expect(readFileSync(backupPath!, 'utf8')).toBe(original);

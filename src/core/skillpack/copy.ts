@@ -16,6 +16,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { dirname, join, relative } from 'path';
+import { isPathWithin } from '../path-confine.ts';
 
 export interface CopyItem {
   /** Absolute source path. */
@@ -151,10 +152,11 @@ export function copyArtifacts(items: CopyItem[], opts: CopyArtifactsOpts = {}): 
     }
     if (confineRoot) {
       const real = realpathSync(item.source);
-      // realpathSync returns paths without trailing slash; add path
-      // separator to the prefix check so /a/b doesn't match /a/bb.
-      const prefix = confineRoot.endsWith('/') ? confineRoot : confineRoot + '/';
-      if (real !== confineRoot && !real.startsWith(prefix)) {
+      // Separator-aware containment: /a/b must not match /a/bb, and the check
+      // has to work on Windows, where `realpathSync` returns a '\'-separated
+      // path that a '/'-terminated prefix could never match (which rejected
+      // every source and left `gbrain skillpack harvest` dead on win32).
+      if (!isPathWithin(real, confineRoot)) {
         throw new CopyError(
           `${item.source}: path traversal rejected. Source canonicalizes outside the confinement root (${confineRoot}).`,
           'path_traversal',

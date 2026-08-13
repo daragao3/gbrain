@@ -30,6 +30,7 @@ import { reflexEnabled } from '../core/context/reflex.ts';
 import { resolveSocketPath } from '../core/context/resolve-ipc.ts';
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { isPathWithin } from '../core/path-confine.ts';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import {
@@ -5060,7 +5061,12 @@ export async function buildChecks(
     const gbrainHome = gbrainPath();
     const home = process.env.HOME || '';
     let worktreeRoot: string | null = null;
-    if (gbrainHome && home && gbrainHome.startsWith(home + '/')) {
+    // Strictly INSIDE $HOME — equality would make the walk-up below meaningless.
+    if (
+      gbrainHome && home &&
+      isPathWithin(gbrainHome, home) &&
+      resolvePath(gbrainHome) !== resolvePath(home)
+    ) {
       // Walk up from gbrainHome's parent toward $HOME, stopping at $HOME.
       // We don't check gbrainHome itself: a `.git` directly inside ~/.gbrain
       // isn't a containing-worktree, it would be a brain repo cloned there.

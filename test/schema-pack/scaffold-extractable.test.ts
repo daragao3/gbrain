@@ -11,6 +11,7 @@
 // "Privacy rule: scrub real names from public docs" rule.
 
 import { describe, expect, test } from 'bun:test';
+import { isAbsolute } from 'path';
 import {
   buildPromptTemplate,
   buildFixtureCorpus,
@@ -142,10 +143,10 @@ describe('buildExtractableSpec', () => {
   test('paths use relative path-within-pack-root shape (D-EXTRACT-21 compliant)', () => {
     const spec = buildExtractableSpec({ typeName: 'evt' });
     // Must NOT be absolute, must NOT contain '..', must NOT have null bytes
-    expect(spec.prompt_template!.startsWith('/')).toBe(false);
+    expect(isAbsolute(spec.prompt_template!)).toBe(false);
     expect(spec.prompt_template).not.toContain('..');
     expect(spec.prompt_template).not.toContain('\0');
-    expect(spec.fixture_corpus!.startsWith('/')).toBe(false);
+    expect(isAbsolute(spec.fixture_corpus!)).toBe(false);
     expect(spec.fixture_corpus).not.toContain('..');
     expect(spec.fixture_corpus).not.toContain('\0');
   });

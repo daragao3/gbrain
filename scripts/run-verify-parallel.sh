@@ -43,6 +43,7 @@ CHECKS=(
   "check:source-config-leak"
   "check:progress"
   "check:url-pathname"
+  "check:posix-path-sep"
   "check:test-isolation"
   "check:wasm"
   "check:admin-build"

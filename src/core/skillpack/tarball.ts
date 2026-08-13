@@ -30,7 +30,7 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import { join, normalize, relative, resolve, sep } from 'path';
+import { isAbsolute, join, normalize, relative, resolve, sep } from 'path';
 import { tmpdir } from 'os';
 
 export interface TarballPackOptions {
@@ -327,7 +327,7 @@ export function extractTarball(opts: TarballExtractOptions): TarballExtractResul
 
     // Path traversal check: resolve relative to destDir, ensure result is contained.
     const normalized = normalize(entryPath);
-    if (normalized.startsWith('..' + sep) || normalized === '..' || normalized.startsWith('/')) {
+    if (normalized.startsWith('..' + sep) || normalized === '..' || isAbsolute(normalized)) {
       throw new TarballError(
         `tarball entry escapes destination: ${entryPath}`,
         'extract_path_traversal',

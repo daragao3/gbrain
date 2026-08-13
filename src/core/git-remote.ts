@@ -16,7 +16,7 @@
  */
 import { execFileSync } from 'child_process';
 import { lstatSync, existsSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 import { isInternalUrl } from './url-safety.ts';
 
 /**
@@ -461,7 +461,7 @@ function rebaseInProgress(repoPath: string): boolean {
       const p = execFileSync('git', ['-C', repoPath, 'rev-parse', '--git-path', name], {
         stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, env: { ...process.env, ...GIT_ENV },
       }).toString().trim();
-      const abs = p.startsWith('/') ? p : join(repoPath, p);
+      const abs = isAbsolute(p) ? p : join(repoPath, p);
       if (existsSync(abs)) return true;
     } catch { /* ignore */ }
   }

@@ -38,14 +38,19 @@ afterEach(() => {
   }
 });
 
-function scratchHost(opts: { withPairedSource?: boolean; contaminated?: boolean } = {}): string {
+function scratchHost(opts: {
+  withPairedSource?: boolean;
+  pairedSource?: string;
+  contaminated?: boolean;
+} = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'sp-h-host-'));
   created.push(root);
   mkdirSync(join(root, 'src', 'commands'), { recursive: true });
   mkdirSync(join(root, 'skills', 'my-fork-skill'), { recursive: true });
 
+  const pairedSource = opts.pairedSource ?? 'src/commands/my-fork-skill.ts';
   const fm = opts.withPairedSource
-    ? '---\nname: my-fork-skill\ntriggers:\n  - trigger\nsources:\n  - src/commands/my-fork-skill.ts\n---\n'
+    ? `---\nname: my-fork-skill\ntriggers:\n  - trigger\nsources:\n  - ${pairedSource}\n---\n`
     : '---\nname: my-fork-skill\ntriggers:\n  - trigger\n---\n';
   const body = opts.contaminated
     ? '# my-fork-skill\n\nThis was lifted from Wintermute.\n'
@@ -53,8 +58,10 @@ function scratchHost(opts: { withPairedSource?: boolean; contaminated?: boolean 
   writeFileSync(join(root, 'skills', 'my-fork-skill', 'SKILL.md'), fm + body);
 
   if (opts.withPairedSource) {
+    const pairedPath = join(root, pairedSource);
+    mkdirSync(join(pairedPath, '..'), { recursive: true });
     writeFileSync(
-      join(root, 'src', 'commands', 'my-fork-skill.ts'),
+      pairedPath,
       '// real impl\nexport function run() { return 1; }\n',
     );
   }
@@ -124,6 +131,23 @@ describe('runHarvest — happy path', () => {
 
     expect(result.pairedSources).toEqual(['src/commands/my-fork-skill.ts']);
     expect(existsSync(join(gbrainRoot, 'src', 'commands', 'my-fork-skill.ts'))).toBe(true);
+  });
+
+  it('keeps a prefix-sharing sibling paired source outside skill confinement', () => {
+    const pairedSource = 'skills/my-fork-skill-paired/impl.ts';
+    const hostRoot = scratchHost({ withPairedSource: true, pairedSource });
+    const gbrainRoot = scratchGbrain();
+
+    const result = runHarvest({
+      slug: 'my-fork-skill',
+      hostRepoRoot: hostRoot,
+      gbrainRoot,
+      noLint: true,
+    });
+
+    expect(result.status).toBe('harvested');
+    expect(result.pairedSources).toEqual([pairedSource]);
+    expect(existsSync(join(gbrainRoot, pairedSource))).toBe(true);
   });
 });
 

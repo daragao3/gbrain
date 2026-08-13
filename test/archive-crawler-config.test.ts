@@ -9,7 +9,7 @@
  *   - empty scan_paths -> empty_scan_paths
  *   - relative path -> invalid_path
  *   - path traversal (..) -> invalid_path
- *   - valid config -> normalized absolute trailing-slashed paths
+ *   - valid config -> normalized native absolute paths
  *   - ~ expansion
  *   - deny_paths optional
  *   - isPathAllowed: prefix match + deny override + prefix boundary
@@ -17,7 +17,7 @@
 
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { homedir, tmpdir } from 'os';
 import {
   loadArchiveCrawlerConfig,
@@ -132,7 +132,7 @@ describe('loadArchiveCrawlerConfig — D12 invalid_path', () => {
 });
 
 describe('loadArchiveCrawlerConfig — happy path', () => {
-  it('returns normalized absolute paths with trailing slash', () => {
+  it('returns normalized native absolute paths', () => {
     writeYaml(`archive-crawler:
   scan_paths:
     - /home/user/writing
@@ -140,8 +140,8 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
 `);
     const config = loadArchiveCrawlerConfig(workdir);
     expect(config.scan_paths).toEqual([
-      '/home/user/writing/',
-      '/mnt/backup/old-letters/',
+      resolve('/home/user/writing'),
+      resolve('/mnt/backup/old-letters/'),
     ]);
     expect(config.deny_paths).toEqual([]);
   });
@@ -150,7 +150,7 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
     const home = homedir();
     writeYaml('archive-crawler:\n  scan_paths:\n    - ~/Documents/writing\n');
     const config = loadArchiveCrawlerConfig(workdir);
-    expect(config.scan_paths[0]).toBe(`${home}/Documents/writing/`);
+    expect(config.scan_paths[0]).toBe(resolve(home, 'Documents', 'writing'));
   });
 
   it('accepts deny_paths alongside scan_paths', () => {
@@ -163,15 +163,15 @@ describe('loadArchiveCrawlerConfig — happy path', () => {
 `);
     const config = loadArchiveCrawlerConfig(workdir);
     expect(config.deny_paths).toEqual([
-      '/home/user/Documents/finances/',
-      '/home/user/Documents/medical/',
+      resolve('/home/user/Documents/finances/'),
+      resolve('/home/user/Documents/medical/'),
     ]);
   });
 
   it('accepts both archive-crawler and archive_crawler key spellings', () => {
     writeYaml('archive_crawler:\n  scan_paths:\n    - /home/user/notes\n');
     const config = loadArchiveCrawlerConfig(workdir);
-    expect(config.scan_paths[0]).toBe('/home/user/notes/');
+    expect(config.scan_paths[0]).toBe(resolve('/home/user/notes'));
   });
 });
 
@@ -182,40 +182,41 @@ describe('normalizeAndValidateArchiveCrawlerConfig — direct API', () => {
     );
   });
 
-  it('returns trailing-slashed normalized paths', () => {
+  it('returns normalized native paths without a trailing separator', () => {
     const out = normalizeAndValidateArchiveCrawlerConfig({
       scan_paths: ['/a/b', '/c/d/'],
     });
-    expect(out.scan_paths).toEqual(['/a/b/', '/c/d/']);
+    expect(out.scan_paths).toEqual([resolve('/a/b'), resolve('/c/d/')]);
   });
 });
 
 describe('isPathAllowed', () => {
+  const writing = resolve('/home/user/writing');
+  const dropbox = resolve('/home/user/Dropbox');
+  const finances = resolve('/home/user/Dropbox/finances');
   const config = {
-    scan_paths: ['/home/user/writing/', '/home/user/Dropbox/'],
-    deny_paths: ['/home/user/Dropbox/finances/'],
+    scan_paths: [writing, dropbox],
+    deny_paths: [finances],
   };
 
   it('returns true for a path inside a scan_path', () => {
-    expect(isPathAllowed('/home/user/writing/essay.md', config)).toBe(true);
-    expect(isPathAllowed('/home/user/Dropbox/letters/a.txt', config)).toBe(true);
+    expect(isPathAllowed(join(writing, 'essay.md'), config)).toBe(true);
+    expect(isPathAllowed(join(dropbox, 'letters', 'a.txt'), config)).toBe(true);
   });
 
   it('returns false for a path outside any scan_path', () => {
-    expect(isPathAllowed('/etc/passwd', config)).toBe(false);
-    expect(isPathAllowed('/home/user/Other/thing.md', config)).toBe(false);
+    expect(isPathAllowed(resolve('/etc/passwd'), config)).toBe(false);
+    expect(isPathAllowed(resolve('/home/user/Other/thing.md'), config)).toBe(false);
   });
 
   it('returns false for a path inside a deny_path even if it is also in a scan_path', () => {
-    expect(isPathAllowed('/home/user/Dropbox/finances/2024.pdf', config)).toBe(false);
+    expect(isPathAllowed(join(finances, '2024.pdf'), config)).toBe(false);
   });
 
-  it('respects directory boundaries — /writing/ does not match /writing-stuff/', () => {
-    // Exact-prefix-with-trailing-slash means /home/user/writing/ does NOT
-    // match /home/user/writing-stuff/. This is the codex T7 / storage-config
-    // pattern: prefix matching at directory boundaries, not arbitrary string
-    // prefixes.
-    expect(isPathAllowed('/home/user/writing-stuff/file.md', config)).toBe(false);
+  it('respects directory boundaries — writing does not match writing-stuff', () => {
+    // `isPathWithin` compares at directory boundaries, not arbitrary string
+    // prefixes, so a sibling sharing the same name prefix stays outside.
+    expect(isPathAllowed(join(writing + '-stuff', 'file.md'), config)).toBe(false);
   });
 
   it('rejects relative paths', () => {

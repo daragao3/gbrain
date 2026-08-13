@@ -126,6 +126,8 @@ describe('OpenClawRunner detection (reliable on box without openclaw)', () => {
       if (!d.available) {
         expect(typeof d.reason).toBe('string');
       } else {
+        // posix-path-guard-ok: asserts the runner's deliberately
+        // POSIX-absolute OPENCLAW_BIN contract, not a native path.
         expect(d.binPath?.startsWith('/')).toBe(true);
       }
     } finally {

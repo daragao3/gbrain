@@ -41,6 +41,8 @@ export class OpenClawRunner implements AgentRunner {
       try {
         const out = execSync('which openclaw', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
         const found = out.trim();
+        // posix-path-guard-ok: `which` + openclaw are POSIX-only tooling; a
+        // POSIX-absolute result is the intended contract, not a path test.
         if (!found || !found.startsWith('/')) {
           return { available: false, reason: 'openclaw not on PATH' };
         }
@@ -92,6 +94,8 @@ export class OpenClawRunner implements AgentRunner {
 }
 
 function validateAbsolutePath(p: string): string | null {
+  // posix-path-guard-ok: OPENCLAW_BIN names a POSIX-only binary; the contract
+  // is deliberately POSIX-absolute, so `isAbsolute()` would WEAKEN it on win32.
   if (!p.startsWith('/')) return `OPENCLAW_BIN must be absolute; got ${p}`;
   if (p.split('/').includes('..')) return `OPENCLAW_BIN must not contain '..' segments; got ${p}`;
   return null;

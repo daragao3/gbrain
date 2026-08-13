@@ -12,7 +12,7 @@
 
 import { describe, expect, it, afterEach } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 
 import { CopyError, copyArtifacts, walkSourceDir } from '../src/core/skillpack/copy.ts';
@@ -39,9 +39,10 @@ describe('walkSourceDir', () => {
     writeFileSync(join(src, 'a.txt'), 'hello a');
     writeFileSync(join(src, 'b.txt'), 'hello b');
 
-    const items = walkSourceDir(src, '/some/dst');
+    const dst = resolve('/some/dst');
+    const items = walkSourceDir(src, dst);
     expect(items).toHaveLength(2);
-    expect(items.map(i => i.target).sort()).toEqual(['/some/dst/a.txt', '/some/dst/b.txt']);
+    expect(items.map(i => i.target).sort()).toEqual([join(dst, 'a.txt'), join(dst, 'b.txt')]);
   });
 
   it('walks nested directories recursively, mirroring structure', () => {
@@ -51,10 +52,15 @@ describe('walkSourceDir', () => {
     writeFileSync(join(src, 'sub', 'mid.txt'), 'm');
     writeFileSync(join(src, 'sub', 'deeper', 'low.txt'), 'l');
 
-    const items = walkSourceDir(src, '/dst');
+    const dst = resolve('/dst');
+    const items = walkSourceDir(src, dst);
     expect(items).toHaveLength(3);
     const targets = items.map(i => i.target).sort();
-    expect(targets).toEqual(['/dst/sub/deeper/low.txt', '/dst/sub/mid.txt', '/dst/top.txt']);
+    expect(targets).toEqual([
+      join(dst, 'sub', 'deeper', 'low.txt'),
+      join(dst, 'sub', 'mid.txt'),
+      join(dst, 'top.txt'),
+    ]);
   });
 
   it('returns empty array for a non-existent source directory', () => {

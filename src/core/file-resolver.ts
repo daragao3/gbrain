@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, isAbsolute, resolve } from 'path';
+import { isPathWithin } from './path-confine.ts';
 import { parse as parseYaml } from './yaml-lite.ts';
 import type { StorageBackend } from './storage.ts';
 
@@ -52,11 +53,11 @@ export async function resolveFile(
   brainRoot: string,
   storage?: StorageBackend,
 ): Promise<ResolvedFile> {
-  // Validate filePath stays within brainRoot (prevents MCP callers from reading arbitrary files)
-  const { resolve: resolvePath } = await import('path');
-  const resolvedRoot = resolvePath(brainRoot);
-  const resolvedFull = resolvePath(brainRoot, filePath);
-  if (!resolvedFull.startsWith(resolvedRoot + '/') && resolvedFull !== resolvedRoot) {
+  // Validate filePath stays within brainRoot (prevents MCP callers from reading
+  // arbitrary files). `resolve` — not `join` — so an ABSOLUTE filePath resolves
+  // to itself and is rejected, rather than being silently reparented under the
+  // root the way `join` would.
+  if (!isPathWithin(resolve(brainRoot, filePath), brainRoot)) {
     throw new Error(`Path traversal blocked: ${filePath} resolves outside brain root`);
   }
 
@@ -92,12 +93,12 @@ export async function resolveFile(
     const marker = parseMarker(markerPath);
     // Validate marker.prefix: reject path traversal, absolute paths, bare '..'
     if (marker.prefix) {
-      if (/\.\.[\\/]/.test(marker.prefix) || marker.prefix === '..' || marker.prefix.startsWith('/')) {
+      if (/\.\.[\\/]/.test(marker.prefix) || marker.prefix === '..' || isAbsolute(marker.prefix)) {
         throw new Error(`Blocked: .supabase marker prefix contains path traversal: ${marker.prefix}`);
       }
     }
     const filename = filePath.split('/').pop() || '';
-    if (/\.\.[\\/]/.test(filename) || filename === '..' || filename.startsWith('/')) {
+    if (/\.\.[\\/]/.test(filename) || filename === '..' || isAbsolute(filename)) {
       throw new Error(`Blocked: filename contains path traversal: ${filename}`);
     }
     const storagePath = (marker.prefix || '') + filename;

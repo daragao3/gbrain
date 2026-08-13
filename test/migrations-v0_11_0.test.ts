@@ -12,7 +12,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 
 import { __testing, type PendingHostWorkEntry } from '../src/commands/migrations/v0_11_0.ts';
@@ -55,9 +55,6 @@ function writeCronJson(dir: string, jobs: unknown[]) {
   writeFileSync(path, JSON.stringify({ jobs }, null, 2) + '\n');
   return path;
 }
-// Re-export dirname so writeCronJson can use it without another import
-const dirname = (p: string) => p.substring(0, p.lastIndexOf('/'));
-
 const DEFAULT_OPTS = {
   yes: true,
   mode: undefined,

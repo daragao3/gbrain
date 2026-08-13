@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import type { StorageBackend } from '../storage.ts';
+import { isPathWithin } from '../path-confine.ts';
 
 /**
  * Local filesystem storage — for testing and development.
@@ -16,7 +17,7 @@ export class LocalStorage implements StorageBackend {
 
   private contained(path: string): string {
     const full = resolve(this.canonicalBase, path);
-    if (!full.startsWith(this.canonicalBase + '/') && full !== this.canonicalBase) {
+    if (!isPathWithin(full, this.canonicalBase)) {
       throw new Error('Path traversal blocked: ' + path + ' resolves outside storage root');
     }
     return full;

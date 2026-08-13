@@ -42,6 +42,7 @@ import { watch, type FSWatcher, type ChokidarOptions } from 'chokidar';
 import { mkdir, rename, readFile, stat, lstat } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { resolve, basename, join, dirname, extname } from 'node:path';
+import { isPathWithin } from '../../path-confine.ts';
 import {
   computeContentHash,
   type IngestionContentType,
@@ -156,7 +157,7 @@ export function createInboxFolderSource(opts: InboxFolderSourceOpts): IngestionS
   const pending: Map<string, NodeJS.Timeout> = new Map();
 
   function isUnderArchive(absPath: string): boolean {
-    return absPath.startsWith(archiveDirAbs + '/') || absPath === archiveDirAbs;
+    return isPathWithin(absPath, archiveDirAbs);
   }
 
   async function handleAdd(absPath: string, ctx: IngestionSourceContext): Promise<void> {

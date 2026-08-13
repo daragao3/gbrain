@@ -38,7 +38,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, lstatSync } from 'fs';
 import { join, dirname, basename, resolve as resolvePath } from 'path';
-import { isPathContained } from './path-confine.ts';
+import { isPathContained, isPathWithin } from './path-confine.ts';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import {
@@ -391,7 +391,7 @@ export async function addSource(
     for (const other of others) {
       const a = finalPath;
       const b = other.local_path;
-      if (a === b || a.startsWith(b + '/') || b.startsWith(a + '/')) {
+      if (isPathWithin(a, b) || isPathWithin(b, a)) {
         throw new SourceOpError(
           'overlapping_path',
           `path "${a}" overlaps with existing source "${other.id}" at "${b}". ` +

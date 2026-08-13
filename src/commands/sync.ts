@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
+import { isPathWithin } from '../core/path-confine.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { importFile } from '../core/import-file.ts';
@@ -1117,7 +1118,7 @@ function isPathSafe(filePath: string, gitRoot: string): boolean {
   try {
     const real = realpathSync(filePath);
     const rootReal = realpathSync(gitRoot);
-    return real === rootReal || real.startsWith(rootReal + '/');
+    return isPathWithin(real, rootReal);
   } catch {
     return false;
   }
@@ -1887,7 +1888,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // NAV-1/NAV-2 scope-entry guard: the realpath-resolved scope must live
   // inside the realpath-resolved git root. Catches `--src-subpath ../escape`
   // AND a symlinked subdir pointing outside the repo, before any git op runs.
-  if (syncScopeRoot !== gitContextRoot && !syncScopeRoot.startsWith(gitContextRoot + '/')) {
+  if (!isPathWithin(syncScopeRoot, gitContextRoot)) {
     throw new Error(
       `Sync scope ${syncScopeRoot} resolves outside git repo ${gitContextRoot}. ` +
       `Refusing to sync: possible path traversal via --src-subpath.`,
@@ -2230,10 +2231,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // syncScopeRelPath is '' when scope == root, so inScope is always true and
   // the filters below reduce to the pre-#774 behavior exactly.
   const inScope = (p: string): boolean =>
+    // posix-path-guard-ok: git-diff output is git-root-relative and ALWAYS
+    // '/'-separated, on every platform — not a native filesystem path.
     !scoped || p === syncScopeRelPath || p.startsWith(syncScopeRelPath + '/');
   // --exclude patterns match the SCOPE-relative path (what the user of a
   // scoped source thinks in), same form runImport matches on full sync.
   const scopeRel = (p: string): string =>
+    // posix-path-guard-ok: git-root-relative path, see `inScope` above.
     scoped && p.startsWith(syncScopeRelPath + '/') ? p.slice(syncScopeRelPath.length + 1) : p;
   const excluded = (p: string): boolean =>
     opts.exclude !== undefined && opts.exclude.length > 0 && matchesAnyGlob(scopeRel(p), opts.exclude);

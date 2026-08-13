@@ -37,6 +37,8 @@ function fsOpts(fs: FakeFs) {
     _readdirSync: (path: string) => {
       const entries = new Set<string>();
       for (const f of Object.keys(fs.files)) {
+        // posix-path-guard-ok: in-memory fake fs keyed by '/'-separated
+        // literals, never real filesystem paths.
         if (f.startsWith(path + '/')) {
           const rel = f.slice(path.length + 1);
           const first = rel.split('/')[0];

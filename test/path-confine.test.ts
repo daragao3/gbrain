@@ -15,10 +15,11 @@ import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, chmodSync,
   lstatSync, type Stats,
 } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import {
   isTrustedDotfile, isPathContained, realpathOrResolve, isWriteTargetContained,
+  isPathWithin,
 } from '../src/core/path-confine.ts';
 import { validateSlug } from '../src/core/utils.ts';
 import { resolveSourceId } from '../src/core/source-resolver.ts';
@@ -110,6 +111,85 @@ describe('isTrustedDotfile — real fs (lstat)', () => {
     writeFileSync(ww, 'x');
     chmodSync(ww, 0o666);
     expect(isTrustedDotfile(lstatSync(ww))).toBe(false);
+  });
+});
+
+// ── isPathWithin ───────────────────────────────────────────
+
+/**
+ * The canonical containment primitive. Purely lexical, so unlike the
+ * realpath-based helpers below it needs no fixtures on disk — and it runs
+ * identically on Windows, where the hand-rolled `child.startsWith(parent + '/')`
+ * idiom it replaces is permanently false. Guarded by
+ * scripts/check-posix-path-separator.sh; these pin the semantics that guard
+ * points callers at.
+ *
+ * Every path here is built with join()/resolve() rather than written as a
+ * '/'-separated literal, so the assertions exercise NATIVE separators on
+ * whichever platform runs them.
+ */
+describe('isPathWithin', () => {
+  const root = resolve(tmpdir(), 'ipw-root');
+
+  test('a nested child is within', () => {
+    expect(isPathWithin(join(root, 'a', 'b', 'c.md'), root)).toBe(true);
+  });
+
+  test('the path itself is within (inclusive)', () => {
+    expect(isPathWithin(root, root)).toBe(true);
+  });
+
+  test('a sibling sharing a name prefix is NOT within', () => {
+    // The bug a bare startsWith() without a separator would let through.
+    expect(isPathWithin(root + '-evil', root)).toBe(false);
+  });
+
+  test('a parent is not within its own child', () => {
+    expect(isPathWithin(root, join(root, 'sub'))).toBe(false);
+  });
+
+  test('a traversal escaping the root is NOT within', () => {
+    expect(isPathWithin(join(root, '..', 'elsewhere'), root)).toBe(false);
+  });
+
+  test('a traversal that returns inside the root IS within', () => {
+    expect(isPathWithin(join(root, 'a', '..', 'b'), root)).toBe(true);
+  });
+
+  test('a child whose name merely begins with dots is within', () => {
+    // `..config` must not be mistaken for a `..` traversal — this is why the
+    // '..' test is separator-qualified rather than a bare startsWith('..').
+    expect(isPathWithin(join(root, '..config'), root)).toBe(true);
+  });
+
+  test('relative inputs are resolved before comparison', () => {
+    expect(isPathWithin('a/b', 'a')).toBe(true);
+    expect(isPathWithin('a', 'a/b')).toBe(false);
+  });
+
+  test('mixed separators still resolve correctly', () => {
+    // Folding both sides to '/' would ALSO accept this, but blindly — the
+    // point is that relative() normalizes rather than string-matching.
+    expect(isPathWithin(join(root, 'a') + '/b/c.md', root)).toBe(true);
+  });
+
+  const IS_WINDOWS = process.platform === 'win32';
+
+  test.if(IS_WINDOWS)('case-differing directories fail closed on win32', () => {
+    // Windows supports per-directory case sensitivity, where ROOTDIR and
+    // rootdir are distinct siblings. path.relative() treats them as equal, so
+    // the helper must reject the ambiguous spelling before calling it.
+    expect(isPathWithin('C:\\a\\ROOTDIR\\f.md', 'C:\\a\\rootdir')).toBe(false);
+    expect(isPathWithin('C:\\a\\ROOTDIR', 'C:\\a\\rootdir')).toBe(false);
+    expect(isPathWithin('C:\\a\\ROOTDIR-evil', 'C:\\a\\rootdir')).toBe(false);
+  });
+
+  test.if(IS_WINDOWS)('drive-letter case remains equivalent on win32', () => {
+    expect(isPathWithin('c:\\a\\rootdir\\f.md', 'C:\\a\\rootdir')).toBe(true);
+  });
+
+  test.if(!IS_WINDOWS)('case IS significant on POSIX', () => {
+    expect(isPathWithin('/a/ROOTDIR/f.md', '/a/rootdir')).toBe(false);
   });
 });
 

@@ -17,7 +17,7 @@ import { readFileSync, lstatSync, type Stats } from 'fs';
 import { join, dirname, resolve } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { SOURCE_ID_RE, isValidSourceId } from './source-id.ts';
-import { isTrustedDotfile, realpathOrResolve } from './path-confine.ts';
+import { isTrustedDotfile, realpathOrResolve, isPathWithin } from './path-confine.ts';
 
 const DOTFILE = '.gbrain-source';
 // Canonical SOURCE_ID_RE imported from `source-id.ts` (single source of truth).
@@ -123,7 +123,7 @@ export async function resolveSourceId(
   let best: { id: string; pathLen: number } | null = null;
   for (const r of registered) {
     const p = realpathOrResolve(r.local_path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
+    if (isPathWithin(cwdResolved, p)) {
       if (!best || p.length > best.pathLen) {
         best = { id: r.id, pathLen: p.length };
       }
@@ -322,7 +322,7 @@ export async function resolveSourceWithTier(
   let best: { id: string; path: string; pathLen: number } | null = null;
   for (const r of registered) {
     const p = realpathOrResolve(r.local_path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
+    if (isPathWithin(cwdResolved, p)) {
       if (!best || p.length > best.pathLen) {
         best = { id: r.id, path: p, pathLen: p.length };
       }

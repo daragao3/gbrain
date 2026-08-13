@@ -22,6 +22,7 @@ import { join, relative, resolve, dirname, basename, isAbsolute } from 'path';
 import type { BrainEngine } from './engine.ts';
 import type { ProgressReporter } from './progress.ts';
 import { gbrainPath } from './config.ts';
+import { isPathWithin } from './path-confine.ts';
 import { collectGitVisibleFiles } from './git-visible-files.ts';
 import {
   parseMarkdown,
@@ -336,7 +337,7 @@ export function writeBrainPage(
 ): { fixes: AuditFix[]; backupPath?: string } {
   const resolvedSource = resolve(opts.sourcePath);
   const resolvedTarget = resolve(filePath);
-  if (resolvedTarget !== resolvedSource && !resolvedTarget.startsWith(resolvedSource + '/')) {
+  if (!isPathWithin(resolvedTarget, resolvedSource)) {
     throw new BrainWriterError(
       'PATH_OUTSIDE_SOURCE',
       `writeBrainPage: ${filePath} is not under ${opts.sourcePath}`,

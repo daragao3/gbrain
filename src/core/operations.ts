@@ -185,7 +185,7 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
     if (p.endsWith('/*')) {
       const base = p.slice(0, -2);
       if (slug === base) continue;
-      if (slug.startsWith(base + '/')) return true;
+      if (slug.startsWith(base + '/')) return true; // posix-path-guard-ok: slug, not a filesystem path — always '/'-separated
     } else if (p === slug) {
       return true;
     }

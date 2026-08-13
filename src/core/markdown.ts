@@ -597,6 +597,8 @@ export function inferTypeFromPack(
   const lower = ('/' + filePath).toLowerCase();
   for (const pt of pack.page_types) {
     for (const prefix of pt.path_prefixes) {
+      // posix-path-guard-ok: schema-pack `path_prefixes` are slug prefixes
+      // declared in config, always '/'-separated — not native paths.
       const needle = prefix.startsWith('/') ? prefix.toLowerCase() : '/' + prefix.toLowerCase();
       if (lower.includes(needle)) {
         return pt.name;
@@ -646,6 +648,8 @@ export function inferTypeAndSubtypeFromPack(
   let matchedType: { name: string; subtypes?: ReadonlyArray<{ name: string; when: { path_pattern?: string; frontmatter_field?: string; frontmatter_value?: unknown } }> } | undefined;
   outer: for (const pt of pack.page_types) {
     for (const prefix of pt.path_prefixes) {
+      // posix-path-guard-ok: schema-pack `path_prefixes` are slug prefixes
+      // declared in config, always '/'-separated — not native paths.
       const needle = prefix.startsWith('/') ? prefix.toLowerCase() : '/' + prefix.toLowerCase();
       if (lower.includes(needle)) {
         matchedType = pt;

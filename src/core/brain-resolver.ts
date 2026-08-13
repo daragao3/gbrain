@@ -22,7 +22,7 @@
 import { readFileSync, lstatSync, type Stats } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { HOST_BRAIN_ID, loadMounts, validateMountId, type MountEntry } from './brain-registry.ts';
-import { isTrustedDotfile, realpathOrResolve } from './path-confine.ts';
+import { isTrustedDotfile, realpathOrResolve, isPathWithin } from './path-confine.ts';
 
 const DOTFILE = '.gbrain-mount';
 /** Same regex as brain-registry. Kept in sync. */
@@ -69,7 +69,7 @@ function longestPathPrefixMount(mounts: MountEntry[], cwd: string): MountEntry |
   for (const m of mounts) {
     if (m.enabled === false) continue;
     const p = realpathOrResolve(m.path);
-    if (cwdResolved === p || cwdResolved.startsWith(p + '/')) {
+    if (isPathWithin(cwdResolved, p)) {
       if (!best || p.length > best.pathLen) {
         best = { mount: m, pathLen: p.length };
       }

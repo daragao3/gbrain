@@ -30,10 +30,11 @@
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { isAbsolute, join, resolve as resolvePath } from 'path';
+import { isPathWithin } from './path-confine.ts';
 
 export interface ArchiveCrawlerConfig {
-  /** Absolute paths the agent is permitted to scan. ~ expanded; paths
-   * normalized to absolute form; trailing-slash normalized.
+  /** Absolute paths the agent is permitted to scan. ~ expanded and
+   * normalized to native absolute form without a trailing separator.
    * Required to be non-empty when the section exists. */
   scan_paths: string[];
   /** Absolute paths within scan_paths to explicitly deny. Optional;
@@ -147,9 +148,9 @@ function expandHome(p: string): string {
  *   - Path-traversal rejection: a path containing `..` after
  *     normalization is rejected to prevent allow-list escape via
  *     `~/Documents/../../../etc/passwd`. Throws invalid_path.
- *   - Trailing slash normalization: paths without trailing slash get
- *     one appended (so prefix matching is unambiguous: `/a/b/`
- *     does NOT match `/a/bc/`).
+ *   - Native normalization: paths resolve to the platform's absolute form
+ *     without a trailing separator. `isPathWithin` handles directory
+ *     boundaries (`/a/b` does not match `/a/bc`) at comparison time.
  */
 export function normalizeAndValidateArchiveCrawlerConfig(
   raw: RawArchiveCrawler,
@@ -194,10 +195,14 @@ function normalizeOnePath(raw: string, field: 'scan_paths' | 'deny_paths'): stri
     );
   }
 
-  // Normalize: resolve any tail and ensure trailing slash for unambiguous
-  // prefix-matching. resolve() strips trailing slash; we re-add it.
-  const resolved = resolvePath(expanded);
-  return resolved.endsWith('/') ? resolved : resolved + '/';
+  // Normalize to a canonical absolute path with NO trailing separator.
+  // A trailing '/' used to be appended here so prefix-matching could not let
+  // `media/x` match `media/xerox`; containment is now decided by
+  // `isPathWithin`, which is separator-aware and gets that case right without
+  // the hack. Appending '/' was itself a win32 bug: it produced
+  // `C:\media\scan/`, which no '\'-separated candidate can ever be a prefix
+  // of, so `isPathAllowed` denied everything.
+  return resolvePath(expanded);
 }
 
 /**
@@ -266,9 +271,10 @@ export function loadArchiveCrawlerConfig(
  * AND is NOT inside any deny_paths. Used by the archive-crawler skill
  * (when it grows a runtime check) to gate per-file decisions.
  *
- * Both inputs are normalized via `resolvePath` and compared as absolute
- * directory prefixes (with trailing slash) so `media/x/` does not match
- * `media/xerox/foo`.
+ * Both inputs are normalized via `resolvePath` and compared with
+ * `isPathWithin`, which is separator-aware — so `media/x` does not match
+ * `media/xerox/foo`, and the check works on Windows, where the previous
+ * trailing-slash prefix match denied every candidate.
  */
 export function isPathAllowed(
   candidate: string,
@@ -277,13 +283,12 @@ export function isPathAllowed(
   const expanded = expandHome(candidate);
   if (!isAbsolute(expanded)) return false;
   const resolved = resolvePath(expanded);
-  const prefix = resolved.endsWith('/') ? resolved : resolved + '/';
 
   // Must be inside at least one scan_path.
-  const allowed = config.scan_paths.some((sp) => prefix.startsWith(sp));
+  const allowed = config.scan_paths.some((sp) => isPathWithin(resolved, sp));
   if (!allowed) return false;
 
   // Must NOT be inside any deny_path.
-  const denied = config.deny_paths.some((dp) => prefix.startsWith(dp));
+  const denied = config.deny_paths.some((dp) => isPathWithin(resolved, dp));
   return !denied;
 }

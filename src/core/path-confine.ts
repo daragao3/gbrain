@@ -20,11 +20,67 @@
  */
 
 import { realpathSync, existsSync, type Stats } from 'fs';
-import { resolve as resolvePath, relative, isAbsolute, dirname, basename, join } from 'path';
+import { resolve as resolvePath, relative, isAbsolute, sep, dirname, basename, join } from 'path';
+
+/**
+ * Lexical, separator-agnostic containment: is `child` the same path as
+ * `parent`, or somewhere inside it?
+ *
+ * THIS IS THE CANONICAL CONTAINMENT PRIMITIVE — reach for it instead of
+ * hand-rolling `child.startsWith(parent + '/')`. That idiom is a Windows
+ * defect: `resolve()` / `realpathSync()` emit the platform separator, so on
+ * win32 the child is `C:\root\file` while the probe is `C:\root/` and the
+ * comparison is ALWAYS false. Depending on which way the caller reads it that
+ * is either fail-closed (every legitimate path rejected) or fail-open (a
+ * containment check that never fires). It is an identity transform on POSIX,
+ * so a green Linux CI run proves nothing. Guarded by
+ * `scripts/check-posix-path-separator.sh`.
+ *
+ * Purely lexical — no filesystem access, no symlink resolution. Callers that
+ * need symlink safety must realpath both sides first (see `isPathContained`).
+ *
+ * `relative()` handles the separator, `.` / `..` normalization, and (on
+ * Windows) returns an ABSOLUTE path when the two sides sit on different
+ * drives — hence the `isAbsolute` guard. The `..` test is separator-qualified
+ * so a legitimately-named child like `<parent>/..config` is not mistaken for
+ * a traversal.
+ *
+ * CASE: `path.relative()` compares Windows paths case-insensitively. That is
+ * convenient on ordinary NTFS directories, but Windows also supports
+ * per-directory case sensitivity: `root` and `ROOT` can be distinct siblings.
+ * Treating them as equal would turn this security boundary fail-open. On win32
+ * we therefore require the resolved strings to share an exact-case directory
+ * prefix before trusting `relative()`. Only the drive letter is folded because
+ * `C:` and `c:` always identify the same drive. A casing disagreement anywhere
+ * else fails closed; callers that need to accept alternate spelling can
+ * canonicalize it before calling this lexical primitive.
+ */
+const CASE_INSENSITIVE_DRIVE = /^[a-z]:/i;
+
+function normalizeDriveCase(p: string): string {
+  if (process.platform !== 'win32' || !CASE_INSENSITIVE_DRIVE.test(p)) return p;
+  return p[0].toUpperCase() + p.slice(1);
+}
+
+export function isPathWithin(child: string, parent: string): boolean {
+  const from = normalizeDriveCase(resolvePath(parent));
+  const to = normalizeDriveCase(resolvePath(child));
+  if (
+    process.platform === 'win32' &&
+    to !== from &&
+    !to.startsWith(from + sep)
+  ) {
+    return false;
+  }
+  const rel = relative(from, to);
+  if (rel === '') return true; // same path
+  if (isAbsolute(rel)) return false; // different drive (win32)
+  return rel !== '..' && !rel.startsWith('..' + sep);
+}
 
 /**
  * Symlink-safe path confinement: realpath BOTH sides, then a separator-aware
- * prefix check. A plain `startsWith()` on un-resolved paths would let a
+ * containment check. A plain `startsWith()` on un-resolved paths would let a
  * `parent/skills` symlink → `/etc` (or `$GBRAIN_HOME/clones/<id>` → `/etc`)
  * bypass the boundary; resolving first defeats that.
  *
@@ -41,9 +97,7 @@ export function isPathContained(child: string, parent: string): boolean {
   } catch {
     return false; // missing / unresolvable path → not contained
   }
-  // Append a separator so /foo doesn't match /foobar.
-  const parentWithSep = resolvedParent.endsWith('/') ? resolvedParent : resolvedParent + '/';
-  return resolvedChild === resolvedParent || resolvedChild.startsWith(parentWithSep);
+  return isPathWithin(resolvedChild, resolvedParent);
 }
 
 /**
@@ -116,6 +170,5 @@ export function isWriteTargetContained(target: string, root: string): boolean {
   }
   const base = realpathOrResolve(existing);
   const finalPath = tail.length ? join(base, ...tail) : base;
-  const rel = relative(resolvedRoot, finalPath);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return isPathWithin(finalPath, resolvedRoot);
 }

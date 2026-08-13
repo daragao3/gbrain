@@ -9,11 +9,11 @@
  * declared in the host skill's frontmatter `sources:` array land at
  * the mirror path inside gbrain.
  *
- * Security (D13): every harvested file goes through canonical-path
- * validation and symlink rejection. `realpath(file).startsWith
- * (realpath(host-skill-dir))`. Mirrors `validateUploadPath` from
- * `src/core/operations.ts`. Without this gate, a malicious or careless
- * symlink could leak secrets into gbrain's source tree.
+ * Security (D13): every harvested skill file goes through canonical-path
+ * validation and symlink rejection via `isPathWithin(realpath(file),
+ * realpath(host-skill-dir))`. Paired sources are separately symlink-rejected.
+ * Without this gate, a malicious or careless symlink could leak secrets into
+ * gbrain's source tree.
  *
  * Privacy (D4, T7): after copying but before declaring success, the
  * harvested files are scanned against a regex allowlist of "private
@@ -36,6 +36,7 @@ import { homedir } from 'os';
 import { dirname, join, relative } from 'path';
 
 import { copyArtifacts, walkSourceDir } from './copy.ts';
+import { isPathWithin } from '../path-confine.ts';
 import { loadSkillSources } from './bundle.ts';
 import { runPrivacyLint, PrivacyLintError } from './harvest-lint.ts';
 
@@ -138,8 +139,8 @@ export function runHarvest(opts: HarvestOptions): HarvestResult {
   // the HOST skill dir (every source must canonicalize inside it). For
   // paired sources outside the skill dir, fall through to symlink-only
   // protection (the host repo is user-trusted at this granularity).
-  const skillItems = items.filter(i => i.source.startsWith(hostSkillDir));
-  const pairedItems = items.filter(i => !i.source.startsWith(hostSkillDir));
+  const skillItems = items.filter(i => isPathWithin(i.source, hostSkillDir));
+  const pairedItems = items.filter(i => !isPathWithin(i.source, hostSkillDir));
 
   let filesCopied: string[] = [];
   try {
