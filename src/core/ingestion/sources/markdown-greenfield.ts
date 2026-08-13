@@ -45,6 +45,7 @@
 
 import { readFileSync, readdirSync, existsSync, statSync, appendFileSync, mkdirSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import matter from 'gray-matter';
 import { computeContentHash } from '../types.ts';
@@ -272,7 +273,13 @@ export class MarkdownGreenfieldSource implements IngestionSource {
     return {
       source_id: this.id,
       source_kind: this.kind,
-      source_uri: `file://${path}`,
+      // pathToFileURL, not `file://` + path: on win32 the walk yields a
+      // native path (`C:\brain\atoms\x.md`) and concatenation would store
+      // `file://C:\brain\atoms\x.md` in provenance — host `C:`, unescaped
+      // separators. source_uri is write-only provenance (never joined,
+      // parsed, or compared — dedup keys on content_hash), so the POSIX
+      // spelling change is cosmetic and needs no migration.
+      source_uri: pathToFileURL(path).href,
       received_at: new Date().toISOString(),
       content_type: 'text/markdown',
       content: newBody,

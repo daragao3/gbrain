@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'os';
 import { LocalStorage } from '../src/core/storage/local.ts';
 import { createStorage } from '../src/core/storage.ts';
@@ -69,9 +70,19 @@ describe('LocalStorage', () => {
     expect(files.length).toBe(0);
   });
 
-  test('getUrl returns file:// URL', async () => {
+  test('getUrl returns a well-formed file:// URL that round-trips', async () => {
     const url = await storage.getUrl('test/file.txt');
-    expect(url.startsWith('file://')).toBe(true);
+    // `startsWith('file://')` alone is vacuous — it also accepts the
+    // malformed `file://C:\dir\f.txt` that string concatenation produced on
+    // win32 (host `C:`, backslash separators). Assert the properties that
+    // actually distinguish a real file URL, on both platforms.
+    expect(url.startsWith('file:///')).toBe(true);
+    expect(url).not.toContain('\\');
+    // The authority component must be empty — `new URL` parses a drive
+    // letter as the host when the third slash is missing.
+    expect(new URL(url).host).toBe('');
+    // And it must decode back to the exact on-disk path.
+    expect(fileURLToPath(url)).toBe(join(tmpDir, 'test', 'file.txt'));
   });
 });
 
