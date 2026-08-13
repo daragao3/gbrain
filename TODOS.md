@@ -1,5 +1,28 @@
 # TODOS
 
+## v0.42.94.0 follow-ups (file URL normalization)
+
+- [ ] **P1 — CLAUDE.md is 77 bytes under its hard cap.** Follow-up from v0.42.94.0.
+  `scripts/check-key-files-current-state.sh` gate 2 fails when CLAUDE.md exceeds
+  `GBRAIN_CLAUDE_MD_MAX_BYTES` (default 60000). It currently measures 59923, so the
+  next person who adds a single sentence to it breaks CI, and the failure will look
+  unrelated to whatever they were shipping. This release wanted one clause on the
+  file-URL construction rule and could not take it; the detail went to
+  `docs/architecture/KEY_FILES.md` instead, which is the routing the guard's own
+  failure message recommends. Two honest options: compress an existing section (the
+  Search Mode and Pace Mode tables are the largest blocks that duplicate content
+  already living under `docs/`), or raise the cap deliberately with a note saying
+  why. Raising it silently to make room for one edit is the failure mode the gate
+  exists to prevent, so this wants a decision rather than a drive-by bump.
+- [ ] **P3 — the `markdown-greenfield` `source_uri` assertions never run on
+  win32.** Follow-up from v0.42.94.0. `test/ingestion/markdown-greenfield.test.ts`
+  gained structural checks on the recorded location, but the test carrying them is
+  one of 11 in that file already failing on Windows for an unrelated reason: the
+  fixture uses a synthetic POSIX repo root (`/fake/brain`) and the walk builds
+  native paths from it. The assertions gate in ubuntu CI only. Fixing the fixture is
+  the same POSIX-path-assertion class tracked elsewhere and is worth doing as one
+  pass over the whole file rather than for this one case.
+
 ## v0.42.93.0 follow-ups (Windows test-runner cap derivation)
 
 - [ ] **P1 — wire the PGLite snapshot into the local unit loop.** Follow-up from
