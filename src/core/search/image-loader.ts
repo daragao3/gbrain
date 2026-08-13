@@ -29,6 +29,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SSRFError, fetchWithSSRFGuard } from '../ssrf-validate.ts';
 
 /** Max bytes for input image. Configurable via `search.image_query.max_bytes`. */
@@ -96,7 +97,24 @@ export async function loadImageInput(
     return loadHttpUrl(input, { maxBytes, timeoutMs: opts.timeoutMs ?? 5000, maxRedirects: opts.maxRedirects ?? 3 });
   }
   if (input.startsWith('file://') || isAbsolute(input)) {
-    const path = input.startsWith('file://') ? input.slice(7) : input;
+    // `slice(7)` is the URL.pathname trap in disguise: on a well-formed
+    // Windows file URL (`file:///C:/img.png`) it yields `/C:/img.png`, which
+    // no Win32 API accepts, and it leaves percent-escapes undecoded so any
+    // path with a space fails to open — on POSIX too. fileURLToPath() handles
+    // both.
+    let path: string;
+    if (input.startsWith('file://')) {
+      try {
+        path = fileURLToPath(input);
+      } catch (err) {
+        throw new ImageLoadError(
+          'INVALID_URL',
+          `Malformed file:// URI: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      path = input;
+    }
     return loadLocalPath(path, maxBytes);
   }
   throw new ImageLoadError(

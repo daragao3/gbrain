@@ -155,7 +155,14 @@ describe('v0.41 T7: walk + emit basic flow', () => {
     const event = ctx.emitted[0];
     expect(event.source_kind).toBe('markdown-greenfield');
     expect(event.source_id).toMatch(/^markdown-greenfield:\d+$/);
+    // source_uri is built with pathToFileURL(), not `file://` + path. For an
+    // ordinary absolute POSIX path the two spellings are byte-identical, so
+    // this literal is unchanged from the concatenation era — the fix is a
+    // no-op on POSIX and only alters the win32 output.
     expect(event.source_uri).toBe(`file://${REPO}/atoms/2026-05-24/x.md`);
+    // Structural invariants that the concatenation form fails on win32.
+    expect(event.source_uri.startsWith('file:///')).toBe(true);
+    expect(new URL(event.source_uri).host).toBe('');
     expect(event.content_type).toBe('text/markdown');
     expect(event.untrusted_payload).toBe(false);
   });

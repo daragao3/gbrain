@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'fs';
 import { join, dirname, resolve } from 'path';
+import { pathToFileURL } from 'node:url';
 import { isPathInside } from '../path-confine.ts';
 import type { StorageBackend } from '../storage.ts';
 
@@ -63,6 +64,11 @@ export class LocalStorage implements StorageBackend {
   }
 
   async getUrl(path: string): Promise<string> {
-    return `file://${this.contained(path)}`;
+    // `file://` + a native path is NOT a file URL. On win32 `contained()`
+    // returns `C:\store\a.txt`, so concatenation yields `file://C:\store\a.txt`
+    // — host `C:`, backslash separators, no percent-encoding. It only looks
+    // right on POSIX, where the leading '/' accidentally supplies the third
+    // slash. pathToFileURL() is correct on both.
+    return pathToFileURL(this.contained(path)).href;
   }
 }
