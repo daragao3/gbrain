@@ -235,6 +235,62 @@ function enforceSubagentSlugFence(ctx: OperationContext, slug: string, opName: s
 }
 
 /**
+ * Reject a tool-call argument that was serialized INTO another field's value
+ * instead of being passed as its own parameter. The corrupt shape is an UNCLOSED
+ * parameter tag at the very end of a string:
+ *
+ *   detail: "...real content.</detail>\n<parameter name=\"source\">loops:my-claim"
+ *   source: ""                        <- the value never arrived as an argument
+ *
+ * Without this check the write SUCCEEDS and returns `{status:'ok'}` - byte-identical
+ * to the response for a silent duplicate no-op - so nothing ever tells the caller.
+ * Measured 2026-09-04 on a production brain: 75 timeline rows across 36 pages
+ * accumulated this way between 2026-04-25 and 2026-09-03, 72 of them swallowing
+ * `source`, and not one writing agent noticed. Repairing them needed direct SQL,
+ * because the MCP surface has no timeline update or delete.
+ *
+ * REJECT rather than silently salvage: only the caller knows the intended value, a
+ * salvage would guess, and a rejected write is recoverable (callers retry, or park
+ * the payload) while a silently-corrupted one is not.
+ *
+ * DELIBERATELY NARROW - it matches only an unclosed tag with NO '<' after it, at
+ * end-of-string. Prose that merely QUOTES this markup, including the timeline
+ * entries documenting this very bug, carries a later '<' or a closing tag and is
+ * not matched in the common case, because such prose almost always carries a later
+ * '<' or a closing tag.
+ *
+ * KNOWN AND ACCEPTED FALSE POSITIVE, measured 2026-09-04 against 6752 real rows: an
+ * entry that quotes this markup and then ends with NO further '<' anywhere IS
+ * rejected. Two real correction entries on this brain have that shape. The workaround
+ * is trivial (close the quoted tag, or put any following text containing '<'), and the
+ * rejection is loud, so an author cannot lose work to it.
+ *
+ * DO NOT "FIX" IT BY EXCLUDING NEWLINES FROM THE VALUE CLASS. That refinement
+ * (a value class that also excludes newline characters) was measured against the
+ * pre-repair snapshot: it does spare all 4 prose
+ * rows, but it MISSES 3 genuinely corrupt rows that this pattern catches (77 caught ->
+ * 74). That trades 2 recoverable false positives for 3 silent corruptions, which is
+ * backwards -- a rejected write is retried, a corrupted one was found only months later
+ * and needed direct SQL to repair.
+ */
+const SWALLOWED_PARAM_RE = /<parameter\s+name="([A-Za-z_][\w.-]*)"\s*>([^<]*)$/;
+
+function assertNoSwallowedToolMarkup(opName: string, field: string, value: string): void {
+  const m = SWALLOWED_PARAM_RE.exec(value);
+  if (!m) return;
+  const param = m[1];
+  const swallowed = m[2].trim();
+  const preview = swallowed.length > 60 ? swallowed.slice(0, 60) + '...' : swallowed;
+  throw new OperationError(
+    'invalid_params',
+    `${opName}: '${field}' ends with an unclosed <parameter name="${param}"> tag, which means the ` +
+      `'${param}' argument was serialized into '${field}' instead of being passed as its own parameter.`,
+    `Re-issue the call passing ${param}=${JSON.stringify(preview)} as a separate argument, and remove ` +
+      `the trailing markup from '${field}'. Nothing was written.`,
+  );
+}
+
+/**
  * Allowlist validator for uploaded file basenames. Rejects control chars, backslashes,
  * RTL overrides (\u202E), leading dot (hidden files) and leading dash (CLI flag confusion).
  * Allows extension dots and underscores. Max 255 chars.
@@ -2637,6 +2693,13 @@ const add_timeline_entry: Operation = {
     // confined to the same namespace/allow-list as page writes. Runs before
     // the dry-run short-circuit so preview calls surface the same rejection.
     enforceSubagentSlugFence(ctx, p.slug as string, 'add_timeline_entry');
+    // Reject an argument that arrived serialized into another field's value. Runs
+    // BEFORE the dry-run short-circuit so a preview surfaces the same rejection,
+    // exactly like the slug fence above.
+    for (const field of ['summary', 'detail', 'source'] as const) {
+      const v = p[field];
+      if (typeof v === 'string') assertNoSwallowedToolMarkup('add_timeline_entry', field, v);
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
     const date = p.date as string;
     // Reject anything that isn't a strict YYYY-MM-DD with year 1900-2199 and

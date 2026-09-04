@@ -2,6 +2,71 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.95.0] - 2026-09-04
+
+**A timeline entry written with one of its fields pasted into the end of another is now refused instead of quietly saved.**
+
+Adding a timeline entry means handing GBrain several separate pieces: a summary, a detail, and a source. Agents that write these entries sometimes make a formatting slip and serialize one of those pieces into the end of another one, so the text of the detail ends with the source glued onto it and the source itself arrives empty.
+
+GBrain used to save that exactly as sent and reply that the write was fine. The reply was word for word the same one it gives for a write that changed nothing, so the agent that made the slip had no way to notice. The value ended up buried in the middle of another field's text, and the field it belonged in stayed blank.
+
+On one brain this happened 75 times across 36 pages over four months before anyone read the entries closely enough to see it. Repairing them meant editing the database by hand, because there is no way to change or remove a timeline entry through the normal interface.
+
+The write is now rejected before anything is stored. The error names the field that swallowed the value, quotes the value it recovered, and says that nothing was written, so the caller can send the call again in the right shape.
+
+### How to use it
+
+Nothing changes for a correctly formed call. A malformed one now comes back as an error instead of a success:
+
+```
+add_timeline_entry: 'detail' ends with an unclosed <parameter name="source"> tag,
+which means the 'source' argument was serialized into 'detail' instead of being
+passed as its own parameter.
+
+Re-issue the call passing source="loops:my-claim" as a separate argument, and
+remove the trailing markup from 'detail'. Nothing was written.
+```
+
+The check runs before the preview short circuit, so `dry_run` surfaces the same rejection rather than reporting a write that would have been corrupt.
+
+### Numbers that matter
+
+| Case | Before | After |
+|---|---|---|
+| Field serialized into another field | stored, replied `ok` | refused as `invalid_params`, nothing stored |
+| Rows this produced on one brain, 2026-04-25 to 2026-09-03 | 75 across 36 pages | cannot be created |
+| Repair path for an entry already stored | direct database edit | unchanged, still direct |
+| Ordinary well formed entry | stored | stored, no change |
+
+### Things to watch
+
+Entries already in the database are not touched. This release stops new ones from being created; it does not clean up old ones.
+
+The check is deliberately narrow. It matches only an unclosed parameter tag with no further `<` after it at the very end of the value, which is the shape the corruption actually takes. Prose that quotes this markup in passing carries a later `<` and is unaffected.
+
+There is one accepted false positive. An entry that quotes the markup and then ends with no further `<` anywhere is rejected even though it is legitimate. Two real entries on the brain that was measured have that shape. The workaround is to close the quoted tag or follow it with any text containing `<`, and the rejection is loud, so nothing is lost to it. The obvious narrowing that would spare those entries was measured against a snapshot taken before repair: it spares 2 legitimate entries but stops catching 3 genuinely corrupt ones, which is the wrong trade. A refused write is retried in seconds. A corrupted one went unseen for four months.
+
+### Itemized changes
+
+- `src/core/operations.ts`: adds `assertNoSwallowedToolMarkup`, which rejects a value ending in an unclosed `<parameter name="...">` tag. `add_timeline_entry` runs it over `summary`, `detail` and `source` before the dry run short circuit, next to the existing subagent slug fence. The thrown `invalid_params` error names the parameter, echoes the recovered value trimmed to 60 characters, and states that nothing was written.
+- `test/timeline-swallowed-param-guard.test.ts`: 11 cases split into a rejection half and a false positive half, covering each of the three checked fields, the dry run path, and prose that quotes the markup without being corrupt.
+- `docs/architecture/KEY_FILES.md`: records the guard alongside the other `operations.ts` validators.
+
+## To take advantage of v0.42.95.0
+
+Nothing to install and nothing to configure. New writes are protected from the moment you upgrade.
+
+Entries written before this release are not repaired. If you want to know whether your own brain carries any, count them:
+
+```sql
+SELECT count(*) FILTER (WHERE summary ~ E'<parameter\s+name="[A-Za-z_][A-Za-z0-9_.-]*"\s*>[^<]*$') AS summary_hits,
+       count(*) FILTER (WHERE detail  ~ E'<parameter\s+name="[A-Za-z_][A-Za-z0-9_.-]*"\s*>[^<]*$') AS detail_hits,
+       count(*) FILTER (WHERE source  ~ E'<parameter\s+name="[A-Za-z_][A-Za-z0-9_.-]*"\s*>[^<]*$') AS source_hits
+FROM timeline_entries;
+```
+
+A non zero count means those entries hold a value in the wrong column. Read them before changing anything: some of the matches are entries that describe this bug on purpose, and repairing those would destroy the record. Take a backup first, and repair one shape at a time rather than with a single pattern, because a value glued to the end of a field and a value that replaced a whole field need different moves.
+
 ## [0.42.94.0] - 2026-08-13
 
 **Searching by an image stored under a folder name with a space in it now finds the file, and the file locations GBrain hands you are real URLs on Windows.**
