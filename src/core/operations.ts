@@ -256,8 +256,22 @@ function enforceSubagentSlugFence(ctx: OperationContext, slug: string, opName: s
  * DELIBERATELY NARROW - it matches only an unclosed tag with NO '<' after it, at
  * end-of-string. Prose that merely QUOTES this markup, including the timeline
  * entries documenting this very bug, carries a later '<' or a closing tag and is
- * not matched. Verified against 6741 real rows: fires on every genuinely corrupt
- * row and on none of the entries that discuss the corruption.
+ * not matched in the common case, because such prose almost always carries a later
+ * '<' or a closing tag.
+ *
+ * KNOWN AND ACCEPTED FALSE POSITIVE, measured 2026-09-04 against 6752 real rows: an
+ * entry that quotes this markup and then ends with NO further '<' anywhere IS
+ * rejected. Two real correction entries on this brain have that shape. The workaround
+ * is trivial (close the quoted tag, or put any following text containing '<'), and the
+ * rejection is loud, so an author cannot lose work to it.
+ *
+ * DO NOT "FIX" IT BY EXCLUDING NEWLINES FROM THE VALUE CLASS. That refinement
+ * (a value class that also excludes newline characters) was measured against the
+ * pre-repair snapshot: it does spare all 4 prose
+ * rows, but it MISSES 3 genuinely corrupt rows that this pattern catches (77 caught ->
+ * 74). That trades 2 recoverable false positives for 3 silent corruptions, which is
+ * backwards -- a rejected write is retried, a corrupted one was found only months later
+ * and needed direct SQL to repair.
  */
 const SWALLOWED_PARAM_RE = /<parameter\s+name="([A-Za-z_][\w.-]*)"\s*>([^<]*)$/;
 
