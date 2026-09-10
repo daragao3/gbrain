@@ -34,6 +34,7 @@ import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-client.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { VERSION } from './version.ts';
+import { agentPushRefusal } from './core/agent-session.ts';
 
 // Build CLI name -> operation lookup
 const cliOps = new Map<string, Operation>();
@@ -2683,6 +2684,25 @@ Run gbrain <command> --help for command-specific help.
 // process alive. A fatal error still exits 1 for every command, daemons
 // included (matches the prior unconditional process.exit(1) on rejection).
 if (import.meta.main) {
+  // -- AGENT PUSH GATE ------------------------------------------------------
+  //
+  // THE SEAM IS HERE ON PURPOSE. `gbrain skillpack endorse --push`,
+  // `gbrain sources harden` and `gbrain sources add` with a PAT each reach an
+  // `execFileSync('git', [... 'push' ...])` inside this package, so the
+  // machine-wide guard at ~/.claude/hooks/block-destructive-git.py never sees a
+  // git verb in the ARGV an agent runs. See src/core/agent-session.ts for why a
+  // content scan and a push-flag heuristic were both measured and rejected.
+  //
+  // It sits in the `import.meta.main` block rather than in `main()` or at the
+  // push because dozens of test files import from this module and the suite
+  // runs inside an agent session -- gating any of those would fail them. A
+  // TYPED `gbrain ...` reaches this; an in-process import does not. Nothing has
+  // been parsed, connected or mutated yet, so a refusal is inert.
+  const agentRefusal = agentPushRefusal(process.argv.slice(2));
+  if (agentRefusal) {
+    for (const line of agentRefusal.lines) console.error(line);
+    process.exit(agentRefusal.code);
+  }
   main().then(
     () => {
       if (shouldForceExitAfterMain()) flushThenExit(currentExitCode());
