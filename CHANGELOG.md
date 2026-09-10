@@ -2,6 +2,62 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.96.0] - 2026-09-10
+
+**Three gbrain commands push to a git remote, and from an automated coding session they now refuse instead of pushing.**
+
+One of them does it without being asked to push at all. Adding a brain repo with a token also hardens it, and hardening commits a small scaffolding file and pushes it. A command whose name is `add` reaches a remote.
+
+Machines that run automated coding sessions often stop those sessions from running `git push` directly. That kind of guard reads the command the session types. gbrain's pushes do not appear there: they happen inside the program, several layers below the command, so the guard sees `gbrain sources add` and lets it through.
+
+gbrain now checks for itself. When a push command is typed from what looks like an automated session, it stops before doing anything, prints what it would have pushed and why it stopped, and exits 30.
+
+Nothing else changes. Endorsing without `--push` still writes and commits locally, adding a source without a token still adds it, and every read command is untouched.
+
+### How to use it
+
+Nothing to install and nothing to configure.
+
+To push deliberately from a session that would otherwise be stopped, set the variable for that one command:
+
+```bash
+GBRAIN_ALLOW_AGENT_PUSH=1 gbrain sources harden my-brain --pat-file ~/.pat
+```
+
+Outside an automated session nothing is different, so a person at a terminal never sees this.
+
+### Numbers that matter
+
+| Command | Before | After, in an automated session |
+|---|---|---|
+| `skillpack endorse <n> --push` | pushed | refused, exit 30 |
+| `sources harden <id>` | committed and pushed | refused, exit 30 |
+| `sources add <id>` with a token | hardened, committed and pushed | refused, exit 30 |
+| `skillpack endorse <n>` without `--push` | wrote and committed locally | unchanged |
+| `sources add <id>` without a token | no push, hardening skipped | unchanged |
+| `sources add <id> --no-harden` | no push | unchanged |
+| every read command | unchanged | unchanged |
+
+### Things to watch
+
+This is not a permission system and it does not try to be. Anything that can run the command can set the variable, so it stops an accident, not an intent.
+
+Only one family of automated session is recognised. Sessions from other tools are not detected, because guessing at a marker that never fires would be worse than saying so plainly.
+
+`sources add` is checked only when a token is actually available, from `--pat-file` or `GBRAIN_GITHUB_PAT`. Without one, hardening is skipped anyway and no push can happen, so an ordinary `add` is never refused.
+
+### Itemized changes
+
+- `src/core/agent-session.ts`: new. `agentSessionEvidence` reports why a session looks automated, by the presence of known environment markers rather than their values, because one of them is set to an empty string. `gatedPushAction` names which of the three push paths an argv would take, reading the subcommand from positional arguments so a flag value cannot be mistaken for one. `agentPushRefusal` combines the two and returns the exit code and the refusal text instead of exiting, so both can be asserted in tests.
+- `src/cli.ts`: the check runs inside the `import.meta.main` block, above `main()`. A typed `gbrain ...` reaches it and an in process import does not, which keeps the test suite working: many tests import this module and call the pushing functions directly against a temporary repository. Nothing has been parsed or connected when the check runs, so a refusal changes nothing.
+- `test/agent-session-push-gate.test.ts`: 21 cases. The larger half is negative, covering endorse without `--push`, a plain `sources add`, `--no-harden`, an empty token variable, every read command, and a `--tier endorse` flag value that must not be read as the `endorse` subcommand.
+
+## To take advantage of v0.42.96.0
+
+Nothing to install and nothing to configure. The check is active from the moment you upgrade.
+
+If you run gbrain from an automated session and want one of the three push commands to go through, set `GBRAIN_ALLOW_AGENT_PUSH=1` for that command.
+
 ## [0.42.95.0] - 2026-09-04
 
 **A timeline entry written with one of its fields pasted into the end of another is now refused instead of quietly saved.**
