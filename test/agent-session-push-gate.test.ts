@@ -123,7 +123,7 @@ describe('agentPushRefusal — the two conditions must BOTH hold', () => {
   test('the override lifts it, and it is DISTINCT from the rest of the family', () => {
     const env = { ...AGENT, [AGENT_PUSH_OVERRIDE_ENV]: '1' };
     expect(agentPushRefusal(['sources', 'harden', 'b'], env)).toBeNull();
-    // authorizing a hermes self-update must NOT authorize a gbrain push
+    // authorizing a sibling tool's self-update must NOT authorize a gbrain push
     const wrong = { ...AGENT, HERMES_ALLOW_AGENT_UPDATE: '1' };
     expect(agentPushRefusal(['sources', 'harden', 'b'], wrong)).not.toBeNull();
     expect(AGENT_PUSH_OVERRIDE_ENV).toBe('GBRAIN_ALLOW_AGENT_PUSH');
