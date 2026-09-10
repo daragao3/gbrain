@@ -2,9 +2,9 @@
  * The agent push gate.
  *
  * gbrain performs a real `git push` from three command shapes, each via
- * `execFileSync` INSIDE this package, so the machine-wide guard at
- * ~/.claude/hooks/block-destructive-git.py cannot see a git verb in the ARGV an
- * agent runs. These tests pin the gate that closes it.
+ * `execFileSync` INSIDE this package, so a machine-wide guard on git commands
+ * cannot see a git verb in the ARGV an agent runs. These tests pin the gate
+ * that closes it.
  *
  * The most important group is NEGATIVE: this gate must not touch the read-only
  * and local-only paths, and it must not fire on a plain `sources add`.
@@ -124,7 +124,7 @@ describe('agentPushRefusal — the two conditions must BOTH hold', () => {
     const env = { ...AGENT, [AGENT_PUSH_OVERRIDE_ENV]: '1' };
     expect(agentPushRefusal(['sources', 'harden', 'b'], env)).toBeNull();
     // authorizing a sibling tool's self-update must NOT authorize a gbrain push
-    const wrong = { ...AGENT, HERMES_ALLOW_AGENT_UPDATE: '1' };
+    const wrong = { ...AGENT, OTHER_TOOL_ALLOW_AGENT_UPDATE: '1' };
     expect(agentPushRefusal(['sources', 'harden', 'b'], wrong)).not.toBeNull();
     expect(AGENT_PUSH_OVERRIDE_ENV).toBe('GBRAIN_ALLOW_AGENT_PUSH');
   });

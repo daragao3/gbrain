@@ -2688,10 +2688,10 @@ if (import.meta.main) {
   //
   // THE SEAM IS HERE ON PURPOSE. `gbrain skillpack endorse --push`,
   // `gbrain sources harden` and `gbrain sources add` with a PAT each reach an
-  // `execFileSync('git', [... 'push' ...])` inside this package, so the
-  // machine-wide guard at ~/.claude/hooks/block-destructive-git.py never sees a
-  // git verb in the ARGV an agent runs. See src/core/agent-session.ts for why a
-  // content scan and a push-flag heuristic were both measured and rejected.
+  // `execFileSync('git', [... 'push' ...])` inside this package, so a
+  // machine-wide guard on git commands never sees a git verb in the ARGV an
+  // agent runs. See src/core/agent-session.ts for why a content scan and a
+  // push-flag heuristic were both measured and rejected.
   //
   // It sits in the `import.meta.main` block rather than in `main()` or at the
   // push because dozens of test files import from this module and the suite

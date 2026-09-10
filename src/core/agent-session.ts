@@ -9,26 +9,25 @@
  *                                                  automatically on add
  *
  * Every one of those is an `execFileSync('git', [...])` INSIDE this package, so
- * the machine-wide guard at `~/.claude/hooks/block-destructive-git.py` cannot
- * see it. That hook reads the ARGV of what an agent runs, and `gbrain sources
- * add ...` carries no git verb there: no block, no pending id, no grant.
+ * a machine-wide guard on git commands cannot see it. Such a guard reads the
+ * ARGV of what an agent runs, and `gbrain sources add ...` carries no git verb
+ * there: no block, no prompt, no grant.
  *
  * A CONTENT SCAN of launched scripts was measured over 436 of them on
  * 2026-09-09 and rejected, and re-measured at larger scale on 2026-09-10 (a
  * verb regex over 164 candidate scripts flags 145, overwhelmingly prose --
  * `Array.push`, a "Push" UI label, `clean start-of`). A PUSH-FLAG heuristic was
  * measured the same day and is no better: 146 commands carry one and almost all
- * are prose. The hook cannot close this class; a gate at the command seam can.
- * Records: loops `gitguard-script-file-argument-gap-20260909`,
- * `gitguard-script-path-gap-close-20260910`.
+ * are prose. Such a hook cannot close this class; a gate at the command seam
+ * can.
  *
  * WHY THE GATE IS AT THE TYPED-COMMAND SEAM AND NOT AT THE PUSH. Placement is
  * decided by measurement, not taste. gbrain's own suite imports from
  * `src/cli.ts` in dozens of test files and calls `hardenBrainRepo` /
  * `runSkillpack` directly, and it runs inside an agent session -- a gate
  * reading ambient environment at the push, or inside `main()`, would fail those.
- * The same mistake in the sibling `hermes update` gate turned 7 failures into 41
- * before it was moved to the dispatch seam. So the seam is the
+ * The same mistake in a sibling tool's gate turned 7 failures into 41 before it
+ * was moved to the dispatch seam. So the seam is the
  * `import.meta.main` block in `src/cli.ts`, which a TYPED `gbrain ...` reaches
  * and an in-process import does not. Nothing has been parsed, connected or
  * mutated when this runs, so a refusal is inert by construction.
@@ -40,12 +39,10 @@
  * CODEX SESSIONS ARE NOT DETECTED. Their environment has never been measured on
  * this box, and a guessed marker that never fires is worse than a documented gap.
  *
- * THIS IS A DELIBERATE PORT of `hermes_cli/_agent_session.py`, not an import --
- * gbrain is a separate TypeScript project and cannot import that package. Same
- * markers, same presence-not-value rule, same exit code, so a session that has
- * met one recognises the other. The family: `hermes update`,
- * agent-src `scripts/release.py`, agent-src `devflow_delegation/cli.py`,
- * jobflow-platform `scripts/ops/refresh-ci-snapshot.ps1`, and this.
+ * THIS IS A DELIBERATE PORT of the equivalent Python check used by sibling
+ * tools, not an import -- gbrain is a separate TypeScript project and cannot
+ * import that package. Same markers, same presence-not-value rule, same exit
+ * code, so a session that has met one recognises the other.
  */
 
 /** Shared across the whole gate family. One number means one thing. */
@@ -126,9 +123,9 @@ export function pushRefusalLines(action: string, evidence: string[]): string[] {
     '',
     ...evidence.map((e) => `  * ${e}`),
     '',
-    '  This push is a git subprocess INSIDE gbrain, so the machine-wide guard at',
-    '  ~/.claude/hooks/block-destructive-git.py never sees it — no block, no',
-    '  pending id, no grant. This gate is that missing stop.',
+    '  This push is a git subprocess INSIDE gbrain, so a machine-wide guard on',
+    '  git commands never sees it: such a guard inspects the command you typed,',
+    '  and what you typed carries no git verb. This gate is that missing stop.',
     '',
     '  It is NOT an authorization boundary: it stops an accident, not an intent.',
     '',
