@@ -3,7 +3,7 @@
 # Sync writer-lock concurrency regression test.
 #
 # Spawns N concurrent `gbrain sync` processes against one DB; asserts:
-#   1. Exactly one wins the writer lock (`gbrain-sync` row in `gbrain_cycle_locks`).
+#   1. Exactly one wins the writer lock (`gbrain-sync:default` row in `gbrain_cycle_locks`).
 #   2. N-1 lose with "Another sync is in progress" — they fail FAST, they don't queue.
 #      (Per src/commands/sync.ts:377 — performSync uses `tryAcquireDbLock`, no wait.)
 #   3. After all processes exit, zero leaked `gbrain_cycle_locks` rows remain.
@@ -61,22 +61,24 @@ BRAIN_DIR=$(mktemp -d -t gbrain-sync-lock-XXXXXX)
 # Compose with the earlier GBRAIN_HOME-cleanup trap (NOT overwrite it).
 trap 'rm -rf "$BRAIN_DIR" "$TMP_GBRAIN_HOME"; cp -f "$LOG" "$SURFACE_LOG" 2>/dev/null || true' EXIT
 
-# Seed two markdown pages so sync has real (but trivial) work
+# Seed enough pages that the winner HOLDS the lock for seconds, not
+# milliseconds. With only two pages the winning sync finished and released
+# before a slower-starting contender (bun startup varies by >1s on a 2-vCPU
+# runner) even tried, so that contender acquired a FREE lock and the run read
+# as two winners -- serialized, not overlapping; the lock was never at fault
+# (the same SHA passed 2026-09-23 and failed 09-24/09-25). Exclusion is only
+# observable while the lock is actually contended.
+SEED_PAGES="${SEED_PAGES:-200}"
 mkdir -p "$BRAIN_DIR"
-cat > "$BRAIN_DIR/page-a.md" <<'EOF'
+for ((p=1; p<=SEED_PAGES; p+=1)); do
+  cat > "$BRAIN_DIR/page-$p.md" <<EOF
 ---
-title: Lock Test Page A
+title: Lock Test Page $p
 ---
-# Lock Test Page A
+# Lock Test Page $p
 Trivial content for sync-lock-regression heavy test.
 EOF
-cat > "$BRAIN_DIR/page-b.md" <<'EOF'
----
-title: Lock Test Page B
----
-# Lock Test Page B
-Trivial content for sync-lock-regression heavy test.
-EOF
+done
 
 # git-init so sync's diff-walk has something to anchor (sync expects a git repo)
 (cd "$BRAIN_DIR" && git init -q && git add . && git -c user.email=test@test -c user.name=test commit -q -m "seed" >/dev/null 2>&1) || true
@@ -94,6 +96,9 @@ bun run src/cli.ts config set sync.repo_path "$BRAIN_DIR" >/dev/null 2>&1 || tru
 
 # Step 3: spawn N parallel sync processes. Capture each one's exit code +
 # stdout/stderr. The race for the lock happens during their startup window.
+# Start barrier: every subshell spins until GO exists, so all N bun processes
+# launch together instead of staggered across this loop.
+GO=$(mktemp -u -t sync-lock-go-XXXXXX)
 PIDS=()
 EXIT_FILES=()
 OUT_FILES=()
@@ -109,10 +114,12 @@ for ((i=1; i<=NUM_PARALLEL; i+=1)); do
   # --repo: sync's canonical brain-dir flag (the older --dir is silently
   # ignored; the script previously paired it with `config set sync.repo_path`
   # which sync no longer reads in the source-registry world).
-  ( bun run src/cli.ts sync --repo "$BRAIN_DIR" --no-embed >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
+  ( while [ ! -e "$GO" ]; do sleep 0.01; done
+    bun run src/cli.ts sync --repo "$BRAIN_DIR" --no-embed >"$OUT_F" 2>&1; echo $? > "$EXIT_F" ) &
   PIDS+=($!)
 done
 
+touch "$GO"
 echo "[sync_lock_regression] waiting on ${#PIDS[@]} pids..."
 for pid in "${PIDS[@]}"; do
   wait "$pid" 2>/dev/null || true
@@ -139,13 +146,16 @@ for ((i=0; i<NUM_PARALLEL; i+=1)); do
 done
 
 # Cleanup tmp files
-rm -f "${EXIT_FILES[@]}" "${OUT_FILES[@]}"
+rm -f "${EXIT_FILES[@]}" "${OUT_FILES[@]}" "$GO"
 
 echo "[sync_lock_regression] outcomes: winners=$WINNERS losers=$LOSERS unknown=$UNKNOWN" | tee -a "$LOG"
 
 # Step 5: assert no leaked gbrain_cycle_locks rows. The pkey column is `id`,
-# not `lock_id` (column name confirmed via \d gbrain_cycle_locks).
-LEAKED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id = 'gbrain-sync';" 2>>"$LOG" | tr -d ' ')
+# not `lock_id` (column name confirmed via \d gbrain_cycle_locks). Since
+# v0.40.5 the sync lock is per-source (`syncLockId` -> `gbrain-sync:<source>`),
+# so an exact match on the bare legacy id 'gbrain-sync' counted nothing and
+# could never see a leak. Match the prefix so both shapes are covered.
+LEAKED=$(psql "$DATABASE_URL" -t -A -c "SELECT COUNT(*) FROM gbrain_cycle_locks WHERE id LIKE 'gbrain-sync%';" 2>>"$LOG" | tr -d ' ')
 echo "[sync_lock_regression] post-run gbrain_cycle_locks(gbrain-sync) row count: $LEAKED" | tee -a "$LOG"
 
 # Step 6: verdict
