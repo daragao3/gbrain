@@ -20,6 +20,7 @@ import { fetchLatestRelease, parseVersionFileBody, refreshUpdateCache, runCheckU
 
 const realFetch = globalThis.fetch;
 const realLog = console.log;
+const realStdoutWrite = process.stdout.write;
 let homeDir: string;
 let priorHome: string | undefined;
 
@@ -52,6 +53,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = realFetch;
   console.log = realLog;
+  process.stdout.write = realStdoutWrite;
   if (priorHome === undefined) delete process.env.GBRAIN_HOME;
   else process.env.GBRAIN_HOME = priorHome;
   rmSync(homeDir, { recursive: true, force: true });
@@ -169,9 +171,18 @@ describe('refreshUpdateCache — full refresh orchestration (network stubbed)', 
 });
 
 describe('runCheckUpdate --json — failure discrimination (#486)', () => {
+  // --json output goes through writeStdout (process.stdout.write), not
+  // console.log -- see src/core/stdout-write.ts. Capture both so a stray
+  // console.log on the --json path still shows up as unparseable output.
   function capture(): string[] {
     const lines: string[] = [];
-    console.log = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ') + '\n'); };
+    process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+      lines.push(String(chunk));
+      const cb = rest.find((r) => typeof r === 'function') as (() => void) | undefined;
+      cb?.();
+      return true;
+    }) as typeof process.stdout.write;
     return lines;
   }
 

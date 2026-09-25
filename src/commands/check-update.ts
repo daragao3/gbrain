@@ -213,7 +213,8 @@ export async function runCheckUpdate(args: string[]) {
   if (!release.ok) {
     preserveCacheOnFailedCheck();
     if (json) {
-      console.log(JSON.stringify({
+      // Same channel as the success payload, so a --json consumer reads one stream.
+      await writeStdout(JSON.stringify({
         current_version: VERSION,
         current_source: 'package-json',
         latest_version: '',
@@ -223,7 +224,7 @@ export async function runCheckUpdate(args: string[]) {
         changelog_diff: '',
         published_at: '',
         error: release.reason,
-      }, null, 2));
+      }, null, 2) + '\n');
     } else if (release.reason === 'network_error') {
       console.log(`GBrain ${VERSION} — could not check for updates (network unavailable).`);
     } else {
