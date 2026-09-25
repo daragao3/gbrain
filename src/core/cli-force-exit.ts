@@ -95,6 +95,13 @@ const FLUSH_GUARD_MS = 2_000;
  * Bun.stdout.writer().flush() is a different writer; fs.writeSync(1) is also
  * queued). Staying alive briefly is the ONLY flush. TTY writes are synchronous
  * — no grace needed there.
+ *
+ * EXCEPTION — console.log once the pipe is FULL: aliveness does not flush it.
+ * With the 'error' listener process-cleanup.ts puts on process.stdout, a
+ * console.log that fills the pipe stops at one buffer (64 KiB on Linux) and
+ * the rest never arrives, grace or no grace (measured Bun 1.3.13: a 5s grace
+ * still delivered 65,536 of 560,012 bytes to a reader 1s late). Large
+ * machine-readable output must go through writeStdout (core/stdout-write.ts).
  */
 const FLUSH_GRACE_PIPE_MS = 250;
 

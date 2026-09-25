@@ -9,6 +9,7 @@ import {
   semverLte,
 } from '../core/semver.ts';
 import { readUpdateCache, writeUpdateCache, type UpdateMarker } from '../core/self-upgrade.ts';
+import { writeStdout } from '../core/stdout-write.ts';
 
 /** Best-effort cache write — a read-only ~/.gbrain must never make the check throw. */
 function safeWriteCache(marker: UpdateMarker): void {
@@ -259,7 +260,9 @@ export async function runCheckUpdate(args: string[]) {
   };
 
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    // The changelog diff can run to hundreds of KB; console.log would truncate
+    // it at one pipe buffer for a slow reader (see core/stdout-write.ts).
+    await writeStdout(JSON.stringify(result, null, 2) + '\n');
   } else if (updateAvailable) {
     console.log(`GBrain update available: ${VERSION} → ${latestVersion}`);
     console.log(`Run: ${upgradeCmd}`);
