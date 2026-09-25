@@ -9,6 +9,7 @@ import {
   semverLte,
 } from '../core/semver.ts';
 import { readUpdateCache, writeUpdateCache, type UpdateMarker } from '../core/self-upgrade.ts';
+import { writeStdout } from '../core/stdout-write.ts';
 
 /** Best-effort cache write — a read-only ~/.gbrain must never make the check throw. */
 function safeWriteCache(marker: UpdateMarker): void {
@@ -212,7 +213,8 @@ export async function runCheckUpdate(args: string[]) {
   if (!release.ok) {
     preserveCacheOnFailedCheck();
     if (json) {
-      console.log(JSON.stringify({
+      // Same channel as the success payload, so a --json consumer reads one stream.
+      await writeStdout(JSON.stringify({
         current_version: VERSION,
         current_source: 'package-json',
         latest_version: '',
@@ -222,7 +224,7 @@ export async function runCheckUpdate(args: string[]) {
         changelog_diff: '',
         published_at: '',
         error: release.reason,
-      }, null, 2));
+      }, null, 2) + '\n');
     } else if (release.reason === 'network_error') {
       console.log(`GBrain ${VERSION} — could not check for updates (network unavailable).`);
     } else {
@@ -259,7 +261,9 @@ export async function runCheckUpdate(args: string[]) {
   };
 
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    // The changelog diff can run to hundreds of KB; console.log would truncate
+    // it at one pipe buffer for a slow reader (see core/stdout-write.ts).
+    await writeStdout(JSON.stringify(result, null, 2) + '\n');
   } else if (updateAvailable) {
     console.log(`GBrain update available: ${VERSION} → ${latestVersion}`);
     console.log(`Run: ${upgradeCmd}`);
