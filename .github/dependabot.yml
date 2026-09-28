@@ -1,0 +1,35 @@
+# Dependabot version updates for the two bun-managed packages.
+#
+# Why: the weekly OSV-Scanner workflow (osv-scanner.yml) runs with
+# --fail-on-vuln=true, so every new advisory against a version pinned in
+# bun.lock or admin/bun.lock turns the Monday scheduled run red until someone
+# bumps the lockfile by hand. Weekly version updates keep direct dependencies
+# moving so most advisories are already fixed before the scanner sees them.
+#
+# Limits, so nobody over-trusts this file:
+# - The "bun" ecosystem supports VERSION updates only. Dependabot security
+#   updates (lockfile-only bumps of transitive packages) are not available
+#   for bun lockfiles, so an advisory against a package that is only reached
+#   transitively still needs a manual `bun update <pkg>` in the right
+#   directory. The scheduled OSV run remains the backstop that catches those.
+# - Minor and patch bumps are grouped into one PR per directory per week to
+#   keep review noise down. Major bumps stay as individual PRs.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directories:
+      - "/"
+      - "/admin"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "fix(deps)"
